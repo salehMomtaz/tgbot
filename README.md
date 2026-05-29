@@ -2,7 +2,7 @@
 Beginning of my journy to build my dream python telegram bot, with help from the council of AIs, called MAGI System. 
 
 
-Honorable memebers:
+**Honorable memebers:**
 
 Balthasar(OpenAI GPT5.5),
 
