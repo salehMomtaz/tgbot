@@ -141,12 +141,15 @@ Docker compose
 instagram/tiktok adapters
 
 complete metadata + thumbnail pipeline
+
 admin panel commands (/jobs /stats)
 
 ## Phase 3
 
 file2link streaming با token + Range
+
 telethon stream worker
+
 rate limit + anti abuse
 
 ## Phase 4
