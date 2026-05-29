@@ -2,7 +2,21 @@
 Beginning of my journy to build my dream python telegram bot, with help from the council of AIs, called MAGI System. 
 
 
-Honorable memebers, Balthasar(OpenAI GPT5.5), Casper(DeepSeek V4 Pro), Melchior(Gemini 3.1 Pro), Sibyl System(Claude 4.8 Opus), Bifrost System(Grok 4.1 Fast), Angela Balsac(Minimax M2), Hohenzollern(Kimi 2.5).
+Honorable memebers:
+
+Balthasar(OpenAI GPT5.5),
+
+Casper(DeepSeek V4 Pro), 
+
+Melchior(Gemini 3.1 Pro), 
+
+Sibyl System(Claude 4.8 Opus), 
+
+Bifrost System(Grok 4.1 Fast), 
+
+Angela Balsac(Minimax M2), 
+
+Hohenzollern(Kimi 2.5).
 
 Each member of the council will bare responsibility for a certain section of the bot. 
 
