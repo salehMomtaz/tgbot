@@ -2,7 +2,7 @@ pyrogram
 tgcrypto
 fastapi
 uvicorn
-yt-dlp
+yt-dlp[default]
 ffmpeg-python
 aiofiles
 apscheduler
