@@ -37,7 +37,7 @@ This guide assumes you are starting with a completely fresh Ubuntu VPS.
 
 ### Step 1: Connect to your VPS
 Open a terminal (or Termux on Android) and connect to your server using SSH:
-```bash
+
 ssh root@YOUR_VPS_IP
 *(Replace `YOUR_VPS_IP` with the actual IP address of your VPS server).*
 
@@ -82,10 +82,11 @@ cp config.py.example config.py
 *(If you do not have a template, create a file named `config.py` using `nano config.py`)*.
 
 Edit `config.py` to fill in your real credentials:
-bash
+```
 nano config.py
+```
 Update the fields inside the file:
-python
+```python
 import os
 
 API_ID = 12345678                          # Replace with your Telegram API ID
@@ -100,6 +101,7 @@ DB_FILE = "database.json"
 YT_COOKIES = "ytcookies.txt"
 IG_COOKIES = "igcookies.txt"
 TT_COOKIES = "ttcookies.txt"
+```
 Press `Ctrl+O`, `Enter`, and then `Ctrl+X` to save and exit the nano editor.
 
 ### Step 5: Extract and Add Cookies (Optional but Recommended)
