@@ -1,0 +1,9 @@
+config.py
+database.json
+ytcookies.txt
+igcookies.txt
+ttcookies.txt
+*.session
+*.session-journal
+__pycache__/
+cache/
