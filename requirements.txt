@@ -1,0 +1,8 @@
+pyrogram
+tgcrypto
+fastapi
+uvicorn
+yt-dlp
+ffmpeg-python
+aiofiles
+apscheduler
