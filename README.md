@@ -46,39 +46,48 @@ Run the following commands to purge any old/conflicting packages, set up the off
 
 bash
 # 1. Update system repositories and upgrade existing packages
+```
 apt update && apt upgrade -y
-
+```
 # 2. Remove any conflicting pre-installed container packages
+```
 apt-get remove -y docker docker-engine docker.io containerd runc
-
+```
 # 3. Install necessary system prerequisites
+```
 apt-get install -y ca-certificates curl gnupg lsb-release
-
+```
 # 4. Add the official Docker GPG Key
+```
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
-
+```
 # 5. Set up the official Docker repository
+```
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
+```
 
 # 6. Update repositories and install Docker CE + Git, Nano, and FFmpeg
+```
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin git nano ffmpeg
-
+```
 ### Step 3: Clone the Repository
 Clone your repository to the home directory of your VPS and enter the project folder:
-bash
+
+```bash
 git clone https://github.com/salehMomtaz/tgbot.git
 cd tgbot
-
+```
 ### Step 4: Configure Your Settings
 You need to create your personal configuration file. Make a copy of the example configuration:
-bash
+```bash
 cp config.py.example config.py
+```
 *(If you do not have a template, create a file named `config.py` using `nano config.py`)*.
 
 Edit `config.py` to fill in your real credentials:
@@ -116,13 +125,14 @@ Due to strict rate limits and blocks, extracting cookies from browser sessions h
 
 ### Step 6: Create Package Initialization Files
 Make sure the empty Python configuration files are present so the imports work correctly:
-bash
+```bash
 touch utils/__init__.py modules/__init__.py
-
+```
 ### Step 7: Deploy the Bot Containers
 Build and launch the bot in the background using the Docker Compose plugin:
-bash
+```bash
 docker compose up --build -d
+```
 The `-d` flag tells Docker to run the containers in the background, allowing you to close your terminal session while the bot stays active.
 
 ### Step 8: Verifying and Testing
@@ -133,9 +143,9 @@ The `-d` flag tells Docker to run the containers in the background, allowing you
 5. Send any file to the bot. It should return an HTTP direct-stream URL pointing to your VPS.
 
 To monitor live container logs for issues or errors, run:
-bash
+```bash
 docker compose logs -f --tail=50
-
+```
 ---
 
 ## Managing Your Code with Git
@@ -144,13 +154,15 @@ If you make modifications to your bot's code locally on your phone (using Termux
 
 ### Checking the container status on your VPS
 When updating code, always pull from your GitHub repository and rebuild your container:
-bash
+
 # Pull the latest code updates
+```
 git pull origin main
-
+```
 # Rebuild and restart the container with the new changes
+```
 docker compose up --build -d
-
+```
 ---
 
 ## Security and Privacy Warning
