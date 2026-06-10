@@ -27,7 +27,7 @@ Before starting, ensure you have:
     *   `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org) (required for the underlying Pyrogram engine).
     *   `BOT_TOKEN` created via Telegram's official [@BotFather](https://t.me/BotFather).
     *   Your personal numeric Telegram user ID (which you can find by messaging [@userinfobot](https://t.me/userinfobot)).
-3.  **Docker and Docker Compose** installed on your VPS.
+3.  **Docker and the Docker Compose plugin** installed on your VPS (detailed below).
 
 ---
 
@@ -37,28 +37,52 @@ This guide assumes you are starting with a completely fresh Ubuntu VPS.
 
 ### Step 1: Connect to your VPS
 Open a terminal (or Termux on Android) and connect to your server using SSH:
-```bash
+
 ssh root@YOUR_VPS_IP
-```
 *(Replace `YOUR_VPS_IP` with the actual IP address of your VPS server).*
 
-### Step 2: Update Server and Install Docker
-Run the following commands to update your server packages and install Docker:
-```bash
-# Update system repositories
-apt update && apt upgrade -y
+### Step 2: Update Server and Install Docker (Official Engine)
+Run the following commands to purge any old/conflicting packages, set up the official Docker repository, and install Docker alongside `git`, `nano`, and `ffmpeg`:
 
-# Install Docker and dependency packages
-apt install -y docker.io docker-compose git nano ffmpeg
+bash
+# 1. Update system repositories and upgrade existing packages
+```
+apt update && apt upgrade -y
+```
+# 2. Remove any conflicting pre-installed container packages
+```
+apt-get remove -y docker docker-engine docker.io containerd runc
+```
+# 3. Install necessary system prerequisites
+```
+apt-get install -y ca-certificates curl gnupg lsb-release
+```
+# 4. Add the official Docker GPG Key
+```
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+```
+# 5. Set up the official Docker repository
+```
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
 ```
 
+# 6. Update repositories and install Docker CE + Git, Nano, and FFmpeg
+```
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin git nano ffmpeg
+```
 ### Step 3: Clone the Repository
 Clone your repository to the home directory of your VPS and enter the project folder:
+
 ```bash
 git clone https://github.com/salehMomtaz/tgbot.git
 cd tgbot
 ```
-
 ### Step 4: Configure Your Settings
 You need to create your personal configuration file. Make a copy of the example configuration:
 ```bash
@@ -67,7 +91,7 @@ cp config.py.example config.py
 *(If you do not have a template, create a file named `config.py` using `nano config.py`)*.
 
 Edit `config.py` to fill in your real credentials:
-```bash
+```
 nano config.py
 ```
 Update the fields inside the file:
@@ -104,11 +128,10 @@ Make sure the empty Python configuration files are present so the imports work c
 ```bash
 touch utils/__init__.py modules/__init__.py
 ```
-
 ### Step 7: Deploy the Bot Containers
-Build and launch the bot in the background using Docker Compose:
+Build and launch the bot in the background using the Docker Compose plugin:
 ```bash
-docker-compose up --build -d
+docker compose up --build -d
 ```
 The `-d` flag tells Docker to run the containers in the background, allowing you to close your terminal session while the bot stays active.
 
@@ -121,9 +144,8 @@ The `-d` flag tells Docker to run the containers in the background, allowing you
 
 To monitor live container logs for issues or errors, run:
 ```bash
-docker-compose logs -f --tail=50
+docker compose logs -f --tail=50
 ```
-
 ---
 
 ## Managing Your Code with Git
@@ -132,14 +154,15 @@ If you make modifications to your bot's code locally on your phone (using Termux
 
 ### Checking the container status on your VPS
 When updating code, always pull from your GitHub repository and rebuild your container:
-```bash
+
 # Pull the latest code updates
-git pull origin main
-
-# Rebuild and restart the container with the new changes
-docker-compose up --build -d
 ```
-
+git pull origin main
+```
+# Rebuild and restart the container with the new changes
+```
+docker compose up --build -d
+```
 ---
 
 ## Security and Privacy Warning
