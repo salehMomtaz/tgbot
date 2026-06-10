@@ -1,11 +1,12 @@
 import os
 import subprocess
+import time
+import asyncio
 import yt_dlp
 import ffmpeg
 import config
 
 def get_cookies_for_url(url: str) -> str | None:
-    """Return the correct cookie path based on the domain."""
     url_lower = url.lower()
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
         return config.YT_COOKIES if os.path.exists(config.YT_COOKIES) else None
@@ -15,8 +16,16 @@ def get_cookies_for_url(url: str) -> str | None:
         return config.TT_COOKIES if os.path.exists(config.TT_COOKIES) else None
     return None
 
+def format_size_short(size_bytes: int) -> str:
+    """Format file size into short strings to prevent glass button text cuts."""
+    if size_bytes <= 0:
+        return "??"
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb >= 1024:
+        return f"{round(size_mb / 1024, 1)}G"
+    return f"{int(size_mb)}M"
+
 def extract_formats(url: str) -> dict:
-    """Extract format details and separate into sorted video and audio catalogs."""
     cookie_path = get_cookies_for_url(url)
     
     ydl_opts = {
@@ -37,37 +46,38 @@ def extract_formats(url: str) -> dict:
     audio_options = []
 
     for fmt in formats:
-        # Check if it has a file size estimate
         size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
-        size_mb = round(size / (1024 * 1024), 1) if size > 0 else "Unknown Size"
+        size_str = format_size_short(size)
         
-        # Audio extraction filter
+        # Audio Extraction
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
             ext = fmt.get('ext', 'm4a')
-            abr = fmt.get('abr') or 0  # Audio bitrate
+            abr = fmt.get('abr') or 0
             audio_options.append({
                 'format_id': fmt['format_id'],
-                'quality': f"{int(abr)}kbps {ext}",
-                'size_mb': size_mb,
+                'quality': f"{int(abr)}k",
+                'size_str': size_str,
+                'bytes': size,
                 'bitrate': abr
             })
             
-        # Video extraction filter (We prioritize merged/standard videos containing audio)
+        # Video Extraction
         elif fmt.get('vcodec') != 'none':
             resolution = fmt.get('height')
             if resolution:
+                # Add warning flag if size exceeds Telegram's 2GB Bot upload limit
+                warn_flag = " ⚠️" if size > (2000 * 1024 * 1024) else ""
                 video_options.append({
                     'format_id': fmt['format_id'],
                     'quality': f"{resolution}p",
-                    'size_mb': size_mb,
+                    'size_str': f"{size_str}{warn_flag}",
+                    'bytes': size,
                     'height': resolution
                 })
 
-    # Sort video by resolution (descending) and audio by bitrate (descending)
     video_options = sorted(video_options, key=lambda x: x['height'], reverse=True)
     audio_options = sorted(audio_options, key=lambda x: x['bitrate'], reverse=True)
 
-    # De-duplicate entries (keep only the best file size for duplicate resolution/bitrates)
     unique_videos = []
     seen_heights = set()
     for v in video_options:
@@ -86,12 +96,11 @@ def extract_formats(url: str) -> dict:
         'title': info.get('title', 'Unknown Title'),
         'duration': info.get('duration', 0),
         'thumbnail': info.get('thumbnail'),
-        'videos': unique_videos[:5], # Limit to top 5 qualities for clean button grids
+        'videos': unique_videos[:5],
         'audios': unique_audios[:5]
     }
 
 def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
-    """Uses FFmpeg to crop and pad the thumbnail into a standard 320x320 black-padded square JPEG."""
     output_path = f"cache/{cache_id}_thumb.jpg"
     try:
         cmd = [
@@ -103,11 +112,9 @@ def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         return output_path
     except Exception:
-        # Fallback to copy/rename if ffmpeg scaling fails
         return input_path
 
 def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
-    """Return (width, height, duration) of the media file using ffmpeg probe."""
     try:
         probe = ffmpeg.probe(file_path)
         video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
@@ -120,8 +127,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
     except Exception:
         return 320, 320, 0
 
-def download_media(url: str, format_id: str, format_type: str, cache_id: str) -> dict:
-    """Download the file using cookies, postprocess it, and extract thumbnails."""
+def download_media(url: str, format_id: str, format_type: str, cache_id: str, progress_fn=None) -> dict:
     os.makedirs("cache", exist_ok=True)
     out_tmpl = f"cache/{cache_id}_%(title)s.%(ext)s"
     cookie_path = get_cookies_for_url(url)
@@ -135,11 +141,9 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str) ->
         ydl_opts['cookiefile'] = cookie_path
         
     if format_type == 'v':
-        # YouTube splits high-quality streams. We must merge the chosen video stream with bestaudio
         ydl_opts['format'] = f"{format_id}+bestaudio/best"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
-        # Convert audio to MP3
         ydl_opts['format'] = format_id
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -149,11 +153,19 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str) ->
 
     ydl_opts['writethumbnail'] = True
     
+    # Connect yt-dlp's downloader hook to our async progress reporter
+    if progress_fn:
+        def ytdl_hook(d):
+            if d['status'] == 'downloading':
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                progress_fn(downloaded, total)
+        ydl_opts['progress_hooks'] = [ytdl_hook]
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         
-        # Correct local paths post conversion
         if format_type == 'a':
             base, _ = os.path.splitext(filename)
             filename = f"{base}.mp3"
@@ -165,7 +177,6 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str) ->
                 elif os.path.exists(f"{base}.mkv"):
                     filename = f"{base}.mkv"
 
-        # Search for saved thumbnails
         base_path, _ = os.path.splitext(filename)
         thumb_path = None
         for ext in ['.jpg', '.jpeg', '.png', '.webp']:
