@@ -4,5 +4,6 @@ fastapi
 uvicorn
 yt-dlp[default]
 ffmpeg-python
+aiohttp
 aiofiles
 apscheduler
