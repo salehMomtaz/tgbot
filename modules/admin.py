@@ -1,5 +1,5 @@
 # modules/admin.py
-from pyrogram import Client, filters
+from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import (
     CallbackQuery, 
     Message, 
@@ -26,6 +26,46 @@ def register_admin_handlers(app: Client):
     # Global reusable "Back to Console" markup
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
 
+    # =========================================================================
+    # 1. Standard Private Text Router (Handles /start and console text triggers)
+    # =========================================================================
+    @app.on_message(filters.text & filters.private)
+    async def admin_start_text_handler(client: Client, message: Message):
+        text = message.text.strip()
+        user_id = message.from_user.id
+        
+        # Check if the incoming message is a link
+        from modules.downloader_handler import is_link
+        if is_link(text):
+            # Tell Pyrogram to bypass this handler and pass the link downstream to downloader_handler
+            raise ContinuePropagation()
+            
+        # If it is not a link, process standard commands and console requests
+        if user_id == config.SYSTEM_CREATOR_ID:
+            doc_status = "🟢" if is_document_mode(user_id) else "🔴"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
+                [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
+                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
+                [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+            ])
+            await message.reply_text(
+                f"🛠 **Admin System Console**\nChoose an administrative action below:",
+                reply_markup=keyboard
+            )
+        else:
+            # Standard authorized user warm greeting
+            await message.reply_text(
+                "👋 **Hello! Welcome to your Private Downloader Bot.**\n\n"
+                "To get started:\n"
+                "• Send me any YouTube, Instagram, TikTok, or X/Twitter link to download it.\n"
+                "• Send me any direct file URL to upload it directly to Telegram.\n"
+                "• Forward me a Telegram file (video, document, music) to generate an instant direct stream link."
+            )
+
+    # =========================================================================
+    # 2. Callback Query Handler (Handles inline buttons)
+    # =========================================================================
     @app.on_callback_query(filters.regex(r"^admin_"))
     async def admin_callback_handler(client: Client, callback_query: CallbackQuery):
         data = callback_query.data
@@ -120,7 +160,9 @@ def register_admin_handlers(app: Client):
             )
             await callback_query.answer()
 
-    # Reply Message Handler: Handles ForceReply text inputs from Admin
+    # =========================================================================
+    # 3. ForceReply Message Handler (Handles whitelist/ban text inputs)
+    # =========================================================================
     @app.on_message(filters.reply & filters.private)
     async def admin_input_handler(client: Client, message: Message):
         if message.from_user.id != config.SYSTEM_CREATOR_ID:
