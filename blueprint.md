@@ -19,7 +19,7 @@ tgbot/
 ├── igcookies.txt          # Instagram cookies
 ├── ttcookies.txt          # TikTok cookies
 ├── xcookies.txt           # X/Twitter cookies for restricted content
-├── main.py                # App entry point, dual-client bootstrap, and core handlers
+├── main.py                # [UPDATED] App entry point, dual-client bootstrap, queue dispatcher, and core handlers
 └── utils/
     ├── __init__.py
     ├── gate.py            # [UPDATED] Security Access Control (with auto-blacklist & settings registry)
@@ -38,4 +38,4 @@ tgbot/
 - [x] **Phase 4: Format Grid Selector & Metadata Embedder** (Metadata packing, compact layouts, and ffmpeg probing integrated in `utils/downloader.py`)
 - [x] **Phase 5: FastAPI Stream Bridge** (Streaming file link generator with 24-hour validity checks written in `modules/stream_handler.py`)
 - [x] **Phase 6: Active Job Queue & Event Logs** (Synthesized queue implementation written in `utils/queue_manager.py`)
-- [ ] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (In Progress)
+- [x] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (On-demand sequential chunking generator implemented in `utils/downloader.py` and dual-client uploader loop resolved in `main.py`)
