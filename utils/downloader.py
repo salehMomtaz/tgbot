@@ -1,12 +1,11 @@
 import os
 import subprocess
-import time
-import asyncio
 import yt_dlp
 import ffmpeg
 import config
 
 def get_cookies_for_url(url: str) -> str | None:
+    """Return the correct cookie path based on the domain."""
     url_lower = url.lower()
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
         return config.YT_COOKIES if os.path.exists(config.YT_COOKIES) else None
@@ -14,10 +13,44 @@ def get_cookies_for_url(url: str) -> str | None:
         return config.IG_COOKIES if os.path.exists(config.IG_COOKIES) else None
     elif "tiktok.com" in url_lower:
         return config.TT_COOKIES if os.path.exists(config.TT_COOKIES) else None
+    elif "twitter.com" in url_lower or "x.com" in url_lower:
+        return config.X_COOKIES if os.path.exists(config.X_COOKIES) else None
     return None
 
+def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
+    """Estimates the file size of a format in bytes using bitrate or resolution mappings."""
+    # 1. Direct size reading
+    size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+    if size > 0:
+        return size
+        
+    # 2. Bitrate-based estimate (Duration * Total Bitrate / 8)
+    tbr = fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr') or 0
+    if tbr > 0 and duration_seconds > 0:
+        return int((duration_seconds * (tbr * 1000)) / 8)
+        
+    # 3. Resolution mapping (failsafe fallback per minute of stream)
+    height = fmt.get('height')
+    if duration_seconds > 0:
+        duration_minutes = duration_seconds / 60
+        if height:
+            if height >= 1080:
+                mb_per_min = 15
+            elif height >= 720:
+                mb_per_min = 8
+            elif height >= 480:
+                mb_per_min = 4
+            else:
+                mb_per_min = 2
+        else:
+            mb_per_min = 1.5  # Audio track fallback
+            
+        return int(duration_minutes * mb_per_min * 1024 * 1024)
+        
+    return 0
+
 def format_size_short(size_bytes: int) -> str:
-    """Format file size into short strings to prevent glass button text cuts."""
+    """Format file size into short, compact strings to prevent glass button text cuts."""
     if size_bytes <= 0:
         return "??"
     size_mb = size_bytes / (1024 * 1024)
@@ -26,6 +59,7 @@ def format_size_short(size_bytes: int) -> str:
     return f"{int(size_mb)}M"
 
 def extract_formats(url: str) -> dict:
+    """Extract format details and separate into sorted video and audio catalogs."""
     cookie_path = get_cookies_for_url(url)
     
     ydl_opts = {
@@ -41,12 +75,14 @@ def extract_formats(url: str) -> dict:
         except Exception as e:
             raise RuntimeError(f"Extraction failed: {str(e)}")
 
+    duration_seconds = info.get('duration', 0)
     formats = info.get('formats', [])
     video_options = []
     audio_options = []
 
     for fmt in formats:
-        size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
+        # Compute exact or estimated size
+        size = estimate_format_size(fmt, duration_seconds)
         size_str = format_size_short(size)
         
         # Audio Extraction
@@ -94,13 +130,14 @@ def extract_formats(url: str) -> dict:
 
     return {
         'title': info.get('title', 'Unknown Title'),
-        'duration': info.get('duration', 0),
+        'duration': duration_seconds,
         'thumbnail': info.get('thumbnail'),
-        'videos': unique_videos[:5],
+        'videos': unique_videos[:5], # Limit to top 5 qualities
         'audios': unique_audios[:5]
     }
 
 def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
+    """Uses FFmpeg to crop and pad the thumbnail into a standard 320x320 black-padded square JPEG."""
     output_path = f"cache/{cache_id}_thumb.jpg"
     try:
         cmd = [
@@ -115,6 +152,7 @@ def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
         return input_path
 
 def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
+    """Return (width, height, duration) of the media file using ffmpeg probe."""
     try:
         probe = ffmpeg.probe(file_path)
         video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
@@ -128,6 +166,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 def download_media(url: str, format_id: str, format_type: str, cache_id: str, progress_fn=None) -> dict:
+    """Download the file using cookies, postprocess it, and extract thumbnails."""
     os.makedirs("cache", exist_ok=True)
     out_tmpl = f"cache/{cache_id}_%(title)s.%(ext)s"
     cookie_path = get_cookies_for_url(url)
@@ -141,9 +180,11 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
         ydl_opts['cookiefile'] = cookie_path
         
     if format_type == 'v':
+        # Merge selected format with bestaudio and output strictly as mp4
         ydl_opts['format'] = f"{format_id}+bestaudio/best"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
+        # Convert audio to MP3
         ydl_opts['format'] = format_id
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -153,7 +194,7 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
 
     ydl_opts['writethumbnail'] = True
     
-    # Connect yt-dlp's downloader hook to our async progress reporter
+    # Progress hook trigger
     if progress_fn:
         def ytdl_hook(d):
             if d['status'] == 'downloading':
@@ -166,6 +207,7 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         
+        # Adjust file names for postprocessors
         if format_type == 'a':
             base, _ = os.path.splitext(filename)
             filename = f"{base}.mp3"
@@ -177,6 +219,7 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
                 elif os.path.exists(f"{base}.mkv"):
                     filename = f"{base}.mkv"
 
+        # Search for saved thumbnails
         base_path, _ = os.path.splitext(filename)
         thumb_path = None
         for ext in ['.jpg', '.jpeg', '.png', '.webp']:
@@ -196,3 +239,51 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
             'duration': info.get('duration', 0),
             'uploader': info.get('uploader', 'Unknown Artist')
         }
+
+def split_file_generator(file_path: str, max_chunk_size_bytes: int):
+    """
+    On-Demand sequential splitter:
+    Yields paths of split binary parts one-by-one, allowing the main engine 
+    to upload a part and immediately delete it before splitting the next.
+    Caps extra disk space to just ONE part (max 2GB or 4GB) instead of duplicating storage.
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+        
+    file_size = os.path.getsize(file_path)
+    
+    # If the file fits in one chunk, yield the original file and stop
+    if file_size <= max_chunk_size_bytes:
+        yield file_path
+        return
+        
+    num_chunks = (file_size + max_chunk_size_bytes - 1) // max_chunk_size_bytes
+    dir_name = os.path.dirname(file_path)
+    basename = os.path.basename(file_path)
+    
+    # Standard 1MB buffer to prevent RAM exhaustion
+    BUFFER_SIZE = min(1024 * 1024, max_chunk_size_bytes)
+    
+    with open(file_path, "rb") as f_in:
+        for part_num in range(1, num_chunks + 1):
+            part_path = os.path.join(dir_name, f"{basename}.{part_num:03d}")
+            bytes_remaining = max_chunk_size_bytes
+            
+            try:
+                with open(part_path, "wb") as f_out:
+                    while bytes_remaining > 0:
+                        to_read = min(BUFFER_SIZE, bytes_remaining)
+                        chunk = f_in.read(to_read)
+                        if not chunk:
+                            break
+                        f_out.write(chunk)
+                        bytes_remaining -= len(chunk)
+                        
+                # Yield the path to main.py to upload and delete
+                yield part_path
+                
+            except Exception as e:
+                # Cleanup part if split writing fails halfway
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+                raise e
