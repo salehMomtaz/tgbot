@@ -52,7 +52,7 @@ if config.PREMIUM_STRING_SESSION:
 async def log_event(text: str):
     """Log an event locally and pipe to private Telegram channel if configured."""
     print(f"[LOG] {text}")
-    if config.LOG_CHANNEL_ID != 0:
+    if config.LOG_CHANNEL_ID != 0 and app.is_connected:
         try:
             await app.send_message(
                 chat_id=config.LOG_CHANNEL_ID,
