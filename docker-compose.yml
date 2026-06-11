@@ -9,5 +9,6 @@ services:
       - "8080:8080"
     volumes:
       - .:/app
+      - /etc/letsencrypt:/etc/letsencrypt:ro  # Mount certificates as read-only!
     environment:
-      - PYTHONUNBUFFERED=1
+      - PYTHONUNBUFFE`RED=1
