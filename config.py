@@ -26,3 +26,8 @@ YT_COOKIES = "ytcookies.txt"
 IG_COOKIES = "igcookies.txt"
 TT_COOKIES = "ttcookies.txt"
 X_COOKIES = "xcookies.txt"
+
+# SSL Certificate Paths (Optional: Leave empty "" to run over standard HTTP on port 8080)
+# If provided, Uvicorn will natively host your streaming links over secure HTTPS
+SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "")
+SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "")
