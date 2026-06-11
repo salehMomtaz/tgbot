@@ -20,28 +20,28 @@ tgbot/
 ├── ttcookies.txt          # TikTok cookies
 ├── xcookies.txt           # X/Twitter cookies for restricted content
 ├── cookies.txt            # Fallback global cookies for all other sites
-├── main.py                # Tiny, clean app bootstrap and client initializer
+├── main.py                # [UPDATED] Tiny, clean app bootstrap and client initializer
 └── utils/
     ├── __init__.py
     ├── gate.py            # Security Access Control (with settings registry)
     ├── downloader.py      # Format extractor (with smart size fallbacks), ffmpeg prober & On-Demand splitter
     ├── queue_manager.py   # Synthesized non-blocking, serializing task queue manager
-    ├── id_validator.py    # [ADDED] Handles digit checks and Telegram ID boundary verification
-    ├── uploader_handler.py# [ADDED] Isolated "Toyota Just-In-Time" sequential split uploader
+    ├── id_validator.py    # Handles digit checks and Telegram ID boundary verification
+    ├── uploader_handler.py# Isolated "Toyota Just-In-Time" sequential split uploader
     └── updater.py         # 6-hour automatic pre-release yt-dlp patcher
 └── modules/
     ├── __init__.py
-    ├── admin.py           # Admin Callback Console (Whitelist, Blacklist bans, Settings)
-    ├── downloader_handler.py # Link and direct file URL queue worker
-    ├── stream_interceptor.py # Telegram file-to-stream link generator
+    ├── admin.py           # Polished, secure Admin Callback Console with input verification
+    ├── downloader_handler.py # Link and direct file URL queue worker (with prefix stripper & custom naming)
+    ├── stream_interceptor.py # [ADDED] Telegram file-to-stream link generator (with 24h validity checks)
     └── stream_handler.py  # FastAPI Server Stream Bridge (with 24-hour token check)
 ```
 
 ## 🛠 Progress Log
 - [x] **Phase 1: Base Docker & Environment Setup**
-- [x] **Phase 2: Security Gate & Admin Console** (Input ID validator written in `utils/id_validator.py`)
+- [x] **Phase 2: Security Gate & Admin Console** (Polished admin console with database boundaries written in `modules/admin.py`)
 - [x] **Phase 3: yt-dlp Extractor & Dynamic Sizing**
-- [x] **Phase 4: Format Grid Selector & Metadata Embedder**
-- [x] **Phase 5: FastAPI Stream Bridge**
-- [x] **Phase 6: Active Job Queue & Event Logs**
-- [x] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (Uploader isolated in `utils/uploader_handler.py`)
+- [x] **Phase 4: Format Grid Selector & Metadata Embedder** (Renaming, custom names, and metadata routines implemented in `modules/downloader_handler.py`)
+- [x] **Phase 5: FastAPI Stream Bridge** (Streaming file link generator with 24-hour validity checks written in `modules/stream_handler.py`)
+- [x] **Phase 6: Active Job Queue & Event Logs** (Queue is live and handles sequential flow natively)
+- [x] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (On-demand sequential chunking generator implemented in `utils/downloader.py` and dual-client uploader loop resolved in `main.py`)
