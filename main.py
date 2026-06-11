@@ -5,12 +5,13 @@ import asyncio
 import urllib.parse
 import aiohttp
 import uvicorn
-from pyrogram import Client, filters
+from pyrogram import Client, filters, utils
 from pyrogram.types import (
     Message, 
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
-    CallbackQuery
+    CallbackQuery,
+    ForceReply
 )
 import config
 from utils.gate import (
@@ -26,12 +27,28 @@ from utils.gate import (
 )
 from utils.queue_manager import DownloadQueue
 
-# Instantiate our synthesized non-blocking task queue
+# =========================================================================
+# Monkey-Patch: Resolves Pyrogram's internal 'Peer id invalid' Channel Bug
+# =========================================================================
+def get_peer_type_patched(peer_id: int) -> str:
+    peer_id_str = str(peer_id)
+    if not peer_id_str.startswith("-"):
+        return "user"
+    elif peer_id_str.startswith("-100"):
+        return "channel"
+    else:
+        return "chat"
+
+utils.get_peer_type = get_peer_type_patched
+
+# =========================================================================
+# Application Initializations
+# =========================================================================
+
 queue = DownloadQueue()
 DOWNLOAD_CACHE = {}
 LAST_UPDATE_TIME = {}
 
-# Initialize dual-client structure
 app = Client(
     "media_bot",
     api_id=config.API_ID,
@@ -47,6 +64,14 @@ if config.PREMIUM_STRING_SESSION:
         api_hash=config.API_HASH,
         session_string=config.PREMIUM_STRING_SESSION
     )
+
+def is_link(text: str) -> bool:
+    return text.startswith("http://") or text.startswith("https://")
+
+def is_social_media_link(url: str) -> bool:
+    url_lower = url.lower()
+    social_domains = ["youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com"]
+    return any(domain in url_lower for domain in social_domains)
 
 async def log_event(text: str):
     """Log an event locally and pipe to private Telegram channel if configured."""
@@ -254,17 +279,15 @@ async def text_handler(client: Client, message: Message):
     
     # Creator Admin Interface triggered directly inside chat
     if user_id == config.SYSTEM_CREATOR_ID and not is_link(text):
+        doc_status = "🟢" if is_document_mode(user_id) else "🔴"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
             [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-            [InlineKeyboardButton("📄 Toggle Doc Mode", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
+            [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
             [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
         ])
-        doc_status = "ON" if is_document_mode(user_id) else "OFF"
         await message.reply_text(
-            f"🛠 **Admin System Console**\n"
-            f"📄 Document Mode status: **{doc_status}**\n\n"
-            f"Choose an administrative action below:",
+            f"🛠 **Admin System Console**\nChoose an administrative action below:",
             reply_markup=keyboard
         )
         return
@@ -442,20 +465,18 @@ async def callback_dispatcher(client: Client, callback_query: CallbackQuery):
             
         elif data == "admin_toggle_doc":
             state = toggle_document_mode(user_id)
-            status_str = "ON" if state else "OFF"
-            await callback_query.answer(f"📄 Document Mode toggled {status_str}.", show_alert=True)
+            status_str = "🟢" if state else "🔴"
+            await callback_query.answer(f"📄 Document Mode toggled to {status_str}.", show_alert=True)
             await log_event(f"⚙️ **Admin Action:** Document Mode toggled to {status_str}.")
             # Edit console message to reflect state change
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-                [InlineKeyboardButton("📄 Toggle Doc Mode", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
+                [InlineKeyboardButton(f"📄 Doc Mode: {status_str}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
                 [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
             ])
             await callback_query.message.edit_text(
-                f"🛠 **Admin System Console**\n"
-                f"📄 Document Mode status: **{status_str}**\n\n"
-                f"Choose an administrative action below:",
+                f"🛠 **Admin System Console**\nChoose an administrative action below:",
                 reply_markup=keyboard
             )
             
@@ -483,22 +504,20 @@ async def callback_dispatcher(client: Client, callback_query: CallbackQuery):
             await client.send_message(
                 chat_id=user_id,
                 text="Please reply to this message with the numerical ID of the blocked user you want to unban.",
-                reply_markup=pyrogram.types.ForceReply(placeholder="e.g. 123456789")
+                reply_markup=ForceReply(placeholder="e.g. 123456789")
             )
             await callback_query.answer()
             
         elif data == "admin_main":
+            doc_status = "🟢" if is_document_mode(user_id) else "🔴"
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-                [InlineKeyboardButton("📄 Toggle Doc Mode", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
+                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
                 [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
             ])
-            doc_status = "ON" if is_document_mode(user_id) else "OFF"
             await callback_query.message.edit_text(
-                f"🛠 **Admin System Console**\n"
-                f"📄 Document Mode status: **{doc_status}**\n\n"
-                f"Choose an administrative action below:",
+                f"🛠 **Admin System Console**\nChoose an administrative action below:",
                 reply_markup=keyboard
             )
             await callback_query.answer()
@@ -509,7 +528,7 @@ async def callback_dispatcher(client: Client, callback_query: CallbackQuery):
             await client.send_message(
                 chat_id=user_id,
                 text=f"Please reply to this message with the numerical ID of the user you want to {action_text}.",
-                reply_markup=pyrogram.types.ForceReply(placeholder="e.g. 123456789")
+                reply_markup=ForceReply(placeholder="e.g. 123456789")
             )
             await callback_query.answer()
 
@@ -652,10 +671,8 @@ async def main():
     from utils.updater import auto_update_ytdlp
     
     # Run FastAPI web server and the 6-hour yt-dlp nightly updater concurrently
-    await asyncio.gather(
-        server.serve(),
-        auto_update_ytdlp()
-    )
+    await asyncio.get_event_loop().create_task(server.serve())
+    await asyncio.get_event_loop().create_task(auto_update_ytdlp())
 
 if __name__ == "__main__":
     import sys
