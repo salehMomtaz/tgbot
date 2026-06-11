@@ -13,7 +13,7 @@ tgbot/
 ├── docker-compose.yml
 ├── requirements.txt
 ├── config.py              # [UPDATED] Holds log channel and Premium keys
-├── generate_session.py    # Local utility script to generate Pyrogram Userbot keys
+├── generate_session.py    # [FIXED] Local utility script to generate Pyrogram Userbot keys
 ├── database.json          # Whitelisted, blacklisted, and setting registries
 ├── ytcookies.txt          # YouTube cookies
 ├── igcookies.txt          # Instagram cookies

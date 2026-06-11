@@ -11,7 +11,7 @@ async def main():
     print("it into config.py to enable 4GB uploads.\n")
     
     api_id = int(input("Enter your API ID (from my.telegram.org): ").strip())
-    api_hash = input("Enter your API Hash (from my.telegram.org): ").strip())
+    api_hash = input("Enter your API Hash (from my.telegram.org): ").strip()
     
     # We start a temporary, in-memory client to generate the key
     async with Client(":memory:", api_id=api_id, api_hash=api_hash) as app:
