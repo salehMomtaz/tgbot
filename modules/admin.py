@@ -6,8 +6,7 @@ from pyrogram.types import (
     CallbackQuery, 
     Message, 
     InlineKeyboardMarkup, 
-    InlineKeyboardButton, 
-    ForceReply
+    InlineKeyboardButton
 )
 import config
 from utils.gate import (
@@ -19,7 +18,7 @@ from utils.gate import (
     toggle_document_mode,
     is_blacklisted,
     blacklist_user,
-    is_authorized  # Fixed: Imported missing auth gate helper
+    is_authorized
 )
 from utils.id_validator import is_valid_telegram_id
 
@@ -32,26 +31,19 @@ COOKIE_MAP = {
     "cookies": "cookies.txt"
 }
 
-# In-memory registry to track and delete active ForceReply prompts on cancel or success
-ACTIVE_PROMPTS = {}
+# In-memory dictionary to track administrative states per user
+# Structure: { user_id: "state_string" }
+USER_STATES = {}
 
 def register_admin_handlers(app: Client):
     
     from main import log_event, queue
 
+    # Global reusable "Back to Console" markup
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
 
-    async def purge_active_prompt(user_id: int, client: Client):
-        """Helper to safely delete any active ForceReply prompt bubble from the chat stream."""
-        prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
-        if prompt_id:
-            try:
-                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
-            except Exception:
-                pass
-
     # =========================================================================
-    # 0. Global Interceptor Gate (Completely modularized out of main.py)
+    # Group -1: Global Interceptor Gate (Strict Security Shield)
     # =========================================================================
     @app.on_message(filters.private, group=-1)
     async def security_gate(client: Client, message: Message):
@@ -68,15 +60,126 @@ def register_admin_handlers(app: Client):
             message.stop_propagation()
 
     # =========================================================================
-    # 1. Standard Private Text Router (Handles /start and console text triggers)
+    # Group 0: State Machine Handler (Processes text inputs without replies)
     # =========================================================================
-    @app.on_message(filters.text & filters.private)
+    @app.on_message(filters.text & filters.private, group=0)
+    async def admin_state_message_handler(client: Client, message: Message):
+        user_id = message.from_user.id
+        if user_id != config.SYSTEM_CREATOR_ID:
+            return
+            
+        state = USER_STATES.get(user_id)
+        if not state:
+            # Let the message propagate to the standard text handlers in Group 1
+            return
+            
+        input_text = message.text.strip()
+        
+        # User Failsafe: If they are in a state but send start/console, clear state and open console
+        if input_text.lower() in ["/start", "🛠 console", "hey", "console", "hi!"]:
+            USER_STATES.pop(user_id, None)
+            return  # Let the propagation pass to Group 1
+            
+        # 1. Handle Cookie Replacement State
+        if state.startswith("waiting_for_replace_"):
+            USER_STATES.pop(user_id, None)
+            cookie_key = state.split("waiting_for_replace_")[1]
+            file_path = COOKIE_MAP.get(cookie_key)
+            
+            if not file_path:
+                await message.reply_text("❌ Error: Invalid cookie profile selected.", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+                
+            # Prepend Netscape headers automatically if missing
+            final_content = input_text
+            if not input_text.startswith("# Netscape"):
+                final_content = f"# Netscape HTTP Cookie File\n{input_text}"
+                
+            try:
+                with open(file_path, "w") as f:
+                    f.write(final_content)
+                await message.reply_text(f"✅ `{cookie_key}.txt` successfully replaced!", reply_markup=back_markup)
+                await log_event(f"🍪 **Admin Action:** Cookie profile `{cookie_key}.txt` was replaced via chat interface.")
+            except Exception as e:
+                await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
+            
+            message.stop_propagation()
+            return
+
+        # 2. Handle User ID Input States (Add, Remove, Unban)
+        if not is_valid_telegram_id(input_text):
+            USER_STATES.pop(user_id, None)
+            await message.reply_text(
+                "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",
+                reply_markup=back_markup
+            )
+            message.stop_propagation()
+            return
+            
+        target_id = int(input_text)
+        USER_STATES.pop(user_id, None)  # Reset state on entry
+        
+        if state == "waiting_for_add_user":
+            if add_user(target_id):
+                await message.reply_text(
+                    f"✅ User `{target_id}` has been authorized successfully.",
+                    reply_markup=back_markup
+                )
+                await log_event(f"👥 **User Whitelisted:** Creator whitelisted User ID `{target_id}`.")
+            else:
+                await message.reply_text(
+                    f"ℹ️ User `{target_id}` was already authorized.",
+                    reply_markup=back_markup
+                )
+                
+        elif state == "waiting_for_remove_user":
+            db = load_database()
+            if target_id not in db["authorized"]:
+                await message.reply_text(
+                    f"❌ Error: User ID `{target_id}` is not currently authorized.",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+                
+            if remove_user(target_id):
+                await message.reply_text(
+                    f"✅ User `{target_id}` has been removed.",
+                    reply_markup=back_markup
+                )
+                await log_event(f"👥 **User Revoked:** Creator removed User ID `{target_id}`.")
+                
+        elif state == "waiting_for_unban":
+            db = load_database()
+            if target_id not in db["blacklisted"]:
+                await message.reply_text(
+                    f"❌ Error: User ID `{target_id}` is not found in the blacklist.",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+                
+            if unblacklist_user(target_id):
+                await message.reply_text(
+                    f"✅ User `{target_id}` has been unbanned.",
+                    reply_markup=back_markup
+                )
+                await log_event(f"🔓 **User Unbanned:** Creator unbanned and unblacklisted User ID `{target_id}`.")
+                
+        message.stop_propagation()
+
+    # =========================================================================
+    # Group 1: Main Text Router (Handles Commands and greetings)
+    # =========================================================================
+    @app.on_message(filters.text & filters.private, group=1)
     async def admin_start_text_handler(client: Client, message: Message):
         text = message.text.strip()
         user_id = message.from_user.id
         
         from modules.downloader_handler import is_link
         if is_link(text):
+            # Pass link down to downloader_handler
             raise ContinuePropagation()
             
         if user_id == config.SYSTEM_CREATOR_ID:
@@ -99,9 +202,10 @@ def register_admin_handlers(app: Client):
                 "• Send me any direct file URL to upload it directly to Telegram.\n"
                 "• Forward me a Telegram file (video, document, music) to generate an instant direct stream link."
             )
+        message.stop_propagation()
 
     # =========================================================================
-    # 2. Callback Query Handler (Handles inline buttons)
+    # Group 2: Callback Query Dispatcher (Console clicks)
     # =========================================================================
     @app.on_callback_query(filters.regex(r"^admin_"))
     async def admin_callback_handler(client: Client, callback_query: CallbackQuery):
@@ -113,24 +217,16 @@ def register_admin_handlers(app: Client):
             return
             
         if data == "admin_close":
-            await purge_active_prompt(user_id, client)
+            USER_STATES.pop(user_id, None)
             await callback_query.message.delete()
             await callback_query.answer("Console closed.")
             
-        elif data == "admin_abort_queue":
-            queue_len = len(queue._pending)
-            queue._pending.clear()
-            queue._active = False
-            
-            if os.path.exists("cache"):
-                try:
-                    shutil.rmtree("cache")
-                    os.makedirs("cache", exist_ok=True)
-                except Exception:
-                    pass
-                    
-            await callback_query.answer("💥 System Reset: All queue jobs aborted and cache purged!", show_alert=True)
-            await log_event(f"💥 **Admin Action:** Queue reset executed. {queue_len} pending jobs aborted.")
+        elif data == "admin_clear_streams":
+            from modules.stream_handler import STREAM_CACHE
+            cleared_count = len(STREAM_CACHE)
+            STREAM_CACHE.clear()
+            await callback_query.answer(f"🧹 Cleared all {cleared_count} active stream states.", show_alert=True)
+            await log_event("🧹 **Admin Action:** All active stream links cleared from cache.")
             
         elif data == "admin_toggle_doc":
             state = toggle_document_mode(user_id)
@@ -173,25 +269,15 @@ def register_admin_handlers(app: Client):
             await callback_query.answer()
             
         elif data == "admin_unban":
-            await callback_query.message.delete()
-            prompt = await client.send_message(
-                chat_id=user_id,
-                text="Please reply to this message with the numerical ID of the blocked user you want to unban.",
-                reply_markup=ForceReply(placeholder="e.g. 123456789")
-            )
-            # Store the prompt ID for safe dynamic cleanup
-            ACTIVE_PROMPTS[user_id] = prompt.id
-            
-            await client.send_message(
-                chat_id=user_id,
-                text="Or cancel the operation using the button below:",
+            USER_STATES[user_id] = "waiting_for_unban"
+            await callback_query.message.edit_text(
+                "🔓 **Unban User**\nPlease type the numerical ID of the blocked user you want to unban:",
                 reply_markup=back_markup
             )
             await callback_query.answer()
             
         elif data == "admin_main":
-            # Purge any stranded prompt bubbles on cancel or return
-            await purge_active_prompt(user_id, client)
+            USER_STATES.pop(user_id, None)  # Safe reset state on menu return
             
             doc_status = "✅" if is_document_mode(user_id) else "❌"
             keyboard = InlineKeyboardMarkup([
@@ -206,19 +292,18 @@ def register_admin_handlers(app: Client):
             )
             await callback_query.answer()
             
-        elif data in ["admin_add", "admin_remove"]:
-            action_text = "authorize" if data == "admin_add" else "remove"
-            await callback_query.message.delete()
-            prompt = await client.send_message(
-                chat_id=user_id,
-                text=f"Please reply to this message with the numerical ID of the user you want to {action_text}.",
-                reply_markup=ForceReply(placeholder="e.g. 123456789")
+        elif data == "admin_add":
+            USER_STATES[user_id] = "waiting_for_add_user"
+            await callback_query.message.edit_text(
+                "➕ **Add Authorized User**\nPlease type the numerical ID of the user you want to authorize:",
+                reply_markup=back_markup
             )
-            ACTIVE_PROMPTS[user_id] = prompt.id
+            await callback_query.answer()
             
-            await client.send_message(
-                chat_id=user_id,
-                text="Or cancel the operation using the button below:",
+        elif data == "admin_remove":
+            USER_STATES[user_id] = "waiting_for_remove_user"
+            await callback_query.message.edit_text(
+                "➖ **Remove Authorized User**\nPlease type the numerical ID of the user you want to remove:",
                 reply_markup=back_markup
             )
             await callback_query.answer()
@@ -227,6 +312,7 @@ def register_admin_handlers(app: Client):
         # Cookies Sub-Menus Configuration
         # =========================================================================
         elif data == "admin_cookies_menu":
+            USER_STATES.pop(user_id, None)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("YouTube", callback_data="admin_cookie_select:ytcookies"), InlineKeyboardButton("Instagram", callback_data="admin_cookie_select:igcookies")],
                 [InlineKeyboardButton("TikTok", callback_data="admin_cookie_select:ttcookies"), InlineKeyboardButton("X/Twitter", callback_data="admin_cookie_select:xcookies")],
@@ -268,112 +354,10 @@ def register_admin_handlers(app: Client):
                 await callback_query.answer()
                 
             elif action == "replace":
-                await callback_query.message.delete()
-                prompt = await client.send_message(
-                    chat_id=user_id,
-                    text=f"Please reply to this message with your new Netscape formatted cookies for {cookie_key}.",
-                    reply_markup=ForceReply(placeholder="# Netscape HTTP Cookie File...")
-                )
-                ACTIVE_PROMPTS[user_id] = prompt.id
-                
-                await client.send_message(
-                    chat_id=user_id,
-                    text="Or cancel the operation using the button below:",
-                    reply_markup=back_markup
+                USER_STATES[user_id] = f"waiting_for_replace_{cookie_key}"
+                # Rendered cleanly in a single message with a back button underneath
+                await callback_query.message.edit_text(
+                    f"✏️ **Replace {cookie_key}.txt**\nPlease paste your fresh Netscape formatted cookies into your standard text box and press send:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Cancel & Return", callback_data=f"admin_cookie_select:{cookie_key}")]])
                 )
                 await callback_query.answer()
-
-    # =========================================================================
-    # 3. ForceReply Message Handler (Handles whitelist, bans, and cookie writes)
-    # =========================================================================
-    @app.on_message(filters.reply & filters.private)
-    async def admin_input_handler(client: Client, message: Message):
-        if message.from_user.id != config.SYSTEM_CREATOR_ID:
-            return
-        
-        reply_text = message.reply_to_message.text
-        input_text = message.text.strip()
-        user_id = message.from_user.id
-
-        # Handle Cookie Replacements (String inputs)
-        if "new Netscape formatted cookies for" in reply_text:
-            await purge_active_prompt(user_id, client)
-            
-            cookie_key = reply_text.split("cookies for ")[1].strip().replace(".", "")
-            file_path = COOKIE_MAP.get(cookie_key)
-            if not file_path:
-                await message.reply_text("❌ Error: Invalid cookie profile selected.", reply_markup=back_markup)
-                return
-                
-            final_content = input_text
-            if not input_text.startswith("# Netscape"):
-                final_content = f"# Netscape HTTP Cookie File\n{input_text}"
-                
-            try:
-                with open(file_path, "w") as f:
-                    f.write(final_content)
-                await message.reply_text(f"✅ `{cookie_key}.txt` successfully replaced!", reply_markup=back_markup)
-                await log_event(f"🍪 **Admin Action:** Cookie profile `{cookie_key}.txt` was replaced via chat interface.")
-            except Exception as e:
-                await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
-            return
-
-        # Handle User ID validations (Numerical inputs)
-        if not is_valid_telegram_id(input_text):
-            # Clean up the pending prompt before displaying validation failures
-            await purge_active_prompt(user_id, client)
-            await message.reply_text(
-                "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",
-                reply_markup=back_markup
-            )
-            return
-            
-        target_id = int(input_text)
-        
-        # Clean up the prompt before displaying validation outcomes
-        await purge_active_prompt(user_id, client)
-        
-        if "user you want to authorize" in reply_text:
-            if add_user(target_id):
-                await message.reply_text(
-                    f"✅ User `{target_id}` has been authorized successfully.",
-                    reply_markup=back_markup
-                )
-                await log_event(f"👥 **User Whitelisted:** Creator whitelisted User ID `{target_id}`.")
-            else:
-                await message.reply_text(
-                    f"ℹ️ User `{target_id}` was already authorized.",
-                    reply_markup=back_markup
-                )
-                
-        elif "user you want to remove" in reply_text:
-            db = load_database()
-            if target_id not in db["authorized"]:
-                await message.reply_text(
-                    f"❌ Error: User ID `{target_id}` is not currently authorized.",
-                    reply_markup=back_markup
-                )
-                return
-                
-            if remove_user(target_id):
-                await message.reply_text(
-                    f"✅ User `{target_id}` has been removed.",
-                    reply_markup=back_markup
-                )
-                await log_event(f"👥 **User Revoked:** Creator removed User ID `{target_id}`.")
-                
-        elif "user you want to unban" in reply_text:
-            db = load_database()
-            if target_id not in db["blacklisted"]:
-                await message.reply_text(
-                    f"❌ Error: User ID `{target_id}` is not found in the blacklist.",
-                    reply_markup=back_markup
-                )
-                return
-                
-            if unblacklist_user(target_id):
-                await message.reply_text(
-                    f"✅ User `{target_id}` has been unbanned.",
-                    reply_markup=back_markup
-                )
-                await log_event(f"🔓 **User Unbanned:** Creator unbanned and unblacklisted User ID `{target_id}`.")
