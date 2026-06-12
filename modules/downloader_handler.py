@@ -26,7 +26,15 @@ def is_social_media_link(url: str) -> bool:
 def register_downloader_handlers(app: Client):
     from main import premium_app
 
-    @app.on_message(filters.text & filters.private)
+    # =========================================================================
+    # Group 1: Link Downloader Handler (Only triggers if the text is a link)
+    # =========================================================================
+    @app.on_message(
+        filters.text & 
+        filters.private & 
+        filters.create(lambda _, __, m: is_link(m.text.strip().split("|")[0].strip())), 
+        group=1
+    )
     async def text_link_handler(client: Client, message: Message):
         text = message.text.strip()
         user_id = message.from_user.id
@@ -35,9 +43,6 @@ def register_downloader_handlers(app: Client):
         url = parts[0].strip()
         custom_filename = parts[1].strip() if len(parts) > 1 else None
         
-        if not is_link(url):
-            return
-
         if not is_authorized(user_id):
             return
 
@@ -138,7 +143,6 @@ def register_downloader_handlers(app: Client):
                     await status_msg.edit_text(f"❌ Failed to process direct file URL.\nError: `{str(e)}`")
                     await log_event(f"❌ **Direct Upload Error:** Failed on `{url}`. Details: `{str(e)}`")
                 finally:
-                    # Guarantees that any leftovers, partially-downloaded files, or logs are always deleted
                     if os.path.exists(task_dir):
                         try:
                             shutil.rmtree(task_dir)
@@ -183,7 +187,6 @@ def register_downloader_handlers(app: Client):
         await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
         await callback_query.answer("Transfer enqueued...")
         
-        # Task subfolder reference
         task_dir = f"cache/{cache_id}"
         
         async def queued_transfer_job():
@@ -214,7 +217,7 @@ def register_downloader_handlers(app: Client):
                 if custom_name:
                     clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name}{ext}"
                 else:
-                    clean_name = os.path.basename(file_path) # Now clean naturally inside its task subfolder
+                    clean_name = os.path.basename(file_path)
                     
                 clean_file_path = os.path.join(dir_name, clean_name)
                 if clean_file_path != file_path:
@@ -240,7 +243,6 @@ def register_downloader_handlers(app: Client):
                 await callback_query.message.edit_text(f"❌ Download/Upload failure.\nError: `{str(e)}`")
                 await log_event(f"❌ **Job Failure:** Extraction/Upload crashed on `{cache_data['url']}`. Details: `{str(e)}`")
             finally:
-                # 100% Guaranteed cleanup: removes original files, parts, streams, and thumbnails on success or failure
                 if os.path.exists(task_dir):
                     try:
                         shutil.rmtree(task_dir)
