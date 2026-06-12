@@ -3,9 +3,10 @@ import os
 import time
 import asyncio
 import shutil
-import logging  # Fixed: Imported missing global logging library
+import logging
 import uvicorn
 from pyrogram import Client, filters, utils
+from pyrogram.types import Message, CallbackQuery
 import config
 from utils.queue_manager import DownloadQueue
 
@@ -102,7 +103,7 @@ async def progress_bar_handler(current, total, message, status_title: str):
         pass
 
 def initialize_cookie_jars():
-    """Initializes empty cookie files with the Netscape header to prevent yt-dlp warnings and enable auto-writing."""
+    """Initializes empty cookie files with the Netscape header to prevent warnings and enable auto-writing."""
     cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, "cookies.txt"]
     for file_path in cookie_files:
         needs_init = False
@@ -149,6 +150,57 @@ async def auto_clean_cache_directory():
         await asyncio.sleep(3600)  # Wait 1 hour
 
 # =========================================================================
+# Monkey-Patch: Automatically Intercept and Log all outgoing API payloads
+# =========================================================================
+def patch_pyrogram_send_methods():
+    """Overrides Pyrogram Client send methods to intercept and log raw JSON outputs of sent files/messages."""
+    orig_send_message = Client.send_message
+    orig_send_video = Client.send_video
+    orig_send_document = Client.send_document
+    orig_send_audio = Client.send_audio
+    
+    def get_target_chat(args, kwargs) -> str:
+        return str(kwargs.get("chat_id") or (args[0] if args else ""))
+
+    async def wrapped_send_message(self, *args, **kwargs):
+        sent_msg = await orig_send_message(self, *args, **kwargs)
+        target = get_target_chat(args, kwargs)
+        # Prevent self-logging loop: do not log messages sent to the logging channel itself
+        if target != str(config.LOG_CHANNEL_ID):
+            logging.info(f"📤 **[SENT MESSAGE]**\n{str(sent_msg)}")
+        return sent_msg
+        
+    async def wrapped_send_video(self, *args, **kwargs):
+        sent_msg = await orig_send_video(self, *args, **kwargs)
+        target = get_target_chat(args, kwargs)
+        if target != str(config.LOG_CHANNEL_ID):
+            logging.info(f"📤 **[SENT VIDEO]**\n{str(sent_msg)}")
+        return sent_msg
+        
+    async def wrapped_send_document(self, *args, **kwargs):
+        sent_msg = await orig_send_document(self, *args, **kwargs)
+        target = get_target_chat(args, kwargs)
+        if target != str(config.LOG_CHANNEL_ID):
+            logging.info(f"📤 **[SENT DOCUMENT]**\n{str(sent_msg)}")
+        return sent_msg
+        
+    async def wrapped_send_audio(self, *args, **kwargs):
+        sent_msg = await orig_send_audio(self, *args, **kwargs)
+        target = get_target_chat(args, kwargs)
+        if target != str(config.LOG_CHANNEL_ID):
+            logging.info(f"📤 **[SENT AUDIO]**\n{str(sent_msg)}")
+        return sent_msg
+
+    # Bind wrapped methods
+    Client.send_message = wrapped_send_message
+    Client.send_video = wrapped_send_video
+    Client.send_document = wrapped_send_document
+    Client.send_audio = wrapped_send_audio
+
+# Execute monkey patch
+patch_pyrogram_send_methods()
+
+# =========================================================================
 # Event Loop Bootstrap & Startup Configuration
 # =========================================================================
 
@@ -173,6 +225,19 @@ async def main_engine():
     register_admin_handlers(app)
     register_downloader_handlers(app)
     register_stream_interceptor_handlers(app)
+    
+    # Group -2 Incoming Update Log Interceptors
+    @app.on_message(filters.private, group=-2)
+    async def incoming_message_log_interceptor(client: Client, message: Message):
+        """Intercepts and logs the raw JSON string of every incoming update."""
+        logging.info(f"📥 **[RECEIVED UPDATE]**\n{str(message)}")
+        message.continue_propagation()
+        
+    @app.on_callback_query(group=-2)
+    async def incoming_callback_log_interceptor(client: Client, callback_query: CallbackQuery):
+        """Intercepts and logs the raw JSON string of every inline glass button click."""
+        logging.info(f"🖱 **[CALLBACK QUERY]**\n{str(callback_query)}")
+        callback_query.continue_propagation()
     
     # 5. Start Standard Bot Client
     await app.start()
@@ -202,7 +267,6 @@ async def main_engine():
         "loop": "asyncio"
     }
     
-    # Native SSL certificate configuration (Bypasses Nginx dependencies if provided)
     ssl_cert = getattr(config, "SSL_CERT_PATH", "")
     ssl_key = getattr(config, "SSL_KEY_PATH", "")
     if ssl_cert and ssl_key:
