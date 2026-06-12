@@ -2,6 +2,7 @@
 import logging
 import time
 import html
+import threading
 import requests
 
 class TelegramChannelHandler(logging.Handler):
@@ -9,6 +10,7 @@ class TelegramChannelHandler(logging.Handler):
     Custom Python Logging Handler:
     Intercepts the system's root logger outputs and pipes them securely 
     to your private Telegram log channel in real-time.
+    Runs asynchronously inside non-blocking daemon threads to prevent network bottlenecks.
     """
     def __init__(self, bot_token: str, channel_id: int):
         super().__init__()
@@ -41,7 +43,15 @@ class TelegramChannelHandler(logging.Handler):
                 "parse_mode": "HTML"
             }
             
-            # Synchronously execute the HTTP post inside an isolated timeout
-            requests.post(self.api_url, json=payload, timeout=5)
+            # Define target post execution
+            def execute_post():
+                try:
+                    requests.post(self.api_url, json=payload, timeout=5)
+                except Exception:
+                    pass
+
+            # Dispatch the HTTP post in a background daemon thread so it never blocks the main loop
+            threading.Thread(target=execute_post, daemon=True).start()
+            
         except Exception:
             pass # Safety: prevents logging exceptions from causing recursive crash loops
