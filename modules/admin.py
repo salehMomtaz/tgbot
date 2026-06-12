@@ -18,7 +18,8 @@ from utils.gate import (
     is_document_mode, 
     toggle_document_mode,
     is_blacklisted,
-    blacklist_user
+    blacklist_user,
+    is_authorized  # Fixed: Imported missing auth gate helper
 )
 from utils.id_validator import is_valid_telegram_id
 
@@ -31,11 +32,23 @@ COOKIE_MAP = {
     "cookies": "cookies.txt"
 }
 
+# In-memory registry to track and delete active ForceReply prompts on cancel or success
+ACTIVE_PROMPTS = {}
+
 def register_admin_handlers(app: Client):
     
     from main import log_event, queue
 
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
+
+    async def purge_active_prompt(user_id: int, client: Client):
+        """Helper to safely delete any active ForceReply prompt bubble from the chat stream."""
+        prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
+        if prompt_id:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+            except Exception:
+                pass
 
     # =========================================================================
     # 0. Global Interceptor Gate (Completely modularized out of main.py)
@@ -100,16 +113,15 @@ def register_admin_handlers(app: Client):
             return
             
         if data == "admin_close":
+            await purge_active_prompt(user_id, client)
             await callback_query.message.delete()
             await callback_query.answer("Console closed.")
             
         elif data == "admin_abort_queue":
-            # Force reset the active download queue
             queue_len = len(queue._pending)
             queue._pending.clear()
             queue._active = False
             
-            # Wipe local VPS cache folder
             if os.path.exists("cache"):
                 try:
                     shutil.rmtree("cache")
@@ -167,7 +179,9 @@ def register_admin_handlers(app: Client):
                 text="Please reply to this message with the numerical ID of the blocked user you want to unban.",
                 reply_markup=ForceReply(placeholder="e.g. 123456789")
             )
-            # Send an optional Cancel button directly underneath the reply prompt
+            # Store the prompt ID for safe dynamic cleanup
+            ACTIVE_PROMPTS[user_id] = prompt.id
+            
             await client.send_message(
                 chat_id=user_id,
                 text="Or cancel the operation using the button below:",
@@ -176,6 +190,9 @@ def register_admin_handlers(app: Client):
             await callback_query.answer()
             
         elif data == "admin_main":
+            # Purge any stranded prompt bubbles on cancel or return
+            await purge_active_prompt(user_id, client)
+            
             doc_status = "✅" if is_document_mode(user_id) else "❌"
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
@@ -192,11 +209,13 @@ def register_admin_handlers(app: Client):
         elif data in ["admin_add", "admin_remove"]:
             action_text = "authorize" if data == "admin_add" else "remove"
             await callback_query.message.delete()
-            await client.send_message(
+            prompt = await client.send_message(
                 chat_id=user_id,
                 text=f"Please reply to this message with the numerical ID of the user you want to {action_text}.",
                 reply_markup=ForceReply(placeholder="e.g. 123456789")
             )
+            ACTIVE_PROMPTS[user_id] = prompt.id
+            
             await client.send_message(
                 chat_id=user_id,
                 text="Or cancel the operation using the button below:",
@@ -250,11 +269,13 @@ def register_admin_handlers(app: Client):
                 
             elif action == "replace":
                 await callback_query.message.delete()
-                await client.send_message(
+                prompt = await client.send_message(
                     chat_id=user_id,
                     text=f"Please reply to this message with your new Netscape formatted cookies for {cookie_key}.",
                     reply_markup=ForceReply(placeholder="# Netscape HTTP Cookie File...")
                 )
+                ACTIVE_PROMPTS[user_id] = prompt.id
+                
                 await client.send_message(
                     chat_id=user_id,
                     text="Or cancel the operation using the button below:",
@@ -272,17 +293,18 @@ def register_admin_handlers(app: Client):
         
         reply_text = message.reply_to_message.text
         input_text = message.text.strip()
+        user_id = message.from_user.id
 
         # Handle Cookie Replacements (String inputs)
         if "new Netscape formatted cookies for" in reply_text:
-            # Extract key name
+            await purge_active_prompt(user_id, client)
+            
             cookie_key = reply_text.split("cookies for ")[1].strip().replace(".", "")
             file_path = COOKIE_MAP.get(cookie_key)
             if not file_path:
                 await message.reply_text("❌ Error: Invalid cookie profile selected.", reply_markup=back_markup)
                 return
                 
-            # Guarantee Netscape header is present
             final_content = input_text
             if not input_text.startswith("# Netscape"):
                 final_content = f"# Netscape HTTP Cookie File\n{input_text}"
@@ -298,6 +320,8 @@ def register_admin_handlers(app: Client):
 
         # Handle User ID validations (Numerical inputs)
         if not is_valid_telegram_id(input_text):
+            # Clean up the pending prompt before displaying validation failures
+            await purge_active_prompt(user_id, client)
             await message.reply_text(
                 "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",
                 reply_markup=back_markup
@@ -305,6 +329,9 @@ def register_admin_handlers(app: Client):
             return
             
         target_id = int(input_text)
+        
+        # Clean up the prompt before displaying validation outcomes
+        await purge_active_prompt(user_id, client)
         
         if "user you want to authorize" in reply_text:
             if add_user(target_id):
