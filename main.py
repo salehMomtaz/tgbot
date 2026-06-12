@@ -3,6 +3,7 @@ import os
 import time
 import asyncio
 import shutil
+import logging  # Fixed: Imported missing global logging library
 import uvicorn
 from pyrogram import Client, filters, utils
 import config
@@ -47,20 +48,33 @@ if config.PREMIUM_STRING_SESSION:
     )
 
 # =========================================================================
-# Global Shared Helpers
+# Global Shared Helpers & Standalone Logging Registry
 # =========================================================================
 
-async def log_event(text: str):
-    """Log an event locally and pipe to private Telegram channel if configured."""
-    print(f"[LOG] {text}")
-    if config.LOG_CHANNEL_ID != 0 and app.is_connected:
+def setup_system_logger():
+    """Binds our custom TelegramChannelHandler directly to Python's root logger."""
+    if config.LOG_CHANNEL_ID != 0:
         try:
-            await app.send_message(
-                chat_id=config.LOG_CHANNEL_ID,
-                text=f"📝 **System Log Event:**\n\n{text}"
-            )
+            from utils.logger import TelegramChannelHandler
+            root_logger = logging.getLogger()
+            
+            # Explicitly lower root logger's filtering threshold so INFO logs are not discarded
+            root_logger.setLevel(logging.INFO)
+            
+            # Format logs briefly, our custom handler will add emojis, timestamps, and module tags
+            formatter = logging.Formatter('%(message)s')
+            handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
+            handler.setFormatter(formatter)
+            handler.setLevel(logging.INFO)  # Capture standard INFO, WARNING, and ERROR logs
+            
+            root_logger.addHandler(handler)
+            print("[Logger] Standalone Telegram Logging Service linked to Root Logger.")
         except Exception as e:
-            print(f"Failed to log event to channel: {e}")
+            print(f"Warning: Failed to initialize standalone Telegram logger: {e}")
+
+async def log_event(text: str):
+    """Log an event locally. The standalone root logger handles automatic Telegram routing."""
+    logging.info(text)
 
 async def progress_bar_handler(current, total, message, status_title: str):
     """Draws a visual progress bar and updates text every 5 seconds to avoid rate limiting."""
@@ -141,14 +155,17 @@ async def auto_clean_cache_directory():
 async def main_engine():
     print("Initializing services...")
     
-    # 1. Initialize and format cookie files
+    # 1. Start the global system logger to pipe all container logs to your channel
+    setup_system_logger()
+    
+    # 2. Initialize and format cookie files
     initialize_cookie_jars()
     
-    # 2. Bind Pyrogram clients to stream handlers
+    # 3. Bind Pyrogram clients to stream handlers
     import modules.stream_handler
     modules.stream_handler.tg_client = app
     
-    # 3. Import and register modular handler systems
+    # 4. Import and register modular handler systems
     from modules.admin import register_admin_handlers
     from modules.downloader_handler import register_downloader_handlers
     from modules.stream_interceptor import register_stream_interceptor_handlers
@@ -157,7 +174,7 @@ async def main_engine():
     register_downloader_handlers(app)
     register_stream_interceptor_handlers(app)
     
-    # 4. Start Standard Bot Client
+    # 5. Start Standard Bot Client
     await app.start()
     print("Telegram Bot Online.")
     
@@ -169,12 +186,12 @@ async def main_engine():
         except Exception as e:
             print(f"Warning: Could not resolve Log Channel ID: {e}")
     
-    # 5. Start Premium Userbot Client if session is configured
+    # 6. Start Premium Userbot Client if session is configured
     if premium_app:
         await premium_app.start()
         print("Premium Userbot Client connected.")
     
-    # 6. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
+    # 7. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
     from modules.stream_handler import fastapi_app
     
     uvicorn_args = {

@@ -1,6 +1,7 @@
 # utils/logger.py
 import logging
 import time
+import html
 import requests
 
 class TelegramChannelHandler(logging.Handler):
@@ -31,10 +32,13 @@ class TelegramChannelHandler(logging.Handler):
             elif level in ["ERROR", "CRITICAL"]:
                 emoji = "🚨"
                 
+            # HTML-escape the log entry to prevent XML parsing exceptions on Telegram
+            escaped_entry = html.escape(log_entry)
+            
             payload = {
                 "chat_id": self.channel_id,
-                "text": f"{emoji} **[{level}]** `[{timestamp}]` *({module})*\n\n`{log_entry}`",
-                "parse_mode": "Markdown"
+                "text": f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n<pre>{escaped_entry}</pre>",
+                "parse_mode": "HTML"
             }
             
             # Synchronously execute the HTTP post inside an isolated timeout

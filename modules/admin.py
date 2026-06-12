@@ -6,7 +6,8 @@ from pyrogram.types import (
     CallbackQuery, 
     Message, 
     InlineKeyboardMarkup, 
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    ForceReply
 )
 import config
 from utils.gate import (
@@ -255,12 +256,20 @@ def register_admin_handlers(app: Client):
             await callback_query.message.delete()
             await callback_query.answer("Console closed.")
             
-        elif data == "admin_clear_streams":
-            from modules.stream_handler import STREAM_CACHE
-            cleared_count = len(STREAM_CACHE)
-            STREAM_CACHE.clear()
-            await callback_query.answer(f"🧹 Cleared all {cleared_count} active stream states.", show_alert=True)
-            await log_event("🧹 **Admin Action:** All active stream links cleared from cache.")
+        elif data == "admin_abort_queue":
+            queue_len = len(queue._pending)
+            queue._pending.clear()
+            queue._active = False
+            
+            if os.path.exists("cache"):
+                try:
+                    shutil.rmtree("cache")
+                    os.makedirs("cache", exist_ok=True)
+                except Exception:
+                    pass
+                    
+            await callback_query.answer("💥 System Reset: All queue jobs aborted and cache purged!", show_alert=True)
+            await log_event(f"💥 **Admin Action:** Queue reset executed. {queue_len} pending jobs aborted.")
             
         elif data == "admin_toggle_doc":
             state = toggle_document_mode(user_id)

@@ -11,4 +11,4 @@ services:
       - .:/app
       - /etc/letsencrypt:/etc/letsencrypt:ro  # Mount certificates as read-only!
     environment:
-      - PYTHONUNBUFFE`RED=1
+      - PYTHONUNBUFFERED=1
