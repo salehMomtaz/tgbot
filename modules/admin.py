@@ -1,4 +1,6 @@
 # modules/admin.py
+import os
+import shutil
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import (
     CallbackQuery, 
@@ -14,15 +16,43 @@ from utils.gate import (
     remove_user, 
     unblacklist_user, 
     is_document_mode, 
-    toggle_document_mode
+    toggle_document_mode,
+    is_blacklisted,
+    blacklist_user
 )
 from utils.id_validator import is_valid_telegram_id
 
+# Map callback string shortcuts to physical filenames
+COOKIE_MAP = {
+    "ytcookies": config.YT_COOKIES,
+    "igcookies": config.IG_COOKIES,
+    "ttcookies": config.TT_COOKIES,
+    "xcookies": config.X_COOKIES,
+    "cookies": "cookies.txt"
+}
+
 def register_admin_handlers(app: Client):
     
-    from main import log_event
+    from main import log_event, queue
 
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
+
+    # =========================================================================
+    # 0. Global Interceptor Gate (Completely modularized out of main.py)
+    # =========================================================================
+    @app.on_message(filters.private, group=-1)
+    async def security_gate(client: Client, message: Message):
+        if not message.from_user:
+            message.stop_propagation()
+            
+        user_id = message.from_user.id
+        if is_blacklisted(user_id):
+            message.stop_propagation()
+            
+        if not is_authorized(user_id):
+            blacklist_user(user_id)
+            await log_event(f"⚠️ **Intruder Blocked:** User `{user_id}` has been banned and blacklisted.")
+            message.stop_propagation()
 
     # =========================================================================
     # 1. Standard Private Text Router (Handles /start and console text triggers)
@@ -41,8 +71,8 @@ def register_admin_handlers(app: Client):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
-                [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
+                [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"), InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
             ])
             await message.reply_text(
                 f"🛠 **Admin System Console**\nChoose an administrative action below:",
@@ -73,24 +103,34 @@ def register_admin_handlers(app: Client):
             await callback_query.message.delete()
             await callback_query.answer("Console closed.")
             
-        elif data == "admin_clear_streams":
-            from modules.stream_handler import STREAM_CACHE
-            cleared_count = len(STREAM_CACHE)
-            STREAM_CACHE.clear()
-            await callback_query.answer(f"🧹 Cleared all {cleared_count} active stream states.", show_alert=True)
-            await log_event("🧹 **Admin Action:** All active stream links cleared from cache.")
+        elif data == "admin_abort_queue":
+            # Force reset the active download queue
+            queue_len = len(queue._pending)
+            queue._pending.clear()
+            queue._active = False
+            
+            # Wipe local VPS cache folder
+            if os.path.exists("cache"):
+                try:
+                    shutil.rmtree("cache")
+                    os.makedirs("cache", exist_ok=True)
+                except Exception:
+                    pass
+                    
+            await callback_query.answer("💥 System Reset: All queue jobs aborted and cache purged!", show_alert=True)
+            await log_event(f"💥 **Admin Action:** Queue reset executed. {queue_len} pending jobs aborted.")
             
         elif data == "admin_toggle_doc":
             state = toggle_document_mode(user_id)
             status_str = "✅" if state else "❌"
             await callback_query.answer(f"📄 Document Mode toggled to {status_str}.", show_alert=True)
             await log_event(f"⚙️ **Admin Action:** Document Mode toggled to {status_str}.")
-            # Edit console message to reflect state change
+            
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-                [InlineKeyboardButton(f"📄 Doc Mode: {status_str}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
-                [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+                [InlineKeyboardButton(f"📄 Doc Mode: {status_str}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
+                [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"), InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
             ])
             try:
                 await callback_query.message.edit_text(
@@ -122,10 +162,16 @@ def register_admin_handlers(app: Client):
             
         elif data == "admin_unban":
             await callback_query.message.delete()
-            await client.send_message(
+            prompt = await client.send_message(
                 chat_id=user_id,
                 text="Please reply to this message with the numerical ID of the blocked user you want to unban.",
                 reply_markup=ForceReply(placeholder="e.g. 123456789")
+            )
+            # Send an optional Cancel button directly underneath the reply prompt
+            await client.send_message(
+                chat_id=user_id,
+                text="Or cancel the operation using the button below:",
+                reply_markup=back_markup
             )
             await callback_query.answer()
             
@@ -134,8 +180,8 @@ def register_admin_handlers(app: Client):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
-                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🧹 Clear Streams", callback_data="admin_clear_streams")],
-                [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+                [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"), InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
+                [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"), InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
             ])
             await callback_query.message.edit_text(
                 f"🛠 **Admin System Console**\nChoose an administrative action below:",
@@ -151,9 +197,74 @@ def register_admin_handlers(app: Client):
                 text=f"Please reply to this message with the numerical ID of the user you want to {action_text}.",
                 reply_markup=ForceReply(placeholder="e.g. 123456789")
             )
+            await client.send_message(
+                chat_id=user_id,
+                text="Or cancel the operation using the button below:",
+                reply_markup=back_markup
+            )
             await callback_query.answer()
 
-    # Reply Message Handler: Handles ForceReply text inputs from Admin
+        # =========================================================================
+        # Cookies Sub-Menus Configuration
+        # =========================================================================
+        elif data == "admin_cookies_menu":
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("YouTube", callback_data="admin_cookie_select:ytcookies"), InlineKeyboardButton("Instagram", callback_data="admin_cookie_select:igcookies")],
+                [InlineKeyboardButton("TikTok", callback_data="admin_cookie_select:ttcookies"), InlineKeyboardButton("X/Twitter", callback_data="admin_cookie_select:xcookies")],
+                [InlineKeyboardButton("Global (cookies.txt)", callback_data="admin_cookie_select:cookies")],
+                [InlineKeyboardButton("◀️ Return to Console", callback_data="admin_main")]
+            ])
+            await callback_query.message.edit_text(
+                "🍪 **Cookie Jars Manager**\nSelect a cookie profile to view or edit:",
+                reply_markup=keyboard
+            )
+            await callback_query.answer()
+            
+        elif data.startswith("admin_cookie_select:"):
+            cookie_key = data.split(":")[1]
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📤 Download", callback_data=f"admin_cookie_action:{cookie_key}:download")],
+                [InlineKeyboardButton("✏️ Replace", callback_data=f"admin_cookie_action:{cookie_key}:replace")],
+                [InlineKeyboardButton("◀️ Back", callback_data="admin_cookies_menu")]
+            ])
+            await callback_query.message.edit_text(
+                f"🍪 **Cookie Profile: `{cookie_key}.txt`**\nSelect an administration action:",
+                reply_markup=keyboard
+            )
+            await callback_query.answer()
+            
+        elif data.startswith("admin_cookie_action:"):
+            _, cookie_key, action = data.split(":")
+            file_path = COOKIE_MAP.get(cookie_key)
+            
+            if action == "download":
+                if os.path.exists(file_path):
+                    await client.send_document(
+                        chat_id=user_id,
+                        document=file_path,
+                        caption=f"🍪 Here is your active `{cookie_key}.txt` file."
+                    )
+                else:
+                    await callback_query.answer("⚠️ File is empty or does not exist on VPS yet.", show_alert=True)
+                await callback_query.answer()
+                
+            elif action == "replace":
+                await callback_query.message.delete()
+                await client.send_message(
+                    chat_id=user_id,
+                    text=f"Please reply to this message with your new Netscape formatted cookies for {cookie_key}.",
+                    reply_markup=ForceReply(placeholder="# Netscape HTTP Cookie File...")
+                )
+                await client.send_message(
+                    chat_id=user_id,
+                    text="Or cancel the operation using the button below:",
+                    reply_markup=back_markup
+                )
+                await callback_query.answer()
+
+    # =========================================================================
+    # 3. ForceReply Message Handler (Handles whitelist, bans, and cookie writes)
+    # =========================================================================
     @app.on_message(filters.reply & filters.private)
     async def admin_input_handler(client: Client, message: Message):
         if message.from_user.id != config.SYSTEM_CREATOR_ID:
@@ -161,7 +272,31 @@ def register_admin_handlers(app: Client):
         
         reply_text = message.reply_to_message.text
         input_text = message.text.strip()
-        
+
+        # Handle Cookie Replacements (String inputs)
+        if "new Netscape formatted cookies for" in reply_text:
+            # Extract key name
+            cookie_key = reply_text.split("cookies for ")[1].strip().replace(".", "")
+            file_path = COOKIE_MAP.get(cookie_key)
+            if not file_path:
+                await message.reply_text("❌ Error: Invalid cookie profile selected.", reply_markup=back_markup)
+                return
+                
+            # Guarantee Netscape header is present
+            final_content = input_text
+            if not input_text.startswith("# Netscape"):
+                final_content = f"# Netscape HTTP Cookie File\n{input_text}"
+                
+            try:
+                with open(file_path, "w") as f:
+                    f.write(final_content)
+                await message.reply_text(f"✅ `{cookie_key}.txt` successfully replaced!", reply_markup=back_markup)
+                await log_event(f"🍪 **Admin Action:** Cookie profile `{cookie_key}.txt` was replaced via chat interface.")
+            except Exception as e:
+                await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
+            return
+
+        # Handle User ID validations (Numerical inputs)
         if not is_valid_telegram_id(input_text):
             await message.reply_text(
                 "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",

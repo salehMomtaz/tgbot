@@ -6,7 +6,7 @@ import ffmpeg
 import config
 
 def get_cookies_for_url(url: str) -> str | None:
-    """Return the correct cookie path based on the domain, only if the file is not empty."""
+    """Return the correct cookie path based on the domain, falling back to a global cookies.txt file."""
     url_lower = url.lower()
     cookie_path = None
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
@@ -17,7 +17,11 @@ def get_cookies_for_url(url: str) -> str | None:
         cookie_path = config.TT_COOKIES
     elif "twitter.com" in url_lower or "x.com" in url_lower:
         cookie_path = config.X_COOKIES
+    else:
+        # Fallback global cookies file for all other 1,000+ yt-dlp supported sites
+        cookie_path = "cookies.txt"
         
+    # Only use the cookies if the file exists and is not empty (greater than 0 bytes)
     if cookie_path and os.path.exists(cookie_path) and os.path.getsize(cookie_path) > 0:
         return cookie_path
     return None

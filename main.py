@@ -91,11 +91,23 @@ def initialize_cookie_jars():
     """Initializes empty cookie files with the Netscape header to prevent yt-dlp warnings and enable auto-writing."""
     cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, "cookies.txt"]
     for file_path in cookie_files:
+        needs_init = False
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            needs_init = True
+        else:
+            try:
+                with open(file_path, "r") as f:
+                    first_line = f.readline()
+                if not first_line.startswith("# Netscape"):
+                    needs_init = True
+            except Exception:
+                needs_init = True
+                
+        if needs_init:
             try:
                 with open(file_path, "w") as f:
                     f.write("# Netscape HTTP Cookie File\n")
-                print(f"[Cookies] Cookie jar initialized: {file_path}")
+                print(f"[Cookies] Cookie jar initialized with Netscape header: {file_path}")
             except Exception as e:
                 print(f"[Cookies] Warning: Could not initialize cookie jar {file_path}: {e}")
 
