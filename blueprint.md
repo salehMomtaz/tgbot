@@ -20,7 +20,7 @@ tgbot/
 ├── ttcookies.txt          # TikTok cookies
 ├── xcookies.txt           # X/Twitter cookies for restricted content
 ├── cookies.txt            # Fallback global cookies for all other sites
-├── main.py                # Tiny, clean app bootstrap and client initializer
+├── main.py                # Tiny, clean app bootstrap, client initializer, and log linker
 └── utils/
     ├── __init__.py
     ├── gate.py            # Security Access Control (with settings registry)
@@ -28,10 +28,11 @@ tgbot/
     ├── queue_manager.py   # Synthesized non-blocking, serializing task queue manager
     ├── id_validator.py    # Handles digit checks and Telegram ID boundary verification
     ├── uploader_handler.py# Isolated "Toyota Just-In-Time" sequential split uploader
-    └── updater.py         # 6-hour automatic pre-release yt-dlp patcher
+    ├── updater.py         # 6-hour automatic pre-release yt-dlp patcher
+    └── logger.py          # Custom standalone root logger handler redirecting output to channel
 └── modules/
     ├── __init__.py
-    ├── admin.py           # Polished, secure Admin Callback Console with input verification (Single-Message State Machine)
+    ├── admin.py           # [UPDATED] Single-Message Morphing Admin Console (With sequential prompt deletion flow)
     ├── downloader_handler.py # Link and direct file URL queue worker (with mutually exclusive filters)
     ├── stream_interceptor.py # Telegram file-to-stream link generator (with 24h validity checks)
     └── stream_handler.py  # FastAPI Server Stream Bridge (with 24-hour token check)
@@ -44,5 +45,6 @@ tgbot/
 - [x] **Phase 4: Format Grid Selector & Metadata Embedder** (Renaming, custom names, and metadata routines implemented in `modules/downloader_handler.py`)
 - [x] **Phase 5: FastAPI Stream Bridge** (Streaming file link generator with 24-hour validity checks written in `modules/stream_handler.py`)
 - [x] **Phase 6: Active Job Queue & Event Logs** (Queue is live and handles sequential flow natively)
-- [x] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (On-demand sequential chunking generator implemented in `utils/downloader.py` and dual-client uploader loop resolved in `main.py`)
+- [x] **Phase 7: Premium Integration & On-Demand Chunk Splitting** (Uploader isolated in `utils/uploader_handler.py` and stream interceptor isolated in `modules/stream_interceptor.py`)
 - [x] **Phase 8: State-Machine Finalization & Storage Cleanups** (Completed and fully verified)
+- [x] **Phase 9: Standalone System-Wide Logger & Morphing Cleanup** (Dynamic sequential prompt deletions fully working, and root-logging engine linked to private Telegram channel in `utils/logger.py`)
