@@ -20,20 +20,21 @@ tgbot/
 ├── ttcookies.txt          # TikTok cookies
 ├── xcookies.txt           # X/Twitter cookies for restricted content
 ├── cookies.txt            # Fallback global cookies for all other sites
-├── main.py                # Tiny, clean app bootstrap, client initializer, and log linker
+├── main.py                # [UPDATED] Cleanest app bootloader (Double-instantiation bug fixed)
 └── utils/
     ├── __init__.py
     ├── gate.py            # Security Access Control (with settings registry)
     ├── downloader.py      # Format extractor (with smart size fallbacks), ffmpeg prober & On-Demand splitter
     ├── queue_manager.py   # Synthesized non-blocking, serializing task queue manager
+    ├── shared.py          # [ADDED] Isolated shared in-memory dictionary registries
     ├── id_validator.py    # Handles digit checks and Telegram ID boundary verification
     ├── uploader_handler.py# Isolated "Toyota Just-In-Time" sequential split uploader
     ├── updater.py         # 6-hour automatic pre-release yt-dlp patcher
-    └── logger.py          # Custom standalone root logger handler redirecting output to channel
+    └── logger.py          # [UPDATED] Non-blocking, secure HTML-formatted system logging handler
 └── modules/
     ├── __init__.py
     ├── admin.py           # [UPDATED] Single-Message Morphing Admin Console (With sequential prompt deletion flow)
-    ├── downloader_handler.py # Link and direct file URL queue worker (with mutually exclusive filters)
+    ├── downloader_handler.py # [UPDATED] Link and direct file URL queue worker (Double-import loops resolved)
     ├── stream_interceptor.py # Telegram file-to-stream link generator (with 24h validity checks)
     └── stream_handler.py  # FastAPI Server Stream Bridge (with 24-hour token check)
 ```
