@@ -2,6 +2,7 @@
 import os
 import time
 import asyncio
+import shutil
 import uvicorn
 from pyrogram import Client, filters, utils
 import config
@@ -98,6 +99,29 @@ def initialize_cookie_jars():
             except Exception as e:
                 print(f"[Cookies] Warning: Could not initialize cookie jar {file_path}: {e}")
 
+async def auto_clean_cache_directory():
+    """Periodically sweeps the cache directory every hour to purge orphaned files older than 2 hours."""
+    while True:
+        print("[Cleaner] Running periodic cache sweep...")
+        cache_dir = "cache"
+        if os.path.exists(cache_dir):
+            now = time.time()
+            threshold = now - 7200  # 2 hours = 7200 seconds
+            try:
+                for entry in os.scandir(cache_dir):
+                    mtime = entry.stat().st_mtime
+                    if mtime < threshold:
+                        if entry.is_dir():
+                            shutil.rmtree(entry.path)
+                            print(f"[Cleaner] Purged orphaned directory: {entry.path}")
+                        else:
+                            os.remove(entry.path)
+                            print(f"[Cleaner] Purged orphaned file: {entry.path}")
+            except Exception as e:
+                print(f"[Cleaner] Exception occurred during cache sweep: {e}")
+                
+        await asyncio.sleep(3600)  # Wait 1 hour
+
 # =========================================================================
 # Event Loop Bootstrap & Startup Configuration
 # =========================================================================
@@ -165,10 +189,11 @@ async def main_engine():
     
     from utils.updater import auto_update_ytdlp
     
-    # Run FastAPI web server and the 6-hour yt-dlp nightly updater concurrently
+    # Run FastAPI web server, the 6-hour updater, and the 1-hour cache cleaner concurrently
     await asyncio.gather(
         server.serve(),
-        auto_update_ytdlp()
+        auto_update_ytdlp(),
+        auto_clean_cache_directory()
     )
 
 if __name__ == "__main__":

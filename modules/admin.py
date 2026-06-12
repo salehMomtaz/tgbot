@@ -20,10 +20,8 @@ from utils.id_validator import is_valid_telegram_id
 
 def register_admin_handlers(app: Client):
     
-    # Import log_event dynamically inside registration scope to avoid circular imports
     from main import log_event
 
-    # Global reusable "Back to Console" markup
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
 
     # =========================================================================
@@ -34,15 +32,12 @@ def register_admin_handlers(app: Client):
         text = message.text.strip()
         user_id = message.from_user.id
         
-        # Check if the incoming message is a link
         from modules.downloader_handler import is_link
         if is_link(text):
-            # Tell Pyrogram to bypass this handler and pass the link downstream to downloader_handler
             raise ContinuePropagation()
             
-        # If it is not a link, process standard commands and console requests
         if user_id == config.SYSTEM_CREATOR_ID:
-            doc_status = "🟢" if is_document_mode(user_id) else "🔴"
+            doc_status = "✅" if is_document_mode(user_id) else "❌"
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
@@ -54,7 +49,6 @@ def register_admin_handlers(app: Client):
                 reply_markup=keyboard
             )
         else:
-            # Standard authorized user warm greeting
             await message.reply_text(
                 "👋 **Hello! Welcome to your Private Downloader Bot.**\n\n"
                 "To get started:\n"
@@ -88,7 +82,7 @@ def register_admin_handlers(app: Client):
             
         elif data == "admin_toggle_doc":
             state = toggle_document_mode(user_id)
-            status_str = "🟢" if state else "🔴"
+            status_str = "✅" if state else "❌"
             await callback_query.answer(f"📄 Document Mode toggled to {status_str}.", show_alert=True)
             await log_event(f"⚙️ **Admin Action:** Document Mode toggled to {status_str}.")
             # Edit console message to reflect state change
@@ -104,7 +98,7 @@ def register_admin_handlers(app: Client):
                     reply_markup=keyboard
                 )
             except Exception:
-                pass # Avoid crashes if state editing is identical
+                pass
             
         elif data == "admin_list":
             db = load_database()
@@ -118,7 +112,6 @@ def register_admin_handlers(app: Client):
             blacklisted = db["blacklisted"]
             text = "🚫 **Banned Intruders List:**\n" + "\n".join([f"• `{uid}`" for uid in blacklisted]) if blacklisted else "Blacklist registry is empty."
             
-            # Conditionally render the "Unban User" button only if there are actually banned users!
             keyboard_rows = []
             if blacklisted:
                 keyboard_rows.append([InlineKeyboardButton("🔓 Unban User", callback_data="admin_unban")])
@@ -137,7 +130,7 @@ def register_admin_handlers(app: Client):
             await callback_query.answer()
             
         elif data == "admin_main":
-            doc_status = "🟢" if is_document_mode(user_id) else "🔴"
+            doc_status = "✅" if is_document_mode(user_id) else "❌"
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 List Users", callback_data="admin_list"), InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
                 [InlineKeyboardButton("➖ Remove User", callback_data="admin_remove"), InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
@@ -160,9 +153,7 @@ def register_admin_handlers(app: Client):
             )
             await callback_query.answer()
 
-    # =========================================================================
-    # 3. ForceReply Message Handler (Handles whitelist/ban text inputs)
-    # =========================================================================
+    # Reply Message Handler: Handles ForceReply text inputs from Admin
     @app.on_message(filters.reply & filters.private)
     async def admin_input_handler(client: Client, message: Message):
         if message.from_user.id != config.SYSTEM_CREATOR_ID:
@@ -171,7 +162,6 @@ def register_admin_handlers(app: Client):
         reply_text = message.reply_to_message.text
         input_text = message.text.strip()
         
-        # Guard clause: Validate format using id_validator helper
         if not is_valid_telegram_id(input_text):
             await message.reply_text(
                 "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",
@@ -195,7 +185,6 @@ def register_admin_handlers(app: Client):
                 )
                 
         elif "user you want to remove" in reply_text:
-            # Validate if user exists before attempting removal
             db = load_database()
             if target_id not in db["authorized"]:
                 await message.reply_text(
@@ -212,7 +201,6 @@ def register_admin_handlers(app: Client):
                 await log_event(f"👥 **User Revoked:** Creator removed User ID `{target_id}`.")
                 
         elif "user you want to unban" in reply_text:
-            # Validate if user is blacklisted before attempting unban
             db = load_database()
             if target_id not in db["blacklisted"]:
                 await message.reply_text(

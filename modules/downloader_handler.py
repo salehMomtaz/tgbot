@@ -1,6 +1,7 @@
 # modules/downloader_handler.py
 import os
 import uuid
+import shutil
 import asyncio
 import urllib.parse
 import aiohttp
@@ -23,7 +24,6 @@ def is_social_media_link(url: str) -> bool:
     return any(domain in url_lower for domain in social_domains)
 
 def register_downloader_handlers(app: Client):
-    # Import premium_app dynamically inside registration scope to avoid circular imports
     from main import premium_app
 
     @app.on_message(filters.text & filters.private)
@@ -31,16 +31,13 @@ def register_downloader_handlers(app: Client):
         text = message.text.strip()
         user_id = message.from_user.id
         
-        # Parse potential custom filename: url|custom_name.ext
         parts = text.split("|", 1)
         url = parts[0].strip()
         custom_filename = parts[1].strip() if len(parts) > 1 else None
         
         if not is_link(url):
-            # Ignore standard text (passed downstream to welcome or admin consoles)
             return
 
-        # Perform authorization checks
         if not is_authorized(user_id):
             return
 
@@ -104,27 +101,26 @@ def register_downloader_handlers(app: Client):
 
             await queue.add_task(user_id, status_msg, download_job)
         else:
-            # Generic direct URL uploader
             status_msg = await message.reply_text("📥 Received URL. Queueing job...")
             
             async def direct_upload_job():
                 await status_msg.edit_text("⚡ Starting direct URL download...")
                 cache_id = str(uuid.uuid4())[:8]
+                task_dir = f"cache/{cache_id}"
                 try:
                     async def dl_progress(cur, tot):
                         await progress_bar_handler(cur, tot, status_msg, "Downloading direct file to server...")
                         
                     file_path = await download_direct_file(url, cache_id, dl_progress)
                     
-                    # Rename the file path to strip the unique cache_id prefix
                     dir_name = os.path.dirname(file_path)
-                    clean_name = custom_filename if custom_filename else os.path.basename(file_path)[9:]
+                    clean_name = custom_filename if custom_filename else os.path.basename(file_path)
                     clean_file_path = os.path.join(dir_name, clean_name)
-                    os.rename(file_path, clean_file_path)
+                    if clean_file_path != file_path:
+                        os.rename(file_path, clean_file_path)
                     
                     await status_msg.edit_text("📤 Uploading direct file to Telegram...")
                     
-                    # Split and upload sequentially (Toyota JIT method)
                     await process_split_and_upload(
                         bot_client=app,
                         premium_client=premium_app,
@@ -141,15 +137,29 @@ def register_downloader_handlers(app: Client):
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Failed to process direct file URL.\nError: `{str(e)}`")
                     await log_event(f"❌ **Direct Upload Error:** Failed on `{url}`. Details: `{str(e)}`")
+                finally:
+                    # Guarantees that any leftovers, partially-downloaded files, or logs are always deleted
+                    if os.path.exists(task_dir):
+                        try:
+                            shutil.rmtree(task_dir)
+                            print(f"[Cleanup] Cleared direct download directory: {task_dir}")
+                        except Exception as ce:
+                            print(f"[Cleanup] Error: {ce}")
 
             await queue.add_task(user_id, status_msg, direct_upload_job)
 
-    # Callback Query Handler for download format selections
+    # Callback Query Handler
     @app.on_callback_query(filters.regex(r"^dl:"))
     async def dl_callback_handler(client: Client, callback_query: CallbackQuery):
         data = callback_query.data
         user_id = callback_query.from_user.id
-        _, cache_id, action, format_id = data.split(":")
+        
+        parts = data.split(":")
+        if len(parts) < 3:
+            return
+            
+        cache_id = parts[1]
+        action = parts[2]
         
         if action == "cancel":
             DOWNLOAD_CACHE.pop(cache_id, None)
@@ -157,22 +167,24 @@ def register_downloader_handlers(app: Client):
             await callback_query.answer("Cancelled.")
             return
             
+        format_id = parts[3]
         cache_data = DOWNLOAD_CACHE.get(cache_id)
         if not cache_data:
             await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
             return
             
-        # Target format size limit verification before queueing
         target_list = cache_data["videos"] if action == 'v' else cache_data["audios"]
         target_fmt = next((f for f in target_list if f["format_id"] == format_id), None)
         
-        # Guard clause: Check standard bot 2GB upload limit if no Premium session is active
         if not premium_app and target_fmt and target_fmt["bytes"] > (2000 * 1024 * 1024):
             await callback_query.answer("❌ This format exceeds Telegram's 2GB bot upload limit. Please select another quality or connect your Premium Userbot.", show_alert=True)
             return
             
         await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
         await callback_query.answer("Transfer enqueued...")
+        
+        # Task subfolder reference
+        task_dir = f"cache/{cache_id}"
         
         async def queued_transfer_job():
             await callback_query.message.edit_text("⚡️ Downloading file from server to VPS...")
@@ -186,7 +198,6 @@ def register_downloader_handlers(app: Client):
                 def thread_progress(curr, tot):
                     asyncio.run_coroutine_threadsafe(download_progress(curr, tot), loop)
                 
-                # Execute blocking download thread-safely
                 result = await loop.run_in_executor(
                     None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress
                 )
@@ -196,7 +207,6 @@ def register_downloader_handlers(app: Client):
                 title = result['title']
                 uploader = result['uploader']
                 
-                # Rename the file path to strip the unique cache_id prefix
                 dir_name = os.path.dirname(file_path)
                 ext = os.path.splitext(file_path)[1]
                 
@@ -204,12 +214,12 @@ def register_downloader_handlers(app: Client):
                 if custom_name:
                     clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name}{ext}"
                 else:
-                    clean_name = os.path.basename(file_path)[9:]  # Remove the unique cache_id_ prefix (9 chars)
+                    clean_name = os.path.basename(file_path) # Now clean naturally inside its task subfolder
                     
                 clean_file_path = os.path.join(dir_name, clean_name)
-                os.rename(file_path, clean_file_path)
+                if clean_file_path != file_path:
+                    os.rename(file_path, clean_file_path)
                 
-                # Process the sequential upload/splitting loop (Toyota JIT)
                 await process_split_and_upload(
                     bot_client=app,
                     premium_client=premium_app,
@@ -223,32 +233,32 @@ def register_downloader_handlers(app: Client):
                     progress_msg=callback_query.message
                 )
                 
-                if thumb_path and os.path.exists(thumb_path):
-                    os.remove(thumb_path)
-                
-                # Clean up any leftover residuals in cache folder
-                base_path, _ = os.path.splitext(clean_file_path)
-                for extension in ['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mkv', '.mp3']:
-                    test_path = f"{base_path}{extension}"
-                    if os.path.exists(test_path):
-                        os.remove(test_path)
-                        
                 DOWNLOAD_CACHE.pop(cache_id, None)
                 await log_event(f"✅ **Job Successful:** `{clean_name}` was successfully processed and sent.")
                 
             except Exception as e:
                 await callback_query.message.edit_text(f"❌ Download/Upload failure.\nError: `{str(e)}`")
                 await log_event(f"❌ **Job Failure:** Extraction/Upload crashed on `{cache_data['url']}`. Details: `{str(e)}`")
+            finally:
+                # 100% Guaranteed cleanup: removes original files, parts, streams, and thumbnails on success or failure
+                if os.path.exists(task_dir):
+                    try:
+                        shutil.rmtree(task_dir)
+                        print(f"[Cleanup] Cleaned active task directory: {task_dir}")
+                    except Exception as ce:
+                        print(f"[Cleanup] Error: {ce}")
 
         await queue.add_task(user_id, callback_query.message, queued_transfer_job)
 
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
-    """Download direct file URL stream to VPS cache."""
-    os.makedirs("cache", exist_ok=True)
+    """Download direct file URL stream to secure subfolder."""
+    task_dir = f"cache/{cache_id}"
+    os.makedirs(task_dir, exist_ok=True)
+    
     parsed_url = urllib.parse.urlparse(url)
     file_name = os.path.basename(parsed_url.path) or f"download_{cache_id}"
     file_name = urllib.parse.unquote(file_name)
-    out_path = f"cache/{cache_id}_{file_name}"
+    out_path = f"{task_dir}/{file_name}"
     
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=1800) as response:

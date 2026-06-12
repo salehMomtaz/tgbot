@@ -1,3 +1,4 @@
+# utils/downloader.py
 import os
 import subprocess
 import yt_dlp
@@ -5,31 +6,32 @@ import ffmpeg
 import config
 
 def get_cookies_for_url(url: str) -> str | None:
-    """Return the correct cookie path based on the domain."""
+    """Return the correct cookie path based on the domain, only if the file is not empty."""
     url_lower = url.lower()
+    cookie_path = None
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
-        return config.YT_COOKIES if os.path.exists(config.YT_COOKIES) else None
+        cookie_path = config.YT_COOKIES
     elif "instagram.com" in url_lower:
-        return config.IG_COOKIES if os.path.exists(config.IG_COOKIES) else None
+        cookie_path = config.IG_COOKIES
     elif "tiktok.com" in url_lower:
-        return config.TT_COOKIES if os.path.exists(config.TT_COOKIES) else None
+        cookie_path = config.TT_COOKIES
     elif "twitter.com" in url_lower or "x.com" in url_lower:
-        return config.X_COOKIES if os.path.exists(config.X_COOKIES) else None
+        cookie_path = config.X_COOKIES
+        
+    if cookie_path and os.path.exists(cookie_path) and os.path.getsize(cookie_path) > 0:
+        return cookie_path
     return None
 
 def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
     """Estimates the file size of a format in bytes using bitrate or resolution mappings."""
-    # 1. Direct size reading
     size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
     if size > 0:
         return size
         
-    # 2. Bitrate-based estimate (Duration * Total Bitrate / 8)
     tbr = fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr') or 0
     if tbr > 0 and duration_seconds > 0:
         return int((duration_seconds * (tbr * 1000)) / 8)
         
-    # 3. Resolution mapping (failsafe fallback per minute of stream)
     height = fmt.get('height')
     if duration_seconds > 0:
         duration_minutes = duration_seconds / 60
@@ -43,7 +45,7 @@ def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
             else:
                 mb_per_min = 2
         else:
-            mb_per_min = 1.5  # Audio track fallback
+            mb_per_min = 1.5
             
         return int(duration_minutes * mb_per_min * 1024 * 1024)
         
@@ -59,7 +61,6 @@ def format_size_short(size_bytes: int) -> str:
     return f"{int(size_mb)}M"
 
 def extract_formats(url: str) -> dict:
-    """Extract format details and separate into sorted video and audio catalogs."""
     cookie_path = get_cookies_for_url(url)
     
     ydl_opts = {
@@ -81,11 +82,9 @@ def extract_formats(url: str) -> dict:
     audio_options = []
 
     for fmt in formats:
-        # Compute exact or estimated size
         size = estimate_format_size(fmt, duration_seconds)
         size_str = format_size_short(size)
         
-        # Audio Extraction
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
             ext = fmt.get('ext', 'm4a')
             abr = fmt.get('abr') or 0
@@ -97,11 +96,9 @@ def extract_formats(url: str) -> dict:
                 'bitrate': abr
             })
             
-        # Video Extraction
         elif fmt.get('vcodec') != 'none':
             resolution = fmt.get('height')
             if resolution:
-                # Add warning flag if size exceeds Telegram's 2GB Bot upload limit
                 warn_flag = " ⚠️" if size > (2000 * 1024 * 1024) else ""
                 video_options.append({
                     'format_id': fmt['format_id'],
@@ -132,13 +129,13 @@ def extract_formats(url: str) -> dict:
         'title': info.get('title', 'Unknown Title'),
         'duration': duration_seconds,
         'thumbnail': info.get('thumbnail'),
-        'videos': unique_videos[:5], # Limit to top 5 qualities
+        'videos': unique_videos[:5],
         'audios': unique_audios[:5]
     }
 
 def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
-    """Uses FFmpeg to crop and pad the thumbnail into a standard 320x320 black-padded square JPEG."""
-    output_path = f"cache/{cache_id}_thumb.jpg"
+    """Uses FFmpeg to crop and pad the thumbnail into a standard 320x320 black-padded square JPEG inside the task folder."""
+    output_path = f"cache/{cache_id}/thumb.jpg"
     try:
         cmd = [
             'ffmpeg', '-y',
@@ -152,7 +149,6 @@ def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
         return input_path
 
 def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
-    """Return (width, height, duration) of the media file using ffmpeg probe."""
     try:
         probe = ffmpeg.probe(file_path)
         video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
@@ -166,9 +162,10 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 def download_media(url: str, format_id: str, format_type: str, cache_id: str, progress_fn=None) -> dict:
-    """Download the file using cookies, postprocess it, and extract thumbnails."""
-    os.makedirs("cache", exist_ok=True)
-    out_tmpl = f"cache/{cache_id}_%(title)s.%(ext)s"
+    """Download the file using cookies, postprocess it, and extract thumbnails into a secure task folder."""
+    task_dir = f"cache/{cache_id}"
+    os.makedirs(task_dir, exist_ok=True)
+    out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
     cookie_path = get_cookies_for_url(url)
     
     ydl_opts = {
@@ -180,11 +177,9 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
         ydl_opts['cookiefile'] = cookie_path
         
     if format_type == 'v':
-        # Merge selected format with bestaudio and output strictly as mp4
         ydl_opts['format'] = f"{format_id}+bestaudio/best"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
-        # Convert audio to MP3
         ydl_opts['format'] = format_id
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -194,7 +189,6 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
 
     ydl_opts['writethumbnail'] = True
     
-    # Progress hook trigger
     if progress_fn:
         def ytdl_hook(d):
             if d['status'] == 'downloading':
@@ -207,7 +201,6 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         
-        # Adjust file names for postprocessors
         if format_type == 'a':
             base, _ = os.path.splitext(filename)
             filename = f"{base}.mp3"
@@ -219,7 +212,6 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
                 elif os.path.exists(f"{base}.mkv"):
                     filename = f"{base}.mkv"
 
-        # Search for saved thumbnails
         base_path, _ = os.path.splitext(filename)
         thumb_path = None
         for ext in ['.jpg', '.jpeg', '.png', '.webp']:
@@ -243,8 +235,7 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
 def split_file_generator(file_path: str, max_chunk_size_bytes: int):
     """
     On-Demand sequential splitter:
-    Yields paths of split binary parts one-by-one, allowing the main engine 
-    to upload a part and immediately delete it before splitting the next.
+    Yields paths of split binary parts one-by-one.
     Caps extra disk space to just ONE part (max 2GB or 4GB) instead of duplicating storage.
     """
     if not os.path.isfile(file_path):
@@ -252,7 +243,6 @@ def split_file_generator(file_path: str, max_chunk_size_bytes: int):
         
     file_size = os.path.getsize(file_path)
     
-    # If the file fits in one chunk, yield the original file and stop
     if file_size <= max_chunk_size_bytes:
         yield file_path
         return
@@ -261,7 +251,6 @@ def split_file_generator(file_path: str, max_chunk_size_bytes: int):
     dir_name = os.path.dirname(file_path)
     basename = os.path.basename(file_path)
     
-    # Standard 1MB buffer to prevent RAM exhaustion
     BUFFER_SIZE = min(1024 * 1024, max_chunk_size_bytes)
     
     with open(file_path, "rb") as f_in:
@@ -279,11 +268,9 @@ def split_file_generator(file_path: str, max_chunk_size_bytes: int):
                         f_out.write(chunk)
                         bytes_remaining -= len(chunk)
                         
-                # Yield the path to main.py to upload and delete
                 yield part_path
                 
             except Exception as e:
-                # Cleanup part if split writing fails halfway
                 if os.path.exists(part_path):
                     os.remove(part_path)
                 raise e

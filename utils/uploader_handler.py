@@ -5,10 +5,9 @@ from pyrogram import Client
 from utils.gate import is_document_mode
 
 async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False):
-    """Sends a single media file using the designated client (standard bot or premium userbot)."""
+    """Sends a single media file using the designated client, passing thumbs to document uploads too."""
     from utils.downloader import probe_video_dimensions
     
-    # Select client based on file limits
     file_size = os.path.getsize(file_path)
     use_premium = bool(premium_client and file_size > (2000 * 1024 * 1024))
     client = premium_client if use_premium else bot_client
@@ -18,6 +17,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             chat_id=chat_id,
             document=file_path,
             caption=f"📁 **Part:** `{os.path.basename(file_path)}`",
+            thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None, # Visual preview for doc mode!
             progress=progress_fn
         )
         
@@ -32,7 +32,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             caption=f"🎵 **{title}**\nUploaded via Downloader Bot",
             progress=progress_fn
         )
-    else:  # action == 'v' or default video
+    else:  # action == 'v'
         width, height, parsed_duration = probe_video_dimensions(file_path)
         final_duration = parsed_duration if parsed_duration > 0 else int(duration)
         return await client.send_video(
@@ -48,18 +48,13 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         )
 
 async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg):
-    """
-    On-Demand Sequential Uploader:
-    Generates chunks one-by-one, uploads them, and immediately purges them from disk.
-    Caps VPS disk overhead to exactly ONE chunk size.
-    """
+    """On-Demand Sequential Uploader."""
     from utils.downloader import split_file_generator
-    from main import progress_bar_handler # Imported dynamically to prevent circular dependencies
+    from main import progress_bar_handler
     
     file_size = os.path.getsize(file_path)
     use_premium = bool(premium_client and file_size > (2000 * 1024 * 1024))
     
-    # Define chunk boundaries: 1.95 GB for standard Bot, 3.9 GB for Premium Userbot
     max_chunk_size = (3900 * 1024 * 1024) if use_premium else (1950 * 1024 * 1024)
     force_document = is_document_mode(chat_id)
     
@@ -72,7 +67,6 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
         generator = split_file_generator(file_path, max_chunk_size)
         
         while True:
-            # Generate the next chunk sequentially inside executor to keep async loop free
             def get_next_part():
                 try:
                     return next(generator)
@@ -91,7 +85,6 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 
             await progress_msg.edit_text(f"📤 Uploading part {part_num}...")
             
-            # Split volumes are binary raw blocks: they MUST always be uploaded as documents!
             await send_single_media(
                 bot_client=bot_client,
                 premium_client=premium_client,
@@ -106,7 +99,6 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 force_document=force_document or is_split
             )
             
-            # Purge part file immediately to recycle VPS space
             if part_path != file_path:
                 if os.path.exists(part_path):
                     os.remove(part_path)
