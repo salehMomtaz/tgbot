@@ -32,15 +32,26 @@ COOKIE_MAP = {
 }
 
 # In-memory dictionary to track administrative states per user
-# Structure: { user_id: "state_string" }
 USER_STATES = {}
+
+# In-memory registry to track and delete active ForceReply prompts on cancel or success
+ACTIVE_PROMPTS = {}
 
 def register_admin_handlers(app: Client):
     
     from main import log_event, queue
 
-    # Global reusable "Back to Console" markup
+    # Reusable "Back to Console" inline button
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])
+
+    async def purge_active_prompt(user_id: int, client: Client):
+        """Helper to safely delete any active ForceReply prompt bubble from the chat stream."""
+        prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
+        if prompt_id:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+            except Exception:
+                pass
 
     # =========================================================================
     # Group -1: Global Interceptor Gate (Strict Security Shield)
@@ -60,29 +71,39 @@ def register_admin_handlers(app: Client):
             message.stop_propagation()
 
     # =========================================================================
-    # Group 0: State Machine Handler (Processes text inputs without replies)
+    # Group 0: State Machine Handler (Processes text inputs ONLY if user is in an active state)
     # =========================================================================
-    @app.on_message(filters.text & filters.private, group=0)
+    @app.on_message(
+        filters.text & 
+        filters.private & 
+        filters.create(lambda _, __, m: m.from_user.id in USER_STATES), 
+        group=0
+    )
     async def admin_state_message_handler(client: Client, message: Message):
         user_id = message.from_user.id
-        if user_id != config.SYSTEM_CREATOR_ID:
-            return
-            
         state = USER_STATES.get(user_id)
-        if not state:
-            # Let the message propagate to the standard text handlers in Group 1
-            return
-            
         input_text = message.text.strip()
         
-        # User Failsafe: If they are in a state but send start/console, clear state and open console
+        # Failsafe escape: If you type /start or console triggers, clear active state and let Group 1 handle it
         if input_text.lower() in ["/start", "🛠 console", "hey", "console", "hi!"]:
             USER_STATES.pop(user_id, None)
-            return  # Let the propagation pass to Group 1
+            await purge_active_prompt(user_id, client)
+            return  # Propagates downstream to Group 1
             
+        # We do NOT delete your typed message here anymore (it remains in your history)
+        prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
+
         # 1. Handle Cookie Replacement State
         if state.startswith("waiting_for_replace_"):
             USER_STATES.pop(user_id, None)
+            
+            # Delete the bot's old prompt message
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            
             cookie_key = state.split("waiting_for_replace_")[1]
             file_path = COOKIE_MAP.get(cookie_key)
             
@@ -110,6 +131,11 @@ def register_admin_handlers(app: Client):
         # 2. Handle User ID Input States (Add, Remove, Unban)
         if not is_valid_telegram_id(input_text):
             USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
             await message.reply_text(
                 "❌ Error: Invalid Telegram ID. Please input digits only (between 5 and 11 numbers).",
                 reply_markup=back_markup
@@ -118,7 +144,14 @@ def register_admin_handlers(app: Client):
             return
             
         target_id = int(input_text)
-        USER_STATES.pop(user_id, None)  # Reset state on entry
+        USER_STATES.pop(user_id, None)  # Reset state
+        
+        # Delete the bot's old prompt message
+        if prompt_id:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+            except Exception:
+                pass
         
         if state == "waiting_for_add_user":
             if add_user(target_id):
@@ -170,7 +203,7 @@ def register_admin_handlers(app: Client):
         message.stop_propagation()
 
     # =========================================================================
-    # Group 1: Main Text Router (Handles Commands and greetings)
+    # Group 1: Main Text Router (Handles plain text commands and greetings)
     # =========================================================================
     @app.on_message(filters.text & filters.private, group=1)
     async def admin_start_text_handler(client: Client, message: Message):
@@ -218,6 +251,7 @@ def register_admin_handlers(app: Client):
             
         if data == "admin_close":
             USER_STATES.pop(user_id, None)
+            await purge_active_prompt(user_id, client)
             await callback_query.message.delete()
             await callback_query.answer("Console closed.")
             
@@ -270,14 +304,16 @@ def register_admin_handlers(app: Client):
             
         elif data == "admin_unban":
             USER_STATES[user_id] = "waiting_for_unban"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
             await callback_query.message.edit_text(
-                "🔓 **Unban User**\nPlease type the numerical ID of the blocked user you want to unban:",
+                "🔓 **Unban User**\nPlease type the numerical ID of the blocked user you want to unban directly in your text box and press send:",
                 reply_markup=back_markup
             )
             await callback_query.answer()
             
         elif data == "admin_main":
-            USER_STATES.pop(user_id, None)  # Safe reset state on menu return
+            USER_STATES.pop(user_id, None)  # Reset state on return
+            ACTIVE_PROMPTS.pop(user_id, None)
             
             doc_status = "✅" if is_document_mode(user_id) else "❌"
             keyboard = InlineKeyboardMarkup([
@@ -294,16 +330,18 @@ def register_admin_handlers(app: Client):
             
         elif data == "admin_add":
             USER_STATES[user_id] = "waiting_for_add_user"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
             await callback_query.message.edit_text(
-                "➕ **Add Authorized User**\nPlease type the numerical ID of the user you want to authorize:",
+                "➕ **Add Authorized User**\nPlease type the numerical ID of the user you want to authorize directly in your text box and press send:",
                 reply_markup=back_markup
             )
             await callback_query.answer()
             
         elif data == "admin_remove":
             USER_STATES[user_id] = "waiting_for_remove_user"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
             await callback_query.message.edit_text(
-                "➖ **Remove Authorized User**\nPlease type the numerical ID of the user you want to remove:",
+                "➖ **Remove Authorized User**\nPlease type the numerical ID of the user you want to remove directly in your text box and press send:",
                 reply_markup=back_markup
             )
             await callback_query.answer()
@@ -313,6 +351,7 @@ def register_admin_handlers(app: Client):
         # =========================================================================
         elif data == "admin_cookies_menu":
             USER_STATES.pop(user_id, None)
+            ACTIVE_PROMPTS.pop(user_id, None)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("YouTube", callback_data="admin_cookie_select:ytcookies"), InlineKeyboardButton("Instagram", callback_data="admin_cookie_select:igcookies")],
                 [InlineKeyboardButton("TikTok", callback_data="admin_cookie_select:ttcookies"), InlineKeyboardButton("X/Twitter", callback_data="admin_cookie_select:xcookies")],
@@ -355,7 +394,7 @@ def register_admin_handlers(app: Client):
                 
             elif action == "replace":
                 USER_STATES[user_id] = f"waiting_for_replace_{cookie_key}"
-                # Rendered cleanly in a single message with a back button underneath
+                ACTIVE_PROMPTS[user_id] = callback_query.message.id
                 await callback_query.message.edit_text(
                     f"✏️ **Replace {cookie_key}.txt**\nPlease paste your fresh Netscape formatted cookies into your standard text box and press send:",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Cancel & Return", callback_data=f"admin_cookie_select:{cookie_key}")]])
