@@ -41,6 +41,7 @@ ACTIVE_PROMPTS = {}
 def register_admin_handlers(app: Client):
     
     from main import log_event, queue
+    from utils.shared import queue  # Fixed: Import from clean shared registry
 
     # Reusable "Back to Console" inline button
     back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]])

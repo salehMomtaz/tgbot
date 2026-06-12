@@ -8,7 +8,8 @@ import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import config
-from main import queue, DOWNLOAD_CACHE, progress_bar_handler, log_event
+from utils.shared import queue, DOWNLOAD_CACHE  # Fixed: Import from clean shared registry
+from main import progress_bar_handler, log_event
 from utils.gate import is_authorized
 from utils.downloader import extract_formats, download_media
 from utils.uploader_handler import process_split_and_upload

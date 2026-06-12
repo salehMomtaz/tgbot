@@ -6,9 +6,8 @@ import shutil
 import logging
 import uvicorn
 from pyrogram import Client, filters, utils
-from pyrogram.types import Message, CallbackQuery
 import config
-from utils.queue_manager import DownloadQueue
+from utils.shared import queue, DOWNLOAD_CACHE, LAST_UPDATE_TIME # Fixed: Import from shared registry
 
 # =========================================================================
 # Monkey-Patch: Resolves Pyrogram's internal 'Peer id invalid' Channel Bug
@@ -27,10 +26,6 @@ utils.get_peer_type = get_peer_type_patched
 # =========================================================================
 # Application Global Shared Instances
 # =========================================================================
-
-queue = DownloadQueue()
-DOWNLOAD_CACHE = {}
-LAST_UPDATE_TIME = {}
 
 app = Client(
     "media_bot",
@@ -59,7 +54,7 @@ def setup_system_logger():
             from utils.logger import TelegramChannelHandler
             root_logger = logging.getLogger()
             
-            # Explicitly lower root logger's filtering threshold so INFO logs are not discarded
+            # CRITICAL FIX: Explicitly lower root logger's filtering threshold so INFO logs are not discarded
             root_logger.setLevel(logging.INFO)
             
             # Format logs briefly, our custom handler will add emojis, timestamps, and module tags
@@ -103,7 +98,7 @@ async def progress_bar_handler(current, total, message, status_title: str):
         pass
 
 def initialize_cookie_jars():
-    """Initializes empty cookie files with the Netscape header to prevent warnings and enable auto-writing."""
+    """Initializes empty cookie files with the Netscape header to prevent yt-dlp warnings and enable auto-writing."""
     cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, "cookies.txt"]
     for file_path in cookie_files:
         needs_init = False
