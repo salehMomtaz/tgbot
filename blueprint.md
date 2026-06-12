@@ -1,3 +1,8 @@
+### Project Blueprint & Status Update
+
+Overwrite your local `blueprint.md` file:
+
+```markdown
 # Blueprint: Private Media Downloader & Streamer Telegram Bot
 
 ## 📂 System Layout

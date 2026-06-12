@@ -6,8 +6,9 @@ import shutil
 import logging
 import uvicorn
 from pyrogram import Client, filters, utils
+from pyrogram.types import Message, CallbackQuery  # Fixed: Imported missing type annotations
 import config
-from utils.shared import queue, DOWNLOAD_CACHE, LAST_UPDATE_TIME # Fixed: Import from shared registry
+from utils.shared import queue, DOWNLOAD_CACHE, LAST_UPDATE_TIME
 
 # =========================================================================
 # Monkey-Patch: Resolves Pyrogram's internal 'Peer id invalid' Channel Bug
