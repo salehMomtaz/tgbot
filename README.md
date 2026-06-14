@@ -30,6 +30,23 @@ Before starting, ensure you have:
 3.  **Docker and the Docker Compose plugin** installed on your VPS (detailed below).
 
 ---
+### Docker IPv6 note
+
+This project assumes Docker runs without IPv6, because some hosts with partial/broken IPv6 cause yt-dlp errors like:
+
+> Address family for hostname not supported
+
+On the host where you run Docker, configure the Docker daemon:
+```bash
+sudo tee /etc/docker/daemon.json >/dev/null << 'EOF'
+{
+  "ipv6": false
+}
+EOF
+sudo systemctl restart docker
+
+
+---
 
 ## Step-by-Step Setup Guide (For Absolute Beginners)
 
