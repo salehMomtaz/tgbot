@@ -1,23 +1,69 @@
+# utils/updater.py
 import asyncio
+import logging
+import subprocess
 import sys
 
+logger = logging.getLogger(__name__)
+
+
+def _installed_version() -> str | None:
+    """Return the installed yt-dlp version string, or None if not callable."""
+    try:
+        out = subprocess.run(
+            [sys.executable, "-m", "yt_dlp", "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False,
+        )
+        ver = out.stdout.strip().splitlines()[0] if out.stdout else ""
+        return ver or None
+    except Exception:
+        return None
+
+
+def _is_nightly(version: str) -> bool:
+    """yt-dlp stable = 'YYYY.MM.DD' (2 dots); nightly/dev = 'YYYY.MM.DD.HHMMSS' (3 dots)."""
+    return version.count(".") >= 3
+
+
 async def auto_update_ytdlp():
-    """Run pip install -U --pre yt-dlp every 6 hours to get nightly builds."""
+    """Keep yt-dlp on the latest nightly build.
+
+    `pip install -U --pre "yt-dlp[default]"`:
+      * `--pre` allows pre-releases — yt-dlp publishes nightly timestamp builds
+        to PyPI as pre-releases, so this stays on the nightly channel.
+      * `[default]` preserves the default extras (certifi, etc.) across upgrades
+        — plain `yt-dlp` would silently strip them.
+    Runs every 6 hours.
+    """
+    # One initial delay (30 s) so we don't fight with boot-time provider startup.
+    await asyncio.sleep(30)
     while True:
-        print("[Updater] Checking for yt-dlp nightly updates...")
+        before = _installed_version()
+        logger.info(f"[Updater] Checking for yt-dlp nightly updates (current: {before or 'unknown'})...")
         try:
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp",
+                sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp[default]",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await process.communicate()
+            after = _installed_version()
             if process.returncode == 0:
-                print("[Updater] yt-dlp updated successfully.")
+                if after and after != before:
+                    logger.info(f"[Updater] yt-dlp updated: {before or 'n/a'} → {after}.")
+                else:
+                    logger.info(f"[Updater] yt-dlp already up to date ({after or 'unknown'}).")
+                if after and not _is_nightly(after):
+                    logger.warning(
+                        f"[Updater] yt-dlp {after} is NOT a nightly build "
+                        f"(expected a YYYY.MM.DD.HHMMSS version). "
+                        "YouTube may break between releases; a nightly is recommended."
+                    )
             else:
-                print(f"[Updater] yt-dlp update failed: {stderr.decode().strip()}")
+                logger.error(f"[Updater] yt-dlp update failed: {stderr.decode().strip()}")
         except Exception as e:
-            print(f"[Updater] Exception occurred during update: {e}")
-        
+            logger.exception(f"[Updater] Exception occurred during update: {e}")
+
         # Wait 6 hours before checking again (6 hours = 21600 seconds)
         await asyncio.sleep(21600)

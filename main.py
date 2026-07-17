@@ -1,6 +1,7 @@
 # main.py
 import os
 import time
+import signal
 import asyncio
 import shutil
 import logging
@@ -52,20 +53,26 @@ def setup_system_logger():
     """Binds our custom TelegramChannelHandler directly to Python's root logger."""
     if config.LOG_CHANNEL_ID != 0:
         try:
-            from utils.logger import TelegramChannelHandler
+            from utils.logger import TelegramChannelHandler, ensure_local_log_handler
             root_logger = logging.getLogger()
-            
+
             # CRITICAL FIX: Explicitly lower root logger's filtering threshold so INFO logs are not discarded
             root_logger.setLevel(logging.INFO)
-            
-            # Format logs briefly, our custom handler will add emojis, timestamps, and module tags
-            formatter = logging.Formatter('%(message)s')
+
+            # Format logs briefly; our channel handler adds emojis, timestamps, and module tags.
+            channel_formatter = logging.Formatter('%(message)s')
             handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
-            handler.setFormatter(formatter)
+            handler.setFormatter(channel_formatter)
             handler.setLevel(logging.INFO)  # Capture standard INFO, WARNING, and ERROR logs
-            
+
+            # Also mirror the same logs to a local rotating file for real-time debugging.
+            local_handler = ensure_local_log_handler()
+            local_handler.setLevel(logging.INFO)
+
             root_logger.addHandler(handler)
-            print("[Logger] Standalone Telegram Logging Service linked to Root Logger.")
+            root_logger.addHandler(local_handler)
+            logging.info("[Logger] Standalone Telegram Logging Service linked to Root Logger.")
+            logging.info(f"[Logger] Local log mirror active at: {os.path.abspath('logs/bot.log')}")
         except Exception as e:
             print(f"Warning: Failed to initialize standalone Telegram logger: {e}")
 
@@ -80,14 +87,14 @@ async def progress_bar_handler(current, total, message, status_title: str):
     if msg_id in LAST_UPDATE_TIME and now - LAST_UPDATE_TIME[msg_id] < 5:
         return
     LAST_UPDATE_TIME[msg_id] = now
-    
+
     percentage = (current * 100 / total) if total > 0 else 0
     filled = int(percentage // 10)
     bar_str = "■" * filled + "□" * (10 - filled)
-    
+
     current_mb = round(current / (1024 * 1024), 1)
     total_mb = round(total / (1024 * 1024), 1)
-    
+
     text = (
         f"⏳ **{status_title}**\n"
         f"`[{bar_str}]` {percentage:.1f}%\n"
@@ -99,37 +106,70 @@ async def progress_bar_handler(current, total, message, status_title: str):
         pass
 
 def initialize_cookie_jars():
-    """Initializes empty cookie files with the Netscape header to prevent yt-dlp warnings and enable auto-writing."""
-    cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, "cookies.txt"]
+    """
+    Ensure cookie files exist with a Netscape header.
+    If a jar already has content, prepend the header when it is missing.
+    Never overwrite existing cookies.
+
+    The YouTube working jar is made read-only after init so that yt-dlp cannot
+    corrupt it with write-back. Every yt-dlp invocation receives a snapshot copy
+    from utils.downloader.get_cookies_for_url() instead.
+    """
+    header = "# Netscape HTTP Cookie File\n"
+    cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, config.COOKIES_FILE]
     for file_path in cookie_files:
-        needs_init = False
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            needs_init = True
-        else:
             try:
-                with open(file_path, "r") as f:
-                    first_line = f.readline()
-                if not first_line.startswith("# Netscape"):
-                    needs_init = True
-            except Exception:
-                needs_init = True
-                
-        if needs_init:
-            try:
-                with open(file_path, "w") as f:
-                    f.write("# Netscape HTTP Cookie File\n")
-                print(f"[Cookies] Cookie jar initialized with Netscape header: {file_path}")
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(header)
+                print(f"[Cookies] Initialized empty cookie jar: {file_path}")
             except Exception as e:
                 print(f"[Cookies] Warning: Could not initialize cookie jar {file_path}: {e}")
+            continue
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if not content.strip().startswith("# Netscape"):
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(header + content)
+                print(f"[Cookies] Added missing Netscape header to: {file_path}")
+        except Exception as e:
+            print(f"[Cookies] Warning: Could not check cookie jar {file_path}: {e}")
+
+    # If YouTube working jar is missing but a protected backup exists, restore it.
+    backup_path = getattr(config, "YT_COOKIES_BACKUP", "ytcookies.backup")
+    if (not os.path.exists(config.YT_COOKIES) or os.path.getsize(config.YT_COOKIES) == 0) \
+            and os.path.exists(backup_path) and os.path.getsize(backup_path) > 0:
+        try:
+            # Make target writable in case a previous crash left it read-only.
+            if os.path.exists(config.YT_COOKIES):
+                os.chmod(config.YT_COOKIES, 0o644)
+            shutil.copy(backup_path, config.YT_COOKIES)
+            print(f"[Cookies] Restored {config.YT_COOKIES} from protected backup.")
+        except Exception as e:
+            print(f"[Cookies] Warning: Could not restore YouTube cookie backup: {e}")
+
+    # Lock the live YouTube jar so yt-dlp can never rewrite it. Admin replace /
+    # savebackup temporarily make it writable when they need to update it.
+    try:
+        if os.path.exists(config.YT_COOKIES) and os.access(config.YT_COOKIES, os.W_OK):
+            os.chmod(config.YT_COOKIES, 0o644)
+        os.chmod(config.YT_COOKIES, 0o444)
+        print(f"[Cookies] Locked {config.YT_COOKIES} read-only to prevent yt-dlp corruption.")
+    except Exception as e:
+        print(f"[Cookies] Warning: Could not lock {config.YT_COOKIES}: {e}")
 
 async def auto_clean_cache_directory():
-    """Periodically sweeps the cache directory every hour to purge orphaned files older than 2 hours."""
+    """Periodically sweeps the cache directory every hour to purge orphaned files older than the configured age."""
+    from utils.shared import RUNTIME_SETTINGS
     while True:
         print("[Cleaner] Running periodic cache sweep...")
         cache_dir = "cache"
         if os.path.exists(cache_dir):
             now = time.time()
-            threshold = now - 7200  # 2 hours = 7200 seconds
+            max_age_hours = RUNTIME_SETTINGS.get("max_cache_age_hours", 2)
+            threshold = now - (max_age_hours * 3600)
             try:
                 for entry in os.scandir(cache_dir):
                     mtime = entry.stat().st_mtime
@@ -142,7 +182,7 @@ async def auto_clean_cache_directory():
                             print(f"[Cleaner] Purged orphaned file: {entry.path}")
             except Exception as e:
                 print(f"[Cleaner] Exception occurred during cache sweep: {e}")
-                
+
         await asyncio.sleep(3600)  # Wait 1 hour
 
 # =========================================================================
@@ -154,7 +194,7 @@ def patch_pyrogram_send_methods():
     orig_send_video = Client.send_video
     orig_send_document = Client.send_document
     orig_send_audio = Client.send_audio
-    
+
     def get_target_chat(args, kwargs) -> str:
         return str(kwargs.get("chat_id") or (args[0] if args else ""))
 
@@ -165,21 +205,21 @@ def patch_pyrogram_send_methods():
         if target != str(config.LOG_CHANNEL_ID):
             logging.info(f"📤 **[SENT MESSAGE]**\n{str(sent_msg)}")
         return sent_msg
-        
+
     async def wrapped_send_video(self, *args, **kwargs):
         sent_msg = await orig_send_video(self, *args, **kwargs)
         target = get_target_chat(args, kwargs)
         if target != str(config.LOG_CHANNEL_ID):
             logging.info(f"📤 **[SENT VIDEO]**\n{str(sent_msg)}")
         return sent_msg
-        
+
     async def wrapped_send_document(self, *args, **kwargs):
         sent_msg = await orig_send_document(self, *args, **kwargs)
         target = get_target_chat(args, kwargs)
         if target != str(config.LOG_CHANNEL_ID):
             logging.info(f"📤 **[SENT DOCUMENT]**\n{str(sent_msg)}")
         return sent_msg
-        
+
     async def wrapped_send_audio(self, *args, **kwargs):
         sent_msg = await orig_send_audio(self, *args, **kwargs)
         target = get_target_chat(args, kwargs)
@@ -202,43 +242,55 @@ patch_pyrogram_send_methods()
 
 async def main_engine():
     print("Initializing services...")
-    
+
     # 1. Start the global system logger to pipe all container logs to your channel
     setup_system_logger()
-    
-    # 2. Initialize and format cookie files
+
+    # 2. Initialize and format cookie files (locks the YouTube jar read-only)
     initialize_cookie_jars()
-    
-    # 3. Bind Pyrogram clients to stream handlers
+
+    # 3. Disk-space sanity check: refuse to run if the filesystem is critically full
+    try:
+        usage = shutil.disk_usage(os.getcwd())
+        free_gb = usage.free / (1024 ** 3)
+        used_pct = (usage.used / usage.total) * 100
+        logging.info(f"[System] Disk usage: {used_pct:.1f}% used, {free_gb:.2f} GB free.")
+        if used_pct > 95:
+            logging.error("[System] Disk is critically full. Refusing to start to protect SSH/system access.")
+            return
+    except Exception as e:
+        logging.warning(f"[System] Could not check disk usage: {e}")
+
+    # 4. Bind Pyrogram clients to stream handlers
     import modules.stream_handler
     modules.stream_handler.tg_client = app
-    
-    # 4. Import and register modular handler systems
+
+    # 5. Import and register modular handler systems
     from modules.admin import register_admin_handlers
     from modules.downloader_handler import register_downloader_handlers
     from modules.stream_interceptor import register_stream_interceptor_handlers
-    
+
     register_admin_handlers(app)
     register_downloader_handlers(app)
     register_stream_interceptor_handlers(app)
-    
+
     # Group -2 Incoming Update Log Interceptors
     @app.on_message(filters.private, group=-2)
     async def incoming_message_log_interceptor(client: Client, message: Message):
         """Intercepts and logs the raw JSON string of every incoming update."""
         logging.info(f"📥 **[RECEIVED UPDATE]**\n{str(message)}")
         message.continue_propagation()
-        
+
     @app.on_callback_query(group=-2)
     async def incoming_callback_log_interceptor(client: Client, callback_query: CallbackQuery):
         """Intercepts and logs the raw JSON string of every inline glass button click."""
         logging.info(f"🖱 **[CALLBACK QUERY]**\n{str(callback_query)}")
         callback_query.continue_propagation()
-    
-    # 5. Start Standard Bot Client
+
+    # 6. Start Standard Bot Client
     await app.start()
     print("Telegram Bot Online.")
-    
+
     # Resolve Log Channel Peer on startup to avoid 'Peer id invalid' exceptions
     if config.LOG_CHANNEL_ID != 0:
         try:
@@ -246,15 +298,40 @@ async def main_engine():
             print("Log Channel Peer resolved successfully.")
         except Exception as e:
             print(f"Warning: Could not resolve Log Channel ID: {e}")
-    
-    # 6. Start Premium Userbot Client if session is configured
+
+    # 7. Start Premium Userbot Client if session is configured
     if premium_app:
         await premium_app.start()
         print("Premium Userbot Client connected.")
-    
-    # 7. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
+
+    # 8. Start the PO-token provider. It is on by default and YouTube downloads
+    #    require it (cookies + PO token, no fallback). A failure here is logged
+    #    loudly but does NOT crash the bot — the rest of the bot keeps working,
+    #    YouTube downloads will fail with an actionable message until the
+    #    provider is fixed (Admin Console -> PO Token).
+    pot_manager = None
+    if config.YTDLP_POT_ENABLED:
+        from utils.pot_provider import PotProviderManager
+        import utils.shared as shared
+        try:
+            pot_manager = PotProviderManager()
+            await pot_manager.start()
+            shared.pot_manager_instance = pot_manager
+            shared.POT_AVAILABLE = True
+            logging.info(f"[POT] Provider started on 127.0.0.1:{config.YTDLP_POT_PORT}")
+        except Exception as e:
+            logging.error(
+                f"[POT] Failed to start provider: {e}. "
+                "YouTube downloads will be UNAVAILABLE until this is fixed "
+                "(Admin Console -> PO Token, or re-run ./install.sh)."
+            )
+            shared.pot_manager_instance = None
+            shared.POT_AVAILABLE = False
+            pot_manager = None
+
+    # 9. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
     from modules.stream_handler import fastapi_app
-    
+
     uvicorn_args = {
         "app": fastapi_app,
         "host": "0.0.0.0",
@@ -262,7 +339,7 @@ async def main_engine():
         "log_level": "info",
         "loop": "asyncio"
     }
-    
+
     ssl_cert = getattr(config, "SSL_CERT_PATH", "")
     ssl_key = getattr(config, "SSL_KEY_PATH", "")
     if ssl_cert and ssl_key:
@@ -272,21 +349,36 @@ async def main_engine():
             print("[Uvicorn] SSL parameters loaded. Web server will run natively on HTTPS.")
         else:
             print("[Uvicorn] Warning: SSL certificate or key file not found. Falling back to HTTP.")
-            
+
     config_uvicorn = uvicorn.Config(**uvicorn_args)
     server = uvicorn.Server(config_uvicorn)
-    
+
     from utils.updater import auto_update_ytdlp
-    
-    # Run FastAPI web server, the 6-hour updater, and the 1-hour cache cleaner concurrently
-    await asyncio.gather(
+
+    # Run the FastAPI web server, the 6-hour updater, and the 1-hour cache cleaner
+    # concurrently (plus the PO-token health supervisor when enabled).
+    tasks = [
         server.serve(),
         auto_update_ytdlp(),
-        auto_clean_cache_directory()
-    )
+        auto_clean_cache_directory(),
+    ]
+    if pot_manager:
+        tasks.append(pot_manager.health_check_loop())
+
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        if pot_manager:
+            await pot_manager.stop()
 
 if __name__ == "__main__":
-    import sys
+    # systemd sends SIGTERM on stop/restart. Translate it into the graceful
+    # KeyboardInterrupt path below so pyrogram drains, the PO-token provider is
+    # torn down (PotProviderManager.stop), and cookie locks are released —
+    # instead of dying hard mid-request. Harmless under tmux (no SIGTERM there).
+    def _on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(main_engine())

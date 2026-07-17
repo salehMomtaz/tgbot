@@ -1,190 +1,185 @@
-# tgbot
+# tgbot — Private Media Downloader & Streamer for Telegram
 
-A private, secure, and resource-efficient Telegram Media Downloader and Streamer. Running entirely inside Docker on your Ubuntu VPS, this bot downloads media from YouTube, Instagram, and TikTok with correct metadata, and features a "zero-disk-write" streaming bridge to access Telegram files via HTTP links without consuming your local storage.
+A private, secure, resource-efficient Telegram bot that downloads media from
+**YouTube, Instagram, TikTok, X/Twitter, and every other site supported by
+yt-dlp nightly**, uploads it to Telegram (auto-split across the 2 GB / 4 GB
+ceiling), and can hand out **direct HTTP stream links** for any file you forward
+to it — piped straight from Telegram's servers with zero local buffering.
 
----
+Built on **pyrogram**. Provisioned with a one-shot `./install.sh` (no Docker
+required). Runs as a `systemd` service that survives reboots.
 
-## Key Features
-
-*   **Granular Security Gate:** Automatically ignores messages from unauthorized accounts to protect your server. Features three tiers:
-    *   *System Creator:* (Hardcoded ID) Access to the Admin Console.
-    *   *Authorized Users:* Whitelisted dynamically through the bot.
-    *   *Others:* Blocked and ignored completely.
-*   **Administrative Control Panel:** Toggle a persistent, standard `'🛠 Console'` drawer at the bottom of your chat to easily list, add, or remove user access via interactive glass (inline) buttons.
-*   **Two-Column Format Selector:** Paste a YouTube, Instagram, or TikTok link to see an organized layout: video formats on the left, audio formats on the right, sorted by quality, and labeled with estimated file sizes.
-*   **Automatic Metadata & Thumbnail Processing:** Uses `ffmpeg` to crop and pad thumbnails into square JPEGs (required by Telegram) and embeds duration, resolution, and title metadata so media displays correctly in Telegram's native player.
-*   **Auto-Updating Engine:** A non-blocking background loop checks and upgrades `yt-dlp` to its nightly pre-releases every 6 hours, minimizing issues caused by social media platform updates.
-*   **Direct URL Uploader:** Send any direct file link (e.g., a PDF, Zip, or raw MP4) to the bot, and it will download and upload it to Telegram, instantly purging it from local storage.
-*   **Zero-Disk-Write File Streaming:** Send any large Telegram file (video or document) to the bot, and it will generate an HTTP stream link. Files are piped from Telegram's servers directly to your browser on-the-fly via a lightweight FastAPI server, protecting your VPS disk limits.
+> **New to this?** The complete, beginner-friendly walkthrough — from "I just
+> bought a VPS" to "the bot is live" — lives in
+> [`docs/UBUNTU_VPS_SETUP.md`](docs/UBUNTU_VPS_SETUP.md). This README is the
+> overview; the architecture deep-dive is in [`blueprint.md`](blueprint.md).
 
 ---
 
-## Requirements
+## ✨ Key features
 
-Before starting, ensure you have:
-1.  **An Ubuntu VPS** (Ubuntu 24.04 LTS is recommended).
-2.  **Telegram Developer Credentials:**
-    *   `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org) (required for the underlying Pyrogram engine).
-    *   `BOT_TOKEN` created via Telegram's official [@BotFather](https://t.me/BotFather).
-    *   Your personal numeric Telegram user ID (which you can find by messaging [@userinfobot](https://t.me/userinfobot)).
-3.  **Docker and the Docker Compose plugin** installed on your VPS (detailed below).
+- **🔑 PO-token YouTube support.** A local `bgutil-ytdlp-pot-provider` Deno server
+  mints proof-of-origin tokens so YouTube extractions keep working. Cookies + PO
+  token, no silent fallback — and a one-click **diagnose** in the Admin Console.
+- **🍪 Protected cookie jars.** Each download gets a disposable snapshot; the live
+  YouTube jar is locked read-only and backed up. Test / Save Backup / Restore
+  Backup from the console. No more yt-dlp corruption.
+- **🛡️ Granular security gate.** Three tiers: System Creator (you), dynamically
+  whitelisted users, and everyone else (auto-ignored). Intruders are blacklisted.
+- **🧩 Morphing Admin Console.** An inline-button console to manage users, cookie
+  jars, the PO-token provider, document mode, and the transfer queue.
+- **🎚️ Two-column format selector.** Paste a link → video formats on the left,
+  audio on the right, sorted by quality, labeled with estimated file sizes.
+- **🎞️ Metadata & thumbnails.** `ffmpeg` square-crops thumbnails (Telegram
+  requirement) and embeds duration / resolution / title so media plays natively.
+- **⬆️ Big-file uploads.** On-demand keyframe splitting keeps every part
+  independently playable; the Bot API handles 2 GB, a Premium userbot lifts it to
+  4 GB. Only one extra segment ever sits on disk.
+- **🔄 Auto-updating engine.** A background loop upgrades `yt-dlp` to its nightly
+  build every 6 hours (preserving the `[default]` extras).
+- **🔗 Zero-disk streaming.** Forward a Telegram file → get an HTTP stream link.
+  Files pipe from Telegram to your browser on the fly via a FastAPI bridge.
+- **🩺 Site-aware errors.** Opaque yt-dlp exceptions become clear messages:
+  sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
 
 ---
-### Docker IPv6 note
 
-This project assumes Docker runs without IPv6, because some hosts with partial/broken IPv6 cause yt-dlp errors like:
+## 📋 Requirements
 
-> Address family for hostname not supported
-
-On the host where you run Docker, configure the Docker daemon:
-```bash
-sudo tee /etc/docker/daemon.json >/dev/null << 'EOF'
-{
-  "ipv6": false
-}
-EOF
-sudo systemctl restart docker
-```
+1. **An Ubuntu VPS** — Ubuntu 24.04 LTS is the main focus. A 1 GB box works
+   (the installer provisions a 2 GB swap file); 2 GB+ is comfortable.
+2. **Telegram credentials:**
+   - `API_ID` + `API_HASH` from [my.telegram.org](https://my.telegram.org).
+   - `BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
+   - Your numeric Telegram user ID (message [@userinfobot](https://t.me/userinfobot)).
+3. **That's it.** `install.sh` installs everything else (git, python, ffmpeg,
+   tmux, Deno, the PO-token provider, swap).
 
 ---
 
-## Step-by-Step Setup Guide (For Absolute Beginners)
-
-This guide assumes you are starting with a completely fresh Ubuntu VPS.
-
-### Step 1: Connect to your VPS
-Open a terminal (or Termux on Android) and connect to your server using SSH:
-
-ssh root@YOUR_VPS_IP
-*(Replace `YOUR_VPS_IP` with the actual IP address of your VPS server).*
-
-### Step 2: Update Server and Install Docker (Official Engine)
-Run the following commands to purge any old/conflicting packages, set up the official Docker repository, and install Docker alongside `git`, `nano`, and `ffmpeg`:
-
-bash
-# 1. Update system repositories and upgrade existing packages
-```
-apt update && apt upgrade -y
-```
-# 2. Remove any conflicting pre-installed container packages
-```
-apt-get remove -y docker docker-engine docker.io containerd runc
-```
-# 3. Install necessary system prerequisites
-```
-apt-get install -y ca-certificates curl gnupg lsb-release
-```
-# 4. Add the official Docker GPG Key
-```
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-```
-# 5. Set up the official Docker repository
-```
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-```
-
-# 6. Update repositories and install Docker CE + Git, Nano, and FFmpeg
-```
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin git nano ffmpeg
-```
-### Step 3: Clone the Repository
-Clone your repository to the home directory of your VPS and enter the project folder:
+## 🚀 Quick start
 
 ```bash
+# 1. Get the code
 git clone https://github.com/salehMomtaz/tgbot.git
 cd tgbot
+
+# 2. Provision the server (apt, Deno, venv, PO-token provider, swap, systemd unit)
+./install.sh
+
+# 3. Edit .env with your real tokens
+nano .env
+#    → fill in API_ID, API_HASH, BOT_TOKEN, SYSTEM_CREATOR_ID
+
+# 4. Start as a managed service (survives reboot, auto-restarts on crash)
+sudo systemctl enable --now tgbot
+
+# 5. Watch it come up
+sudo journalctl -u tgbot -f
 ```
-### Step 4: Configure Your Settings
-You need to create your personal configuration file. Make a copy of the example configuration:
+
+Then open Telegram, message your bot, send `/start` (or `console`), open the
+**🛠 Admin System Console**, and upload your YouTube cookies
+(**Cookie Jars → YouTube → Replace**). See the
+[VPS setup guide](docs/UBUNTU_VPS_SETUP.md) for the fully-explained version,
+including how to generate a Premium session, set up a log channel, and get
+cookies.
+
+---
+
+## 🛠 The Admin Console
+
+Send `console` (or `/start`) to the bot as the System Creator. You get an
+inline-button console:
+
+| Button | What it does |
+|---|---|
+| 👥 List / ➕ Add / ➖ Remove Users | Manage the whitelist of people who can use the bot. |
+| 🚫 Blacklist Logs | See (and unban) auto-blocked intruders. |
+| 📄 Doc Mode | Toggle sending media as plain documents (no re-encode). |
+| 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. |
+| 🔐 PO Token | Start / stop / restart / diagnose the PO-token provider; live status badge. |
+| 💥 Abort Transfer | Cancel everything in the queue and purge the cache. |
+
+---
+
+## 🍪 Cookies
+
+YouTube and age/login-restricted sites need browser cookies. The easiest path:
+install a "Get cookies.txt" browser extension, log in to the site, export, and
+**Replace** the jar in the console (paste the text, *or* send a `.txt` file).
+
+The bot protects your jars:
+- The live `ytcookies.txt` is **read-only** so yt-dlp can't corrupt it.
+- Each download uses a **snapshot copy** that's auto-purged later.
+- **Save Backup** freezes the current jar to `ytcookies.backup`; **Restore Backup**
+  brings it back. A trashed/empty live jar auto-restores from the backup on boot.
+- **Test** runs a real extraction against a public video and tells you exactly how
+  many formats YouTube returned (or if the jar is bot-flagged).
+
+---
+
+## 📜 Logs
+
+Two streams, both useful:
+
+- **Service log** (stdout/stderr): `sudo journalctl -u tgbot -f`
+- **Bot's own log** (timestamped, rotated at 5 MB × 3): `tail -f logs/bot.log`
+- Optional **Telegram log channel**: set `LOG_CHANNEL_ID` in `.env` (create a
+  private channel, add the bot as admin). All of the above mirror there too.
+
+---
+
+## 🔄 Updating the bot
+
 ```bash
-cp config.py.example config.py
+cd ~/tgbot
+git pull origin main
+sudo systemctl restart tgbot          # picks up new code
+# (install.sh is idempotent — re-run it after a big change to refresh deps/provider)
 ```
-*(If you do not have a template, create a file named `config.py` using `nano config.py`)*.
 
-Edit `config.py` to fill in your real credentials:
-```
-nano config.py
-```
-Update the fields inside the file:
-```python
-import os
+`yt-dlp` updates itself to nightly every 6 hours automatically; no restart needed
+for extractor fixes.
 
-API_ID = 12345678                          # Replace with your Telegram API ID
-API_HASH = "your_api_hash_here"            # Replace with your Telegram API Hash
-BOT_TOKEN = "your_bot_token_here"          # Replace with your Telegram Bot Token
-SYSTEM_CREATOR_ID = 987654321              # Replace with your numeric Telegram ID
+---
 
-# Replace with your VPS IP address or your domain name
-DOMAIN = "http://YOUR_VPS_IP:8080" 
+## 🐳 Docker (optional / legacy)
 
-DB_FILE = "database.json"
-YT_COOKIES = "ytcookies.txt"
-IG_COOKIES = "igcookies.txt"
-TT_COOKIES = "ttcookies.txt"
-```
-Press `Ctrl+O`, `Enter`, and then `Ctrl+X` to save and exit the nano editor.
+Docker is **supported but no longer the recommended path**. The bare-metal
+`install.sh` + `systemd` flow above is simpler, lighter on a 1 GB VPS, and is
+what this project targets. If you still want Docker, the image is self-contained
+— it installs Deno, the Python deps, **and** clones + builds the PO-token provider
+so YouTube works out of the box:
 
-### Step 5: Extract and Add Cookies (Optional but Recommended)
-Due to strict rate limits and blocks, extracting cookies from browser sessions helps bypass blocks on YouTube and Instagram.
-1. Install a browser extension like *Get cookies.txt LOCALLY* (available on Chrome/Firefox) on your computer.
-2. Visit YouTube, log in, and use the extension to export your cookies. Save this file as `ytcookies.txt`.
-3. Repeat the process for Instagram (`igcookies.txt`) and TikTok (`ttcookies.txt`).
-4. Transfer these text files to your VPS `/root/tgbot/` directory (you can use SFTP, or paste their contents using `nano`). If you choose not to use cookies, simply create empty files:
-   ```bash
-   touch ytcookies.txt igcookies.txt ttcookies.txt
-   ```
-
-### Step 6: Create Package Initialization Files
-Make sure the empty Python configuration files are present so the imports work correctly:
 ```bash
-touch utils/__init__.py modules/__init__.py
-```
-### Step 7: Deploy the Bot Containers
-Build and launch the bot in the background using the Docker Compose plugin:
-```bash
+cp .env.example .env && nano .env   # fill in your secrets first
 docker compose up --build -d
-```
-The `-d` flag tells Docker to run the containers in the background, allowing you to close your terminal session while the bot stays active.
-
-### Step 8: Verifying and Testing
-1. Open Telegram and search for your bot.
-2. Type `/start`. 
-3. If you are the `SYSTEM_CREATOR_ID`, you will see your welcome message and the standard `'🛠 Console'` tray at the bottom.
-4. Paste a YouTube link. The bot should fetch the media attributes and present the download options.
-5. Send any file to the bot. It should return an HTTP direct-stream URL pointing to your VPS.
-
-To monitor live container logs for issues or errors, run:
-```bash
 docker compose logs -f --tail=50
 ```
+
+The provider is built into the image under `/opt` (outside the `.:/app` bind-mount)
+and `YTDLP_POT_PROVIDER_PATH` is set automatically. Provide your secrets in `.env`
+(secrets are **not** baked into the image).
+
 ---
 
-## Managing Your Code with Git
+## 🔒 Security & privacy
 
-If you make modifications to your bot's code locally on your phone (using Termux) or on your computer, you can easily push those updates to GitHub and pull them onto your VPS.
+`.gitignore` already protects your secrets. **Never commit** (or paste publicly):
 
-### Checking the container status on your VPS
-When updating code, always pull from your GitHub repository and rebuild your container:
+- `.env` — your Bot Token, API keys, session string.
+- `database.json` — whitelisted user IDs.
+- `*cookies.txt` / `ytcookies.backup` — live browser sessions.
+- `*.session` / `*.session-journal` — active bot/userbot authorization.
 
-# Pull the latest code updates
-```
-git pull origin main
-```
-# Rebuild and restart the container with the new changes
-```
-docker compose up --build -d
-```
+The PO-token provider is patched to bind **`127.0.0.1` only** — it is never
+reachable from the internet.
+
 ---
 
-## Security and Privacy Warning
-Your `.gitignore` file is configured to protect your sensitive credentials. **Never commit the following files to public GitHub repositories:**
-*   `config.py` (Contains your Bot Token and API Keys)
-*   `database.json` (Contains whitelisted User IDs)
-*   `*.cookies.txt` (Contains your active browser session cookies)
-*   `*.session` and `*.session-journal` (Contains active bot authorization states)
+## 📚 More
+
+- **Beginner VPS guide:** [`docs/UBUNTU_VPS_SETUP.md`](docs/UBUNTU_VPS_SETUP.md)
+- **Architecture deep-dive:** [`blueprint.md`](blueprint.md)
+- **Contributor / agent notes:** [`AGENTS.md`](AGENTS.md)

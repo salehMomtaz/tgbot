@@ -1,0 +1,83 @@
+# tgbot.service — systemd unit TEMPLATE for running the Telegram downloader bot.
+#
+# This file is a TEMPLATE. `./install.sh` copies it to /etc/systemd/system/
+# and substitutes the real values for __USER__, __GROUP__, __PROJECT_DIR__, and
+# __MEMORY_MAX__ based on the user that ran install.sh and the VPS's RAM. You do
+# NOT need to edit it by hand for a normal install.
+#
+# WHY THIS INSTEAD OF tmux/nohup:
+#   • Survives reboots automatically (enabled multi-user target).
+#   • Auto-restarts on crash (Restart=always) with backoff.
+#   • Clean memory protection via MemoryMax= (cgroup): caps RESIDENT RAM only.
+#     Unlike `ulimit -v` (which caps *virtual address space* and breaks V8's
+#     4 GB Oilpan heap cage), MemoryMax leaves virtual space alone — so Deno
+#     boots fine while the bot still can't OOM the VPS and lock out SSH.
+#
+# NOTE on EnvironmentFile: deliberately ABSENT. run.sh already parses .env
+# robustly (dotenv-style, handling the parentheses/spaces in values like
+# YTDLP_USER_AGENT). systemd's EnvironmentFile uses different rules (it does
+# `$VAR` expansion, splits unquoted values) and would mangle those values.
+# Letting run.sh own the .env parsing keeps systemd behavior identical to tmux.
+#
+# HOW TO INSTALL + ENABLE (done for you by ./install.sh — you only need step 3):
+#   sudo cp deploy/tgbot.service /etc/systemd/system/tgbot.service   # install.sh does this + templating
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tgbot          # start now + start on every boot
+#
+# SWITCHING FROM tmux: stop the tmux bot FIRST, then start the service — two
+# instances polling at once conflict ("terminated by other getUpdates").
+#   tmux kill-session -t tgbot
+#   sudo systemctl enable --now tgbot
+#
+# USAGE:
+#   sudo systemctl status  tgbot               # is it up?
+#   sudo journalctl -u tgbot -f                # live logs (stdout/stderr)
+#   tail -f logs/bot.log                       # the bot's own timestamped log
+#   sudo systemctl restart tgbot               # after `git pull`
+#   sudo systemctl stop tgbot                  # take it down
+#
+# (To go back to tmux while debugging: `sudo systemctl disable --now tgbot`.)
+
+[Unit]
+Description=Telegram media downloader bot (pyrogram)
+Documentation=https://github.com/salehMomtaz/tgbot
+# Start after networking is up so the bot can reach api.telegram.org + YouTube.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__PROJECT_DIR__
+# run.sh loads .env, activates the venv, ensures Deno is on PATH, then
+# `exec python main.py` — so systemd's tracked main PID is python.
+ExecStart=__PROJECT_DIR__/run.sh
+
+# Crash recovery: restart forever, 5 s after exit (no thundering herd).
+Restart=always
+RestartSec=5
+
+# --- Resource limits (the systemd-native replacement for run.sh ulimits) ---
+# Cap resident RAM. install.sh tunes __MEMORY_MAX__ to the box's RAM. Does NOT
+# limit virtual address space, so V8's heap cage works.
+MemoryMax=__MEMORY_MAX__
+# File/process limits — same values run.sh sets.
+LimitNOFILE=4096
+LimitNPROC=512
+
+# On stop/restart, systemd signals the WHOLE control group (python + the
+# PO-token provider child) so the Deno process dies with the bot — no orphans.
+# main.py also traps SIGTERM for a graceful drain (pyrogram + provider teardown);
+# control-group is the safety net if that hangs. TimeoutStopSec caps the wait
+# before SIGKILL.
+TimeoutStopSec=20
+KillMode=control-group
+
+# Logs go to the journal: `journalctl -u tgbot -f`. The bot also writes
+# logs/bot.log itself (richer, timestamped) — see that file for detail.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

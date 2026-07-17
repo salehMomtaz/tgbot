@@ -1,9 +1,34 @@
-config.py
-database.json
+# Secrets & runtime config
+.env
+.env.local
+
+# Cookie jars (contain private session cookies once populated)
 ytcookies.txt
+ytcookies.backup
 igcookies.txt
 ttcookies.txt
+xcookies.txt
+cookies.txt
+
+# Database
+database.json
+
+# pyrogram session files
 *.session
 *.session-journal
+
+# Python
 __pycache__/
+*.pyc
+venv/
+
+# Runtime data
 cache/
+logs/
+*.log
+
+# PO-token provider — cloned by install.sh (~200 MB, not part of this repo)
+bgutil-provider/
+
+# Machine-specific install record written by install.sh, read by uninstall.sh
+tools/install-manifest.txt

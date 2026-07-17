@@ -8,3 +8,7 @@ aiohttp
 aiofiles
 apscheduler
 requests
+python-dotenv
+# yt-dlp plugin that talks to the bgutil PO-token HTTP provider (Deno server).
+# Auto-discovered by yt-dlp; the provider server itself is cloned by ./install.sh.
+bgutil-ytdlp-pot-provider

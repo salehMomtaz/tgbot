@@ -1,33 +1,110 @@
 import os
 
-# Telegram API credentials (from my.telegram.org)
-API_ID = int(os.getenv("API_ID", "YOUR_API_ID_HERE"))
-API_HASH = os.getenv("API_HASH", "YOUR_API_HASH_HERE")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+# Load secrets from a .env file (if present) BEFORE reading any env vars.
+# python-dotenv never overwrites real environment variables, so an explicit
+# `export FOO=bar` (or systemd EnvironmentFile) always wins over .env. Putting
+# load_dotenv() here (instead of only in main.py) makes config.py self-contained
+# no matter which module imports it first.
+from dotenv import load_dotenv
 
-# Hardcoded Creator ID (Your numeric Telegram ID)
-SYSTEM_CREATOR_ID = int(os.getenv("SYSTEM_CREATOR_ID", "YOUR_NUMERIC_ID_HERE"))
+load_dotenv()
 
-# Private Telegram Log Channel ID (e.g. -100123456789)
-# To find it, add your bot to the channel as admin and read its chat ID
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))  # Leave 0 if not used
 
-# Your Premium Account Session String (generated via generate_session.py)
-# Leave as empty string "" if you do not want to use a Premium Account for 4GB uploads
+def get_env_int(key: str, default: int) -> int:
+    """Read an integer env var, tolerating negative IDs (e.g. channel IDs)."""
+    val = os.getenv(key, "")
+    if val.isdigit() or (val.startswith("-") and val[1:].isdigit()):
+        return int(val)
+    return default
+
+
+def _proxy_url() -> str | None:
+    """Return a single SOCKS5/HTTP proxy URL from legacy or conventional env vars.
+
+    Only set this if your VPS cannot reach YouTube/X/Instagram/TikTok directly
+    (e.g. a regional block). On a normal foreign VPS, leave it unset.
+    """
+    for key in ("SOCKS5_PROXY", "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"):
+        val = os.getenv(key, "").strip()
+        if val and val.lower() != "none":
+            return val
+    return None
+
+
+# =========================================================================
+# Telegram API credentials (from https://my.telegram.org)
+# =========================================================================
+API_ID = get_env_int("API_ID", 0)
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+# Hardcoded Creator ID (your numeric Telegram user ID)
+SYSTEM_CREATOR_ID = get_env_int("SYSTEM_CREATOR_ID", 0)
+
+# Private Telegram Log Channel ID (e.g. -100123456789).
+# To find it: add the bot to your private channel as admin, then read the chat ID.
+LOG_CHANNEL_ID = get_env_int("LOG_CHANNEL_ID", 0)  # Leave 0 if not used
+
+# Your Premium Account Session String (generated via generate_session.py).
+# Leave empty ("") if you do not want 4 GB uploads via a Premium Userbot client.
 PREMIUM_STRING_SESSION = os.getenv("PREMIUM_STRING_SESSION", "")
 
-# FastAPI / Streaming configurations
-# Example: "https://yourdomain.com/tgbot" (if using Nginx reverse proxy) or "http://YOUR_VPS_IP:8080"
-DOMAIN = os.getenv("DOMAIN", "http://YOUR_VPS_IP:8080") 
+# ---------------------------------------------------------------------------
+# FastAPI / Streaming configuration
+# Example: "https://yourdomain.com/tgbot" (behind an Nginx reverse proxy) or
+#          "http://YOUR_VPS_IP:8080" (direct).
+# This base URL is embedded into the streaming links the bot hands out.
+# ---------------------------------------------------------------------------
+DOMAIN = os.getenv("DOMAIN", "http://YOUR_VPS_IP:8080")
 
+# SSL Certificate Paths (optional). Leave both empty ("") to run the stream
+# server over plain HTTP on port 8080. If both are provided, Uvicorn hosts the
+# streaming links over native HTTPS.
+SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "")
+SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "")
+
+# ---------------------------------------------------------------------------
+# Optional proxy configuration (only needed on VPS in blocked networks).
+# On a normal foreign VPS where YouTube/X/Instagram/TikTok are reachable, leave
+# all of these unset.
+# Examples:
+#   SOCKS5_PROXY=socks5://127.0.0.1:10808
+#   ALL_PROXY=socks5://127.0.0.1:10808
+#   HTTP_PROXY=http://127.0.0.1:10809
+# ---------------------------------------------------------------------------
+PROXY_URL = _proxy_url()
+AIOHTTP_PROXY = PROXY_URL   # Used by direct-URL aiohttp downloads
+YTDLP_PROXY = PROXY_URL     # Passed to yt-dlp's 'proxy' option
+REQUESTS_PROXY = PROXY_URL  # Used by utils.logger (Telegram log channel)
+YTDLP_USER_AGENT = os.getenv("YTDLP_USER_AGENT", "")
+
+# -----------------------------------------------------------------------------
+# PO-token provider (bgutil-ytdlp-pot-provider) for YouTube.
+#
+# YouTube now requires a proof-of-origin (PO) token. The provider is ALWAYS ON
+# by default: it is started at bot launch and every YouTube extraction uses
+# cookies + PO token. There is no cookies-only or no-auth fallback for YouTube.
+#
+# The provider runs on the Deno runtime (no Node.js/npm). Deno >= 2.0 must be
+# installed (./install.sh installs it). The yt-dlp plugin that talks to this
+# provider is pulled in via requirements.txt (bgutil-ytdlp-pot-provider), so no
+# symlink hack is needed.
+# -----------------------------------------------------------------------------
+YTDLP_POT_ENABLED = os.getenv("YTDLP_POT_ENABLED", "true").lower() in ("true", "1", "yes")
+YTDLP_POT_PORT = get_env_int("YTDLP_POT_PORT", 4416)
+YTDLP_POT_PROVIDER_PATH = os.getenv("YTDLP_POT_PROVIDER_PATH", "bgutil-provider/server")
+# bgutil git ref to clone (pinned for reproducible deploys; bump deliberately).
+YTDLP_POT_PROVIDER_REF = os.getenv("YTDLP_POT_PROVIDER_REF", "1.3.1")
+YTDLP_POT_DENO_BIN = os.getenv("YTDLP_POT_DENO_BIN", "deno")
+YTDLP_POT_PLAYER_CLIENT = os.getenv("YTDLP_POT_PLAYER_CLIENT", "mweb")
+
+# =========================================================================
 # Database and Cookie paths
+# =========================================================================
 DB_FILE = "database.json"
 YT_COOKIES = "ytcookies.txt"
+YT_COOKIES_BACKUP = "ytcookies.backup"
 IG_COOKIES = "igcookies.txt"
 TT_COOKIES = "ttcookies.txt"
 X_COOKIES = "xcookies.txt"
-
-# SSL Certificate Paths (Optional: Leave empty "" to run over standard HTTP on port 8080)
-# If provided, Uvicorn will natively host your streaming links over secure HTTPS
-SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "")
-SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "")
+COOKIES_FILE = "cookies.txt"

@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# install.sh — one-shot, idempotent provisioning for the Telegram downloader bot
+# on Ubuntu 24.04.
+#
+# What this does (and only does — everything is reversible via ./uninstall.sh):
+#   1. System apt packages: git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates
+#   2. Native build libs for node-canvas (the PO-token provider's FFI dep):
+#      build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev
+#      libgif-dev librsvg2-dev
+#   3. Deno runtime (>= 2.0), installed to ~/.deno via the official installer
+#   4. Python venv + pip install -r requirements.txt
+#      (this also installs the yt-dlp PO-token plugin: bgutil-ytdlp-pot-provider)
+#   5. The bgutil PO-token provider source, cloned at a pinned git ref
+#      (bgutil-provider/), then `deno install` to build the native canvas FFI
+#   6. A 2 GB swap file — created if none exists, or grown in place if an
+#      existing one is smaller (e.g. a VPS that shipped with 1 GB). This gives
+#      a 1 GB VPS headroom to run Deno + canvas + yt-dlp + ffmpeg without OOM.
+#
+# It is safe to re-run: every step checks for its target first and skips when
+# already satisfied. A record of what it changed is written to
+# tools/install-manifest.txt (read by ./uninstall.sh).
+#
+# Usage:
+#   chmod +x install.sh
+#   ./install.sh
+#
+# Run this BEFORE the first ./run.sh. It uses sudo for apt and swap; either run
+# it as a user with sudo, or as root.
+
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+MANIFEST="tools/install-manifest.txt"
+BGUTIL_URL="https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git"
+BGUTIL_REF="${YTDLP_POT_PROVIDER_REF:-1.3.1}"
+
+# Use sudo only when not already root.
+if [[ "$(id -u)" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
+
+# If invoked under sudo, prefer the REAL user's home so Deno + the venv land in
+# the invoking user's $HOME (not /root). `sudo ./install.sh` is a natural newbie
+# invocation; without this Deno installs into /root and the bot — run later as
+# the normal user — can't see it. We also chown everything we create back to the
+# real user at the end.
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    REAL_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
+    REAL_USER="${SUDO_USER}"
+    REAL_GROUP="$(id -gn "${SUDO_USER}")"
+else
+    REAL_HOME="${HOME}"
+    REAL_USER="$(id -un)"
+    REAL_GROUP="$(id -gn)"
+fi
+
+mkdir -p tools
+: > "$MANIFEST"
+{
+    echo "# tgbot install manifest — what install.sh changed on this machine."
+    echo "# Generated $(date -u +'%Y-%m-%dT%H:%M:%SZ'). Read by ./uninstall.sh."
+    echo "# Format: <category>:<value>"
+    echo
+} >> "$MANIFEST"
+
+log()  { echo "[install] $*"; }
+warn() { echo "[install] WARNING: $*" >&2; }
+note() { echo "$*" >> "$MANIFEST"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+dpkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
+
+# ---------------------------------------------------------------------------
+# 1+2. apt packages (system + canvas build libs)
+# ---------------------------------------------------------------------------
+SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates)
+CANVAS_PKGS=(build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev)
+
+missing=()
+for pkg in "${SYSTEM_PKGS[@]}" "${CANVAS_PKGS[@]}"; do
+    if dpkg_installed "$pkg"; then continue; fi
+    missing+=("$pkg")
+done
+
+if [[ ${#missing[@]} -eq 0 ]]; then
+    log "All required apt packages already installed."
+else
+    log "Installing missing apt packages: ${missing[*]}"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y "${missing[@]}"
+    note "apt-section-start"
+    for pkg in "${missing[@]}"; do note "apt:$pkg"; done
+    note "apt-section-end"
+fi
+
+# Verify essentials the rest of the script depends on.
+have git     || { warn "git missing after apt step"; exit 1; }
+have python3 || { warn "python3 missing after apt step"; exit 1; }
+have ffmpeg  || log "ffmpeg: $(ffmpeg -version 2>/dev/null | head -n1 || echo 'check failed')"
+
+# ---------------------------------------------------------------------------
+# 3. Deno runtime (>= 2.0)
+# ---------------------------------------------------------------------------
+DENO_DIR="$REAL_HOME/.deno"
+ensure_deno_on_path() {
+    if [[ -x "$DENO_DIR/bin/deno" ]]; then
+        export PATH="$DENO_DIR/bin:$PATH"
+    fi
+}
+ensure_deno_on_path
+
+if have deno; then
+    log "Deno already installed: $(deno --version | head -n1)"
+else
+    log "Installing Deno (>= 2.0) to $DENO_DIR ..."
+    have curl || { warn "curl missing — cannot download Deno installer"; exit 1; }
+    # The official installer honors $DENO_INSTALL, so force it into the real
+    # user's home even when this script runs as root via sudo.
+    DENO_INSTALL="$DENO_DIR" curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_DIR" sh -s -- -y
+    ensure_deno_on_path
+    have deno || { warn "Deno install failed"; exit 1; }
+    note "deno:$DENO_DIR"
+fi
+
+DENO_MAJOR="$(deno --version | head -n1 | awk '{print $2}' | cut -d. -f1)"
+if [[ "${DENO_MAJOR:-0}" -lt 2 ]]; then
+    warn "Deno $(deno --version | head -n1) is older than 2.0 — the provider needs Deno >= 2.0."
+    warn "Remove $DENO_DIR and re-run this script to upgrade."
+    exit 1
+fi
+
+# Persist Deno on PATH for future shells if not already there.
+BASHRC="$REAL_HOME/.bashrc"
+if [[ -f "$BASHRC" ]] && ! grep -q '\.deno/bin' "$BASHRC"; then
+    printf '\n# Added by tgbot install.sh\nexport PATH="$HOME/.deno/bin:$PATH"\n' >> "$BASHRC"
+    log "Added Deno to PATH in $BASHRC (start a new shell, or run: source $BASHRC)."
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Python venv + requirements
+# ---------------------------------------------------------------------------
+if [[ ! -d "venv" ]]; then
+    log "Creating Python virtual environment (venv/)..."
+    python3 -m venv venv
+    note "venv:$PROJECT_DIR/venv"
+fi
+log "Installing Python dependencies (incl. bgutil yt-dlp plugin)..."
+# shellcheck source=/dev/null
+source venv/bin/activate
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# 5. bgutil PO-token provider source + native canvas build
+# ---------------------------------------------------------------------------
+if [[ -f "bgutil-provider/server/src/main.ts" ]]; then
+    log "bgutil provider already present (bgutil-provider/)."
+else
+    if [[ -e "bgutil-provider" ]]; then
+        warn "bgutil-provider/ exists but is incomplete — re-cloning."
+        rm -rf bgutil-provider
+    fi
+    log "Cloning bgutil PO-token provider (ref $BGUTIL_REF)..."
+    git clone --single-branch --branch "$BGUTIL_REF" "$BGUTIL_URL" bgutil-provider
+    note "provider:$PROJECT_DIR/bgutil-provider"
+fi
+
+# Always reconcile the provider's npm deps via `deno install`. It is idempotent
+# (fast no-op when already up to date) and rebuilds the native canvas FFI only
+# once. Running it unconditionally also correctly repairs a provider that was
+# previously set up the Node/npm way (legacy migration).
+#
+# `--allow-scripts` (no package list) runs every npm lifecycle script in the
+# tree. We use the broader form deliberately: an explicit allow-list like
+# `--allow-scripts=npm:canvas` leaves transitive deps (e.g. @swc/core) "ignored",
+# and Deno then prints a warning that `deno approve-scripts` can never clear
+# (because the scripts were skipped, not queued). The provider is a pinned,
+# trusted git ref, so running its build scripts is the same trust level as
+# running its code — and this keeps install fully silent and automatic.
+log "Ensuring provider npm deps (canvas native FFI) via 'deno install'..."
+log "(First run compiles native libs and can take a few minutes on a small VPS.)"
+( cd bgutil-provider/server && deno install --allow-scripts --frozen ) \
+    || { warn "'deno install --frozen' failed; retrying without --frozen"; \
+         ( cd bgutil-provider/server && deno install --allow-scripts ); }
+
+# ---------------------------------------------------------------------------
+# 6. Swap — ensure at least 2 GB on a 1 GB VPS (headroom for heavy downloads)
+# ---------------------------------------------------------------------------
+SWAPFILE="/swapfile"
+TARGET_GB=2
+TARGET_KB=$((TARGET_GB * 1024 * 1024))
+
+# `free` reports Swap total in kB and is stable across util-linux versions.
+CURRENT_KB="$(awk '/^Swap:/ {print $2}' <(free 2>/dev/null))"
+CURRENT_KB="${CURRENT_KB:-0}"
+
+setup_swapfile() {
+    # (re)size /swapfile to TARGET_GB, format, enable, and persist in fstab.
+    $SUDO fallocate -l "${TARGET_GB}G" "$SWAPFILE" || $SUDO dd if=/dev/zero of="$SWAPFILE" bs=1M count=$((TARGET_GB * 1024))
+    $SUDO chmod 600 "$SWAPFILE"
+    $SUDO mkswap "$SWAPFILE" >/dev/null
+    $SUDO swapon "$SWAPFILE"
+    if ! grep -q "$SWAPFILE" /etc/fstab; then
+        echo "$SWAPFILE none swap sw 0 0" | $SUDO tee -a /etc/fstab >/dev/null
+    fi
+}
+
+if [[ "$CURRENT_KB" -ge "$TARGET_KB" ]]; then
+    log "Swap already ≥ ${TARGET_GB} GB — skipping."
+elif [[ -f "$SWAPFILE" ]]; then
+    # A swap file exists but is smaller than the target. Grow it in place: turn
+    # it off, recreate at the target size, turn it back on. This repairs the
+    # common "VPS shipped with a 1 GB /swapfile" case. (Stop the bot first if it
+    # is running — swapoff moves swapped pages back into RAM.)
+    log "Growing swap from $((CURRENT_KB / 1024)) MB to ${TARGET_GB} GB ..."
+    $SUDO swapoff "$SWAPFILE" 2>/dev/null || true
+    setup_swapfile
+    note "swap:$SWAPFILE"
+    log "Swap grown to ${TARGET_GB} GB."
+else
+    log "No swap file detected. Creating a ${TARGET_GB} GB swap file at $SWAPFILE ..."
+    setup_swapfile
+    note "swap:$SWAPFILE"
+    log "Swap enabled (${TARGET_GB} GB)."
+fi
+
+# If this script ran as root (via sudo), everything it created — the venv, the
+# bgutil-provider clone + node_modules, and Deno — is owned by root. The bot
+# runs as the normal user, so hand ownership back to the real user.
+if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    log "Fixing ownership → ${SUDO_USER} (created under sudo)..."
+    chown -R "${SUDO_USER}:${SUDO_USER}" "$PROJECT_DIR" "$DENO_DIR" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# 6b. Render + install the systemd unit (templated to this user + box)
+# ---------------------------------------------------------------------------
+# deploy/tgbot.service is a template with __USER__, __GROUP__, __PROJECT_DIR__,
+# and __MEMORY_MAX__ placeholders. We tune MemoryMax to the box's RAM so the
+# bot gets headroom on big boxes but can't OOM a small one.
+RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+if [[ "${RAM_MB:-0}" -ge 6144 ]]; then
+    MEMORY_MAX="4G"
+elif [[ "${RAM_MB:-0}" -ge 3072 ]]; then
+    MEMORY_MAX="2500M"
+else
+    MEMORY_MAX="1500M"   # 1–2 GB box: rely on the 2 GB swap from step 6
+fi
+
+if [[ -f "$PROJECT_DIR/deploy/tgbot.service" ]]; then
+    log "Rendering systemd unit (User=$REAL_USER, MemoryMax=$MEMORY_MAX) → /etc/systemd/system/tgbot.service"
+    TMP_UNIT="$(mktemp)"
+    sed \
+        -e "s|__USER__|${REAL_USER}|g" \
+        -e "s|__GROUP__|${REAL_GROUP}|g" \
+        -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
+        -e "s|__MEMORY_MAX__|${MEMORY_MAX}|g" \
+        "$PROJECT_DIR/deploy/tgbot.service" > "$TMP_UNIT"
+    $SUDO cp "$TMP_UNIT" /etc/systemd/system/tgbot.service
+    rm -f "$TMP_UNIT"
+    $SUDO systemctl daemon-reload
+    note "systemd-unit:/etc/systemd/system/tgbot.service"
+fi
+
+# ---------------------------------------------------------------------------
+# Seed a .env from .env.example if none exists (newbie convenience)
+# ---------------------------------------------------------------------------
+if [[ ! -f ".env" && -f ".env.example" ]]; then
+    cp .env.example .env
+    log "Created .env from .env.example. Edit it with your real tokens before starting the bot."
+fi
+
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+cat >&2 <<EOF
+
+[install] Provisioning complete.
+[install]   • System packages + canvas build libs : ok
+[install]   • Deno                                : $(deno --version | head -n1)
+[install]   • Python venv + requirements          : ok
+[install]   • bgutil provider (ref $BGUTIL_REF)   : ok
+[install]   • Swap                                : $(swapon --show --noheadings 2>/dev/null | awk '{print $1}' | paste -sd, - || echo n/a)
+[install]   • systemd unit                        : installed (not started)
+
+Next steps:
+  1. Edit .env with your real API_ID / API_HASH / BOT_TOKEN / SYSTEM_CREATOR_ID
+     (and LOG_CHANNEL_ID / PREMIUM_STRING_SESSION if you use them).
+  2. Upload YouTube cookies via the bot (Admin Console → Cookie Jars → YouTube).
+  3. Start the bot as a managed service (recommended, survives reboot + auto-restart):
+       sudo systemctl enable --now tgbot
+     If you were running it in tmux, stop that first (two polling instances conflict):
+       tmux kill-session -t tgbot
+     (Ad-hoc alternative without systemd: tmux new-session -s tgbot './run.sh')
+
+Logs:
+       sudo journalctl -u tgbot -f        # live service log
+       tail -f logs/bot.log               # the bot's own timestamped log
+EOF
