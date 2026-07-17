@@ -1,6 +1,5 @@
 # modules/admin.py
 import os
-import io
 import shutil
 import asyncio
 import logging
@@ -319,9 +318,7 @@ def register_admin_handlers(app: Client):
             return
 
         try:
-            buffer = io.BytesIO()
-            await client.download(message=message, file_name=buffer)
-            buffer.seek(0)
+            buffer = await client.download_media(message=message, in_memory=True)
             content = buffer.read().decode("utf-8", errors="replace")
         except Exception as e:
             await message.reply_text(f"❌ Failed to download file: {e}", reply_markup=back_markup)
