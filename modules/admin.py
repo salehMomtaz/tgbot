@@ -116,24 +116,63 @@ def register_admin_handlers(app: Client):
             except Exception:
                 pass
 
-    def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
-        """Write cookie content, enforcing the read-only lock on the YouTube jar.
+    def _has_real_cookie_line(content: str) -> bool:
+        """True if *content* contains at least one valid Netscape cookie line.
 
-        yt-dlp rewrites cookie jars on exit; the live ytcookies.txt is kept
-        read-only so it cannot be corrupted. We unlock briefly, write, re-lock,
-        and purge stale snapshots so the next download uses the fresh jar.
+        A real cookie line has 7 tab-separated fields (domain, flag, path,
+        secure, expiration, name, value). This rejects header-only, empty,
+        or Telegram-truncated jars so we never persist a broken file.
+        """
+        for raw in content.splitlines():
+            line = raw.rstrip("\n").rstrip("\r")
+            if not line or line.startswith("#"):
+                continue
+            if len(line.split("\t")) >= 7:
+                return True
+        return False
+
+    def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
+        """Validate and atomically write a cookie jar, keeping ytcookies read-only.
+
+        Defense in depth so the live jar can never be corrupted:
+          * reject header-only / truncated / malformed jars up front;
+          * back up the existing jar to <file>.autobak before touching it;
+          * write to a temp file, fsync, then os.replace (atomic) so a crash
+            mid-write cannot leave a truncated jar behind;
+          * re-lock ytcookies.txt to 0o444 — yt-dlp must never write the original
+            (it only ever sees a disposable snapshot from get_cookies_for_url);
+          * purge stale yt-dlp snapshots so the next download uses the fresh jar.
         """
         from utils.downloader import _purge_cookie_snapshots
 
-        final_content = content
-        if not content.strip().startswith("# Netscape"):
-            final_content = f"# Netscape HTTP Cookie File\n{content}"
+        normalized = content
+        if not normalized.strip().startswith("# Netscape"):
+            normalized = f"# Netscape HTTP Cookie File\n{content}"
 
-        if cookie_key == "ytcookies" and os.path.exists(file_path):
-            os.chmod(file_path, 0o644)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(final_content)
-        if cookie_key == "ytcookies":
+        if not _has_real_cookie_line(normalized):
+            raise ValueError(
+                "no valid Netscape cookie lines found — the file looks empty, "
+                "truncated, or is not a real cookie jar"
+            )
+
+        # Cheap insurance: snapshot the current jar before overwriting it.
+        if os.path.exists(file_path):
+            try:
+                shutil.copy(file_path, f"{file_path}.autobak")
+            except Exception:
+                pass
+
+        # os.replace is a directory-level rename, so it succeeds even when the
+        # existing file is 0o444 (read-only). The old inode is unlinked and a
+        # fresh one takes its place; we then re-lock that fresh inode.
+        is_yt = cookie_key == "ytcookies"
+        tmp_path = f"{file_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(normalized)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, file_path)
+        if is_yt:
             os.chmod(file_path, 0o444)
         _purge_cookie_snapshots(file_path)
 
@@ -177,32 +216,19 @@ def register_admin_handlers(app: Client):
         # We do NOT delete your typed message here anymore (it remains in your history)
         prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
 
-        # 1. Handle Cookie Replacement State
+        # 1. Cookie Replacement via pasted text is REJECTED.
+        # Telegram silently truncates plain-text messages near 4096 chars; a real
+        # Netscape jar (YouTube ≈ 17 KB) gets cut and the bot would persist a
+        # broken jar that the site then rejects ("sign in to confirm you're not a
+        # bot"). Cookies must arrive as a .txt document, handled by the document
+        # handler below. We keep the state so the admin can send the file next.
         if state.startswith("waiting_for_replace_"):
-            USER_STATES.pop(user_id, None)
-
-            # Delete the bot's old prompt message
-            if prompt_id:
-                try:
-                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
-                except Exception:
-                    pass
-
-            cookie_key = state.split("waiting_for_replace_")[1]
-            file_path = COOKIE_MAP.get(cookie_key)
-
-            if not file_path:
-                await message.reply_text("❌ Error: Invalid cookie profile selected.", reply_markup=back_markup)
-                message.stop_propagation()
-                return
-
-            try:
-                _write_cookie_jar(cookie_key, file_path, input_text)
-                await message.reply_text(f"✅ `{cookie_key}.txt` successfully replaced!", reply_markup=back_markup)
-                await log_event(f"🍪 **Admin Action:** Cookie profile `{cookie_key}.txt` was replaced via chat interface.")
-            except Exception as e:
-                await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
-
+            await message.reply_text(
+                "❌ Cookies can't be pasted as text — Telegram truncates long "
+                "messages and corrupts the jar.\n\n"
+                "Please send your cookies as a **`.txt` document file** instead.",
+                reply_markup=back_markup
+            )
             message.stop_propagation()
             return
 
@@ -518,8 +544,8 @@ def register_admin_handlers(app: Client):
                 ACTIVE_PROMPTS[user_id] = callback_query.message.id
                 await callback_query.message.edit_text(
                     f"✏️ **Replace {cookie_key}.txt**\n"
-                    "Paste your fresh Netscape formatted cookies into your text box and press send, "
-                    "or send them as a `.txt` document file:",
+                    "Send your fresh cookies as a **`.txt` document file** (Netscape format).\n"
+                    "_Text-paste is not accepted — Telegram truncates it and corrupts the jar._",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Cancel & Return", callback_data=f"admin_cookie_select:{cookie_key}")]])
                 )
                 await callback_query.answer()
