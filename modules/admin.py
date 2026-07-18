@@ -345,7 +345,12 @@ def register_admin_handlers(app: Client):
 
         try:
             buffer = await client.download_media(message=message, in_memory=True)
-            content = buffer.read().decode("utf-8", errors="replace")
+            # pyrogram 2.0.106 returns the in-memory BytesIO with the cursor left
+            # at EOF, so buffer.read() yields b"" and every uploaded jar looks
+            # "empty" (only the synthetic header survives → "no valid Netscape
+            # cookie lines"). getvalue() returns the full bytes regardless of the
+            # cursor position, which is what we actually want here.
+            content = buffer.getvalue().decode("utf-8", errors="replace")
         except Exception as e:
             await message.reply_text(f"❌ Failed to download file: {e}", reply_markup=back_markup)
             return
