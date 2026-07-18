@@ -9,6 +9,8 @@ igcookies.txt
 ttcookies.txt
 xcookies.txt
 cookies.txt
+# Auto-backups written by the admin-console cookie Replace (private cookies)
+*.autobak
 
 # Database
 database.json

@@ -91,6 +91,25 @@ python main.py
 Never run two bot instances against the same `BOT_TOKEN` at once — Telegram errors
 with "terminated by other getUpdates". Stop tmux/systemd before the other starts.
 
+### Service lifecycle (systemd) — the "it died after reboot" trap
+
+`install.sh` renders and installs `tgbot.service` but deliberately does **not**
+enable it. The unit must be enabled by hand once the bot is confirmed working:
+
+```bash
+sudo systemctl enable --now tgbot   # start now + auto-start on every boot
+```
+
+Until that runs, the bot only stays up for the lifetime of the tmux/`run.sh`
+session that launched it — so **after a reboot the bot is simply down (not
+crashed)**. Symptom: "tgbot stopped working / no response" right after a reboot,
+with a `bot.log` that ends cleanly (no traceback). Fix: enable the unit (above),
+or if you're mid-debug, check `sudo systemctl status tgbot` before assuming a
+code bug. `Restart=always` means an enabled service also self-heals on crash.
+
+`cookie-watch.service` (the inotifywait tamper monitor) is a separate, harmless
+enabled unit — leave it running.
+
 ## Logging
 
 Root logger gets two handlers (`main.py::setup_system_logger`): the
