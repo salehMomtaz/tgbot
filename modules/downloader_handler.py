@@ -34,6 +34,22 @@ def is_social_media_link(url: str) -> bool:
     return any(domain in url_lower for domain in social_domains)
 
 
+# Metadata fetches (format extraction / playlist reading) run IMMEDIATELY and
+# concurrently — they do NOT pass through the sequential DownloadQueue. Only the
+# real download+upload jobs are queued. This lets a user fetch + pick formats for
+# many links while earlier downloads are still running, instead of being blocked
+# behind whichever download currently occupies the single worker slot.
+# References are held so CPython can't GC a task mid-flight.
+_bg_fetch_tasks: set = set()
+
+
+def _spawn_fetch(coro) -> None:
+    """Fire-and-forget a metadata-fetch coroutine on the event loop."""
+    task = asyncio.create_task(coro)
+    _bg_fetch_tasks.add(task)
+    task.add_done_callback(_bg_fetch_tasks.discard)
+
+
 # ===========================================================================
 # Single-video format keyboard
 # ===========================================================================
@@ -74,7 +90,10 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
     """Extract formats for a single media URL and post the selection keyboard."""
     await status_msg.edit_text("🔍 Fetching format attributes...")
     try:
-        data = extract_formats(url)
+        # extract_formats is a blocking yt-dlp call — run it off the event loop
+        # so concurrent fetches (and any running download) keep making progress.
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, extract_formats, url)
 
         cache_id = str(uuid.uuid4())[:8]
         DOWNLOAD_CACHE[cache_id] = {
@@ -202,7 +221,8 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
 
     async def meta_job():
         try:
-            meta = extract_playlist_meta(url)
+            loop = asyncio.get_event_loop()
+            meta = await loop.run_in_executor(None, extract_playlist_meta, url)
         except Exception as e:
             await status_msg.edit_text(f"❌ Could not read playlist.\nError: `{str(e)}`")
             await log_event(f"❌ **Playlist read error:** `{url}`. Details: `{str(e)}`")
@@ -230,7 +250,7 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
         )
         await log_event(f"📋 **Playlist ready:** `{meta['title']}` ({total} videos) for User `{user_id}`.")
 
-    await queue.add_task(user_id, status_msg, meta_job)
+    _spawn_fetch(meta_job())
 
 
 def register_downloader_handlers(app: Client):
@@ -270,10 +290,11 @@ def register_downloader_handlers(app: Client):
             # --- Single-video flow ---
             status_msg = await message.reply_text("📥 Received. Analyzing link formats...")
 
-            async def download_job():
-                await show_format_selection(message, status_msg, url, custom_filename, user_id)
-
-            await queue.add_task(user_id, status_msg, download_job)
+            # Fetch formats immediately & concurrently — NOT queued. Only the
+            # actual download (queued when the user taps a format button) is
+            # serialized, so the user can pick formats for many links while
+            # earlier downloads run.
+            _spawn_fetch(show_format_selection(message, status_msg, url, custom_filename, user_id))
         else:
             status_msg = await message.reply_text("📥 Received URL. Queueing job...")
 
@@ -459,10 +480,7 @@ def register_downloader_handlers(app: Client):
             await callback_query.message.delete()
             status_msg = await callback_query.message.reply_text("🔍 Fetching format attributes...")
 
-            async def single_job():
-                await show_format_selection(callback_query.message, status_msg, url, custom_filename, user_id)
-
-            await queue.add_task(user_id, status_msg, single_job)
+            _spawn_fetch(show_format_selection(callback_query.message, status_msg, url, custom_filename, user_id))
             return
 
         # Back to the top-level decision menu.
@@ -653,10 +671,7 @@ def register_downloader_handlers(app: Client):
         await callback_query.answer()
         status_msg = await callback_query.message.reply_text(f"🔍 Fetching formats for `{entry['title']}`...")
 
-        async def pick_job():
-            await show_format_selection(callback_query.message, status_msg, entry["url"], cache_data.get("custom_filename"), user_id)
-
-        await queue.add_task(user_id, status_msg, pick_job)
+        _spawn_fetch(show_format_selection(callback_query.message, status_msg, entry["url"], cache_data.get("custom_filename"), user_id))
 
 
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
