@@ -103,6 +103,120 @@ inline-button console:
 
 ---
 
+## 🧭 How the bot handles a message
+
+Every update pyrogram receives is routed through an ordered **handler
+pipeline**. Handlers are grouped, and groups run in ascending order
+(`-2 → -1 → 0 → 1`). A handler that matches usually consumes the update;
+`stop_propagation()` kills it entirely, `ContinuePropagation` hands it to the
+next handler in the same group. This is how the bot distinguishes **you**
+(the System Creator), **whitelisted users**, and **strangers** — and silently
+locks the door on the last group.
+
+### User tiers
+
+| Tier | Who | Result at the security gate | What they can do |
+|---|---|---|---|
+| 🟣 **System Creator** | `SYSTEM_CREATOR_ID` in `.env` | Always passes | Everything a user can do **+ the Admin Console** |
+| 🟢 **Whitelisted user** | ID listed in `database.json` → `authorized` | Passes | Download/upload links, forward files for stream links |
+| 🔴 **Stranger / intruder** | Anyone not in the two rows above | **Auto-blacklisted**, logged as `⚠️ Intruder Blocked`, dropped | Nothing — silently ignored from now on |
+
+> Blacklisted users (including every stranger who ever messaged the bot) are
+> dropped before any handler logic runs. The Creator can review and unban them
+> via **Blacklist Logs** in the console.
+
+### Message flow (vertical)
+
+```mermaid
+flowchart TD
+    U([Incoming update: Message or CallbackQuery]) --> G2["GROUP -2 · Log interceptor<br/>logs raw JSON → continue"]
+    G2 --> Kind{Message or<br/>callback?}
+    Kind -- Callback --> CB["Callback dispatcher<br/>by callback_data prefix"]
+    Kind -- Message --> G1["GROUP -1 · Security gate<br/>(messages only)"]
+    G1 --> Q1{from_user<br/>missing?}
+    Q1 -- yes --> DROP([🔴 DROP])
+    Q1 -- no --> Q2{blacklisted?}
+    Q2 -- yes --> DROP
+    Q2 -- no --> Q3{authorized?<br/>Creator OR whitelist}
+    Q3 -- no --> BL["auto-blacklist + log<br/>'⚠️ Intruder Blocked'"] --> DROP
+    Q3 -- yes --> G0["GROUP 0 · State machine + file interceptor"]
+    G0 --> S1{text & in admin<br/>state?}
+    S1 -- yes --> SM([process add / remove / unban ID<br/>pasted cookies rejected])
+    S1 -- no --> S2{doc & Creator &<br/>replace-state?}
+    S2 -- yes --> CR([swap cookie jar from .txt])
+    S2 -- no --> S3{document / video /<br/>audio / voice?}
+    S3 -- yes --> SL([mint 24h HTTP stream link])
+    S3 -- no --> GP1["GROUP 1 · Text router"]
+    GP1 --> T1{is a link?}
+    T1 -- yes --> DL([format-selection keyboard<br/>or direct-URL download])
+    T1 -- no --> T2{is Creator?}
+    T2 -- yes --> AC([🛠 Admin Console])
+    T2 -- no --> WL([👋 Welcome message])
+    CB --> C1{^admin_ prefix?}
+    C1 -- yes --> C2{is Creator?}
+    C2 -- no --> DN([answer 'Access Denied'])
+    C2 -- yes --> CA([console action:<br/>users / cookies / PO token / queue])
+    C1 -- no --> C3{^dl: prefix?}
+    C3 -- yes --> CB2([enqueue selected format / cancel])
+```
+
+The same pipeline in plain text (renders anywhere, terminal included):
+
+```
+                  ┌──────────────────────────────────┐
+  Telegram update │   MESSAGE  or  CALLBACK QUERY    │
+                  └────────────────────┬─────────────┘
+                                       │
+            ┌──────────────────────────▼──────────────────────────┐
+  GROUP -2  │  LOG INTERCEPTOR — logs raw JSON, then continues    │
+            └──────────────────────────┬──────────────────────────┘
+                                       │
+            ┌──────────────┴──────────────┐
+            │ MESSAGE                     │ CALLBACK
+            ▼                             ▼
+  ┌─────────────────────┐     ┌───────────────────────────────────┐
+  │ GROUP -1  SECURITY  │     │ CALLBACK DISPATCHER (by prefix)   │
+  │ GATE (msgs only)    │     │                                   │
+  │                     │     │ ^admin_ + not Creator → "Denied"  │
+  │ no from_user ──►DROP│     │ ^admin_ + Creator ─► console      │
+  │ blacklisted ──►DROP │     │   action (users/cookies/POT/...)  │
+  │ not authorized ──►  │     │ ^dl: ──► enqueue chosen format    │
+  │   auto-blacklist +  │     └───────────────────────────────────┘
+  │   "Intruder" ──►DROP│
+  │ else ──► continue   │
+  └─────────┬───────────┘
+            │ (authorized)
+  ┌─────────▼───────────┐
+  │ GROUP 0  STATE +    │  text + admin state  ─► add/remove/unban ID
+  │ FILE INTERCEPTOR    │  doc + Creator +      ─► swap cookie jar
+  │                     │    replace-state        from uploaded .txt
+  │                     │  document/video/      ─► mint 24h stream link
+  │                     │  audio/voice
+  └─────────┬───────────┘
+            │
+  ┌─────────▼───────────┐  is a link? ──► format keyboard or direct
+  │ GROUP 1  TEXT ROUTER│                download (defense-in-depth
+  │                     │                 auth re-check inside)
+  │                     │  Creator  ──► 🛠 Admin Console
+  │                     │  anyone   ──► 👋 Welcome message
+  └─────────────────────┘
+```
+
+### Notes
+
+- The **security gate only applies to messages**, not callback button presses.
+  Callbacks are protected per-handler instead: admin buttons check for the
+  Creator; download buttons (`dl:`) are only ever handed to a user who already
+  passed the gate and received a format keyboard.
+- A forwarded **file** (video / audio / voice / document) never reaches the
+  text router — the file interceptor in Group 0 turns it into a stream link
+  first.
+- **Document Mode** (toggled in the console) changes *how* a finished file is
+  uploaded (plain document vs. re-encoded media), not *whether* it flows through
+  this pipeline.
+
+---
+
 ## 🍪 Cookies
 
 YouTube and age/login-restricted sites need browser cookies. The easiest path:
