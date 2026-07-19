@@ -11,18 +11,161 @@ import config
 from utils.shared import queue, DOWNLOAD_CACHE  # Fixed: Import from clean shared registry
 from main import progress_bar_handler, log_event
 from utils.gate import is_authorized
-from utils.downloader import extract_formats, download_media
+from utils.downloader import (
+    extract_formats,
+    download_media,
+    extract_playlist_meta,
+    is_playlist_url,
+    is_pure_playlist_url,
+    PLAYLIST_TIERS,
+)
 from utils.uploader_handler import process_split_and_upload
+
 
 def is_link(text: str) -> bool:
     """Helper to detect if incoming text is a web link."""
     return text.startswith("http://") or text.startswith("https://")
+
 
 def is_social_media_link(url: str) -> bool:
     """Check if the target link belongs to supported media crawlers."""
     url_lower = url.lower()
     social_domains = ["youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com"]
     return any(domain in url_lower for domain in social_domains)
+
+
+# ===========================================================================
+# Single-video format keyboard
+# ===========================================================================
+def build_format_keyboard(cache_id: str, videos: list, audios: list) -> InlineKeyboardMarkup:
+    """Build the video/audio format-selection keyboard for a single media link.
+
+    Video button sizes already include the merged best-audio track (see
+    utils.downloader.extract_formats), so they match what actually gets uploaded.
+    """
+    max_rows = max(len(videos), len(audios))
+    keyboard_rows = []
+    for i in range(max_rows):
+        row = []
+        if i < len(videos):
+            v = videos[i]
+            row.append(InlineKeyboardButton(
+                text=f"🎥 {v['quality']} ({v['size_str']})",
+                callback_data=f"dl:{cache_id}:v:{v['format_id']}"
+            ))
+        else:
+            row.append(InlineKeyboardButton(text="—", callback_data="none"))
+
+        if i < len(audios):
+            a = audios[i]
+            row.append(InlineKeyboardButton(
+                text=f"🎵 {a['quality']} ({a['size_str']})",
+                callback_data=f"dl:{cache_id}:a:{a['format_id']}"
+            ))
+        else:
+            row.append(InlineKeyboardButton(text="—", callback_data="none"))
+        keyboard_rows.append(row)
+
+    keyboard_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"dl:{cache_id}:cancel")])
+    return InlineKeyboardMarkup(keyboard_rows)
+
+
+async def show_format_selection(message: Message, status_msg: Message, url: str, custom_filename, user_id: int):
+    """Extract formats for a single media URL and post the selection keyboard."""
+    await status_msg.edit_text("🔍 Fetching format attributes...")
+    try:
+        data = extract_formats(url)
+
+        cache_id = str(uuid.uuid4())[:8]
+        DOWNLOAD_CACHE[cache_id] = {
+            "url": url,
+            "title": data["title"],
+            "videos": data["videos"],
+            "audios": data["audios"],
+            "thumbnail_url": data["thumbnail"],
+            "custom_filename": custom_filename
+        }
+
+        keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"])
+
+        await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
+        await status_msg.delete()
+        await message.reply_text(
+            f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
+            f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
+            f"Select an option below:",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Extraction failed.\nError: `{str(e)}`")
+        await log_event(f"❌ **Extraction Error:** Failed to parse `{url}`. Details: `{str(e)}`")
+
+
+# ===========================================================================
+# Playlist tier keyboard (pre-fetch quality preference)
+# ===========================================================================
+def build_playlist_tier_keyboard(cache_id: str, include_single: bool) -> InlineKeyboardMarkup:
+    """Build the pre-fetch quality-tier keyboard for a YouTube playlist.
+
+    Three video tiers + three audio tiers (low/medium/high). The mapping to real
+    qualities lives in utils.downloader.PLAYLIST_TIERS. When *include_single* is
+    True (a ``watch?v=&list=`` URL), an extra "just this video" escape button is
+    shown so the user can still pick the single video.
+    """
+    rows = [
+        [InlineKeyboardButton("🎥 High · 1080p", callback_data=f"pl:{cache_id}:vh"),
+         InlineKeyboardButton("🎥 Medium · 720p", callback_data=f"pl:{cache_id}:vm"),
+         InlineKeyboardButton("🎥 Low · 480p", callback_data=f"pl:{cache_id}:vl")],
+        [InlineKeyboardButton("🎵 High · best", callback_data=f"pl:{cache_id}:ah"),
+         InlineKeyboardButton("🎵 Medium · ≤160k", callback_data=f"pl:{cache_id}:am"),
+         InlineKeyboardButton("🎵 Low · ≤70k", callback_data=f"pl:{cache_id}:al")],
+    ]
+    if include_single:
+        rows.append([InlineKeyboardButton("▶️ Just this video", callback_data=f"pl:{cache_id}:single")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"pl:{cache_id}:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def begin_playlist_flow(message: Message, url: str, custom_filename, user_id: int, pure: bool):
+    """Read playlist metadata (flat) and post the tier keyboard.
+
+    *pure* is True for ``/playlist?list=`` URLs (no single-video escape), False
+    for ``watch?v=&list=`` URLs (escape button offered, ytdlnis-style).
+    """
+    status_msg = await message.reply_text("📋 Reading playlist...")
+
+    async def meta_job():
+        try:
+            meta = extract_playlist_meta(url)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Could not read playlist.\nError: `{str(e)}`")
+            await log_event(f"❌ **Playlist read error:** `{url}`. Details: `{str(e)}`")
+            return
+
+        total = len(meta["entries"])
+        cap = getattr(config, "PLAYLIST_MAX_VIDEOS", 50)
+        cap_note = f"\n\n⚠️ Playlist has {total} videos; downloading the first {cap}." if total > cap else ""
+
+        cache_id = str(uuid.uuid4())[:8]
+        DOWNLOAD_CACHE[cache_id] = {
+            "type": "playlist",
+            "url": url,
+            "title": meta["title"],
+            "entries": meta["entries"],
+            "custom_filename": custom_filename
+        }
+
+        keyboard = build_playlist_tier_keyboard(cache_id, include_single=not pure)
+        await status_msg.delete()
+        await message.reply_text(
+            f"📋 **Playlist:** {meta['title']}\n📺 **Videos:** {total}{cap_note}\n\n"
+            f"Pick a quality tier — it applies to every video:",
+            reply_markup=keyboard
+        )
+        await log_event(f"📋 **Playlist ready:** `{meta['title']}` ({total} videos) for User `{user_id}`.")
+
+    await queue.add_task(user_id, status_msg, meta_job)
+
 
 def register_downloader_handlers(app: Client):
     from main import premium_app
@@ -31,84 +174,43 @@ def register_downloader_handlers(app: Client):
     # Group 1: Link Downloader Handler (Only triggers if the text is a link)
     # =========================================================================
     @app.on_message(
-        filters.text & 
-        filters.private & 
-        filters.create(lambda _, __, m: is_link(m.text.strip().split("|")[0].strip())), 
+        filters.text &
+        filters.private &
+        filters.create(lambda _, __, m: is_link(m.text.strip().split("|")[0].strip())),
         group=1
     )
     async def text_link_handler(client: Client, message: Message):
         text = message.text.strip()
         user_id = message.from_user.id
-        
+
         parts = text.split("|", 1)
         url = parts[0].strip()
         custom_filename = parts[1].strip() if len(parts) > 1 else None
-        
+
         if not is_authorized(user_id):
             return
 
         if is_social_media_link(url):
+            # --- YouTube playlist branch (pre-fetch tier selection) ---
+            # A pure /playlist URL goes straight to the tier keyboard; a
+            # watch?v=&list= URL offers a "just this video" escape too.
+            if is_playlist_url(url):
+                await begin_playlist_flow(
+                    message, url, custom_filename, user_id,
+                    pure=is_pure_playlist_url(url)
+                )
+                return
+
+            # --- Single-video flow ---
             status_msg = await message.reply_text("📥 Received. Analyzing link formats...")
-            
+
             async def download_job():
-                await status_msg.edit_text("🔍 Fetching format attributes...")
-                try:
-                    data = extract_formats(url)
-                    
-                    cache_id = str(uuid.uuid4())[:8]
-                    DOWNLOAD_CACHE[cache_id] = {
-                        "url": url,
-                        "title": data["title"],
-                        "videos": data["videos"],
-                        "audios": data["audios"],
-                        "thumbnail_url": data["thumbnail"],
-                        "custom_filename": custom_filename
-                    }
-                    
-                    videos = data["videos"]
-                    audios = data["audios"]
-                    max_rows = max(len(videos), len(audios))
-                    
-                    keyboard_rows = []
-                    for i in range(max_rows):
-                        row = []
-                        if i < len(videos):
-                            v = videos[i]
-                            row.append(InlineKeyboardButton(
-                                text=f"🎥 {v['quality']} ({v['size_str']})",
-                                callback_data=f"dl:{cache_id}:v:{v['format_id']}"
-                            ))
-                        else:
-                            row.append(InlineKeyboardButton(text="—", callback_data="none"))
-                        
-                        if i < len(audios):
-                            a = audios[i]
-                            row.append(InlineKeyboardButton(
-                                text=f"🎵 {a['quality']} ({a['size_str']})",
-                                callback_data=f"dl:{cache_id}:a:{a['format_id']}"
-                            ))
-                        else:
-                            row.append(InlineKeyboardButton(text="—", callback_data="none"))
-                        keyboard_rows.append(row)
-                        
-                    keyboard_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"dl:{cache_id}:cancel")])
-                    
-                    await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
-                    await status_msg.delete()
-                    await message.reply_text(
-                        f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
-                        f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
-                        f"Select an option below:",
-                        reply_markup=InlineKeyboardMarkup(keyboard_rows)
-                    )
-                except Exception as e:
-                    await status_msg.edit_text(f"❌ Extraction failed.\nError: `{str(e)}`")
-                    await log_event(f"❌ **Extraction Error:** Failed to parse `{url}`. Details: `{str(e)}`")
+                await show_format_selection(message, status_msg, url, custom_filename, user_id)
 
             await queue.add_task(user_id, status_msg, download_job)
         else:
             status_msg = await message.reply_text("📥 Received URL. Queueing job...")
-            
+
             async def direct_upload_job():
                 await status_msg.edit_text("⚡ Starting direct URL download...")
                 cache_id = str(uuid.uuid4())[:8]
@@ -116,17 +218,17 @@ def register_downloader_handlers(app: Client):
                 try:
                     async def dl_progress(cur, tot):
                         await progress_bar_handler(cur, tot, status_msg, "Downloading direct file to server...")
-                        
+
                     file_path = await download_direct_file(url, cache_id, dl_progress)
-                    
+
                     dir_name = os.path.dirname(file_path)
                     clean_name = custom_filename if custom_filename else os.path.basename(file_path)
                     clean_file_path = os.path.join(dir_name, clean_name)
                     if clean_file_path != file_path:
                         os.rename(file_path, clean_file_path)
-                    
+
                     await status_msg.edit_text("📤 Uploading direct file to Telegram...")
-                    
+
                     await process_split_and_upload(
                         bot_client=app,
                         premium_client=premium_app,
@@ -153,77 +255,79 @@ def register_downloader_handlers(app: Client):
 
             await queue.add_task(user_id, status_msg, direct_upload_job)
 
-    # Callback Query Handler
+    # =========================================================================
+    # Callback: single-video format selection (dl:...)
+    # =========================================================================
     @app.on_callback_query(filters.regex(r"^dl:"))
     async def dl_callback_handler(client: Client, callback_query: CallbackQuery):
         data = callback_query.data
         user_id = callback_query.from_user.id
-        
+
         parts = data.split(":")
         if len(parts) < 3:
             return
-            
+
         cache_id = parts[1]
         action = parts[2]
-        
+
         if action == "cancel":
             DOWNLOAD_CACHE.pop(cache_id, None)
             await callback_query.message.delete()
             await callback_query.answer("Cancelled.")
             return
-            
+
         format_id = parts[3]
         cache_data = DOWNLOAD_CACHE.get(cache_id)
         if not cache_data:
             await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
             return
-            
+
         target_list = cache_data["videos"] if action == 'v' else cache_data["audios"]
         target_fmt = next((f for f in target_list if f["format_id"] == format_id), None)
-        
+
         if not premium_app and target_fmt and target_fmt["bytes"] > (2000 * 1024 * 1024):
             await callback_query.answer("❌ This format exceeds Telegram's 2GB bot upload limit. Please select another quality or connect your Premium Userbot.", show_alert=True)
             return
-            
+
         await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
         await callback_query.answer("Transfer enqueued...")
-        
+
         task_dir = f"cache/{cache_id}"
-        
+
         async def queued_transfer_job():
             await callback_query.message.edit_text("⚡️ Downloading file from server to VPS...")
             loop = asyncio.get_event_loop()
             try:
                 from utils.downloader import download_media
-                
+
                 async def download_progress(curr, tot):
                     await progress_bar_handler(curr, tot, callback_query.message, "Downloading from server to VPS...")
-                    
+
                 def thread_progress(curr, tot):
                     asyncio.run_coroutine_threadsafe(download_progress(curr, tot), loop)
-                
+
                 result = await loop.run_in_executor(
                     None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress
                 )
-                
+
                 file_path = result['file_path']
                 thumb_path = result['thumb_path']
                 title = result['title']
                 uploader = result['uploader']
-                
+
                 dir_name = os.path.dirname(file_path)
                 ext = os.path.splitext(file_path)[1]
-                
+
                 custom_name = cache_data.get("custom_filename")
                 if custom_name:
                     clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name}{ext}"
                 else:
                     clean_name = os.path.basename(file_path)
-                    
+
                 clean_file_path = os.path.join(dir_name, clean_name)
                 if clean_file_path != file_path:
                     os.rename(file_path, clean_file_path)
-                
+
                 await process_split_and_upload(
                     bot_client=app,
                     premium_client=premium_app,
@@ -236,10 +340,10 @@ def register_downloader_handlers(app: Client):
                     thumb_path=thumb_path,
                     progress_msg=callback_query.message
                 )
-                
+
                 DOWNLOAD_CACHE.pop(cache_id, None)
                 await log_event(f"✅ **Job Successful:** `{clean_name}` was successfully processed and sent.")
-                
+
             except Exception as e:
                 await callback_query.message.edit_text(f"❌ Download/Upload failure.\nError: `{str(e)}`")
                 await log_event(f"❌ **Job Failure:** Extraction/Upload crashed on `{cache_data['url']}`. Details: `{str(e)}`")
@@ -253,29 +357,173 @@ def register_downloader_handlers(app: Client):
 
         await queue.add_task(user_id, callback_query.message, queued_transfer_job)
 
+    # =========================================================================
+    # Callback: playlist tier selection (pl:...)
+    # =========================================================================
+    @app.on_callback_query(filters.regex(r"^pl:"))
+    async def playlist_callback_handler(client: Client, callback_query: CallbackQuery):
+        data = callback_query.data
+        user_id = callback_query.from_user.id
+
+        parts = data.split(":")
+        if len(parts) < 3:
+            return
+
+        cache_id = parts[1]
+        action = parts[2]
+        cache_data = DOWNLOAD_CACHE.get(cache_id)
+
+        if not cache_data or cache_data.get("type") != "playlist":
+            await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
+            return
+
+        if action == "cancel":
+            DOWNLOAD_CACHE.pop(cache_id, None)
+            await callback_query.message.delete()
+            await callback_query.answer("Cancelled.")
+            return
+
+        # Escape hatch for watch?v=&list= URLs: drop into single-video flow.
+        if action == "single":
+            await callback_query.answer()
+            url = cache_data.get("url")
+            custom_filename = cache_data.get("custom_filename")
+            DOWNLOAD_CACHE.pop(cache_id, None)
+            await callback_query.message.delete()
+            status_msg = await callback_query.message.reply_text("🔍 Fetching format attributes...")
+
+            async def single_job():
+                await show_format_selection(callback_query.message, status_msg, url, custom_filename, user_id)
+
+            await queue.add_task(user_id, status_msg, single_job)
+            return
+
+        if action not in ("vh", "vm", "vl", "ah", "am", "al"):
+            return
+
+        fmt_type = "v" if action[0] == "v" else "a"
+        tier = {"h": "high", "m": "medium", "l": "low"}[action[1]]
+        selector, _label = PLAYLIST_TIERS[(fmt_type, tier)]
+
+        cap = getattr(config, "PLAYLIST_MAX_VIDEOS", 50)
+        entries = cache_data["entries"][:cap]
+        total = len(entries)
+        playlist_title = cache_data["title"]
+
+        await callback_query.message.edit_text("⏳ Playlist enqueued in Active Job Queue...")
+        await callback_query.answer("Playlist download started...")
+
+        progress_msg = callback_query.message
+        chat_id = callback_query.message.chat.id
+
+        async def playlist_job():
+            success = 0
+            skipped = 0
+            for idx, entry in enumerate(entries, 1):
+                entry_url = entry["url"]
+                entry_title = entry["title"]
+                sub_cache_id = f"{cache_id}-{idx}"
+                task_dir = f"cache/{sub_cache_id}"
+                try:
+                    await progress_msg.edit_text(
+                        f"📋 **{playlist_title}**\n"
+                        f"▶️ Video `{idx}/{total}`\n"
+                        f"📝 `{entry_title}`\n\n"
+                        f"⏳ Downloading..."
+                    )
+                    loop = asyncio.get_event_loop()
+
+                    async def download_progress(curr, tot):
+                        await progress_bar_handler(curr, tot, progress_msg, f"Downloading {idx}/{total}: {entry_title}")
+
+                    def thread_progress(curr, tot):
+                        asyncio.run_coroutine_threadsafe(download_progress(curr, tot), loop)
+
+                    # download_media(url, format_id=None, format_type, cache_id, progress_fn, format_selector)
+                    result = await loop.run_in_executor(
+                        None, download_media, entry_url, None, fmt_type, sub_cache_id, thread_progress, selector
+                    )
+
+                    file_path = result["file_path"]
+                    dir_name = os.path.dirname(file_path)
+                    ext = os.path.splitext(file_path)[1]
+
+                    custom_name = cache_data.get("custom_filename")
+                    if custom_name:
+                        clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name} {idx}{ext}"
+                    else:
+                        clean_name = os.path.basename(file_path)
+                    clean_file_path = os.path.join(dir_name, clean_name)
+                    if clean_file_path != file_path:
+                        os.rename(file_path, clean_file_path)
+
+                    await progress_msg.edit_text(f"📤 Uploading video {idx}/{total}...")
+                    await process_split_and_upload(
+                        bot_client=app,
+                        premium_client=premium_app,
+                        chat_id=chat_id,
+                        file_path=clean_file_path,
+                        action=fmt_type,
+                        title=result["title"],
+                        uploader=result["uploader"],
+                        duration=result["duration"],
+                        thumb_path=result["thumb_path"],
+                        progress_msg=progress_msg,
+                        delete_progress_after=False,  # keep the rolling message across videos
+                    )
+                    success += 1
+                    await log_event(f"✅ **Playlist item {idx}/{total}:** `{result['title']}` sent.")
+                except Exception as e:
+                    skipped += 1
+                    try:
+                        await callback_query.message.reply_text(
+                            f"⚠️ Skipped video {idx}/{total} `{entry_title}`\nError: `{str(e)}`"
+                        )
+                    except Exception:
+                        pass
+                    await log_event(f"⚠️ **Playlist skip {idx}/{total}:** `{entry_title}`. Details: `{str(e)}`")
+                finally:
+                    if os.path.exists(task_dir):
+                        try:
+                            shutil.rmtree(task_dir)
+                        except Exception as ce:
+                            print(f"[Cleanup] Error: {ce}")
+
+            DOWNLOAD_CACHE.pop(cache_id, None)
+            summary = f"✅ **Playlist complete:** `{playlist_title}`\n📤 Sent `{success}/{total}` videos."
+            if skipped:
+                summary += f"\n⚠️ `{skipped}` video(s) skipped — see messages above."
+            try:
+                await progress_msg.edit_text(summary)
+            except Exception:
+                pass
+
+        await queue.add_task(user_id, callback_query.message, playlist_job)
+
+
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
     """Download direct file URL stream to secure subfolder."""
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
-    
+
     parsed_url = urllib.parse.urlparse(url)
     file_name = os.path.basename(parsed_url.path) or f"download_{cache_id}"
     file_name = urllib.parse.unquote(file_name)
     out_path = f"{task_dir}/{file_name}"
-    
+
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=1800) as response:
             if response.status != 200:
                 raise RuntimeError(f"Server returned error {response.status}")
-            
+
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
-            
+
             with open(out_path, "wb") as f:
                 async for chunk in response.content.iter_chunked(512 * 1024):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_fn:
                         await progress_fn(downloaded, total_size)
-                        
+
     return out_path

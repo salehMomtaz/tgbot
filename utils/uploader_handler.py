@@ -59,12 +59,15 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         )
 
 
-async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg):
+async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True):
     """On-Demand Sequential Uploader.
 
     Splits the file only if it exceeds the active Telegram ceiling, then streams
     one part at a time and deletes it immediately after upload so at most ONE
     extra part ever lives on disk.
+
+    When *delete_progress_after* is False the status message is left intact
+    (used by the playlist loop, which reuses one rolling message across videos).
     """
     from utils.downloader import split_file_generator, split_video_by_size_generator
     from main import progress_bar_handler
@@ -139,7 +142,8 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
         if os.path.exists(file_path):
             os.remove(file_path)
 
-        await progress_msg.delete()
+        if delete_progress_after:
+            await progress_msg.delete()
 
     except Exception as e:
         for p in parts_list:

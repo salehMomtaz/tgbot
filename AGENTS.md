@@ -30,6 +30,7 @@ have to rediscover them.
 | Change the PO-token provider lifecycle | `utils/pot_provider.py` |
 | Add an admin-console feature | `modules/admin.py` (+ keyboard helpers there) |
 | Change how links/messages are handled | `modules/downloader_handler.py` |
+| Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` |
 
@@ -71,6 +72,24 @@ have to rediscover them.
 7. **systemd unit is a template.** `deploy/tgbot.service` has `__USER__`,
    `__GROUP__`, `__PROJECT_DIR__`, `__MEMORY_MAX__` placeholders rendered by
    `install.sh` from the real user/path/RAM. Don't hardcode paths in the unit.
+
+8. **Playlist vs single-video are two distinct paths.** `utils/downloader.py::
+   is_playlist_url` detects any YouTube URL carrying `list=`; the handler routes
+   it to the **tier keyboard** (`PLAYLIST_TIERS`), never the single-video format
+   flow. Per-video playlist downloads call `download_media(format_selector=...)`
+   — a yt-dlp *selector* string, not a `format_id` (ids differ per video).
+   `extract_playlist_meta` uses **flat** extraction and deliberately applies **no
+   PO token** (browsing a playlist page needs none; this keeps the meta pass
+   resilient). Meanwhile `extract_formats` and the single-video `download_media`
+   path keep `noplaylist=True` — do **not** remove it: a single video that
+   happens to carry a stray `&list=` must stay a single video. A bad playlist
+   entry is **skipped, not fatal** — keep the per-video try/except.
+
+9. **Video button sizes already include the merged audio track.** In
+   `extract_formats`, each video option's `bytes` is `video_stream + best_audio`
+   because the download step merges `{format_id}+bestaudio` into an mp4. Do not
+   "correct" the button back to the video-only size — it would reintroduce the
+   mismatch where every uploaded video looked larger than its button.
 
 ## Running / testing
 

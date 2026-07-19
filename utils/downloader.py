@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 import yt_dlp
 import ffmpeg
 import config
@@ -451,14 +452,12 @@ def extract_formats(url: str) -> dict:
             continue
 
         size = estimate_format_size(fmt, duration_seconds)
-        size_str = format_size_short(size)
 
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
             abr = fmt.get('abr') or 0
             audio_options.append({
                 'format_id': fmt['format_id'],
                 'quality': f"{int(abr)}k",
-                'size_str': size_str,
                 'bytes': size,
                 'bitrate': abr
             })
@@ -466,11 +465,11 @@ def extract_formats(url: str) -> dict:
         elif fmt.get('vcodec') != 'none':
             resolution = fmt.get('height')
             if resolution:
-                warn_flag = " ⚠️" if size > (2000 * 1024 * 1024) else ""
+                # NOTE: `size` here is the VIDEO-ONLY stream size. The merged size
+                # (video + best audio) is finalized below, after we know best audio.
                 video_options.append({
                     'format_id': fmt['format_id'],
                     'quality': f"{resolution}p",
-                    'size_str': f"{size_str}{warn_flag}",
                     'bytes': size,
                     'height': resolution
                 })
@@ -492,12 +491,118 @@ def extract_formats(url: str) -> dict:
             unique_audios.append(a)
             seen_bitrates.add(a['quality'])
 
+    # When the user taps a VIDEO button, the bot downloads "{video}+bestaudio" and
+    # merges them into an mp4. The button must therefore show the *merged* size —
+    # video stream + the best audio stream — not the video-only size. Otherwise the
+    # uploaded file is always larger than the button promised (by the audio track).
+    best_audio_bytes = unique_audios[0]['bytes'] if unique_audios else 0
+    for v in unique_videos:
+        v['bytes'] = v['bytes'] + best_audio_bytes
+        warn_flag = " ⚠️" if v['bytes'] > (2000 * 1024 * 1024) else ""
+        v['size_str'] = f"{format_size_short(v['bytes'])}{warn_flag}"
+    for a in unique_audios:
+        a['size_str'] = format_size_short(a['bytes'])
+
     return {
         'title': info.get('title', 'Unknown Title'),
         'duration': duration_seconds,
         'thumbnail': info.get('thumbnail'),
         'videos': unique_videos[:5],
         'audios': unique_audios[:5]
+    }
+
+
+# Playlist quality tiers.
+#
+# Per-video format_ids differ across a playlist, so we use robust yt-dlp
+# *selectors* (not fixed ids). Every selector ends with a /best fallback, so a
+# tier never hard-fails when a particular video lacks that height/abr stream.
+# Audio keeps the FFmpegExtractAudio postprocessor with preferredquality '0'
+# (source VBR, no re-encode) — the abr<= selector does the tiering.
+PLAYLIST_TIERS = {
+    # (format_type, tier) -> (yt-dlp format selector, human-readable label)
+    ("v", "high"):   ("bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "1080p"),
+    ("v", "medium"): ("bestvideo[height<=720]+bestaudio/best[height<=720]/best",   "720p"),
+    ("v", "low"):    ("bestvideo[height<=480]+bestaudio/best[height<=480]/best",   "480p"),
+    ("a", "high"):   ("bestaudio/best",                                            "best"),
+    ("a", "medium"): ("bestaudio[abr<=160]/bestaudio/best",                        "<=160k"),
+    ("a", "low"):    ("bestaudio[abr<=70]/bestaudio/best",                         "<=70k"),
+}
+
+
+def is_playlist_url(url: str) -> bool:
+    """True if *url* is a YouTube link carrying a playlist (``list=...``)."""
+    lower = (url or "").lower()
+    if not _is_youtube(lower):
+        return False
+    parsed = urllib.parse.urlparse(lower)
+    query = urllib.parse.parse_qs(parsed.query)
+    return "list" in query
+
+
+def is_pure_playlist_url(url: str) -> bool:
+    """True for ``/playlist?list=...`` (not a single ``watch?v=`` URL)."""
+    lower = (url or "").lower()
+    if not _is_youtube(lower):
+        return False
+    return urllib.parse.urlparse(lower).path.startswith("/playlist")
+
+
+def extract_playlist_meta(url: str) -> dict:
+    """Flat-extract a YouTube playlist: title + entries (url, title, duration).
+
+    Uses ``extract_flat`` so the entries are listed WITHOUT resolving each
+    video's formats — fast and light on PO tokens. Per-video extraction happens
+    later inside :func:`download_media`. PO tokens are not applied here on
+    purpose: browsing a playlist page does not require them, and skipping the
+    provider keeps this metadata pass resilient even if the provider is briefly
+    down. Cookies are still passed for age/member-restricted playlists.
+    """
+    cookie_path = get_cookies_for_url(url)
+
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'skip_download': True,
+        'noplaylist': False,
+        'proxy': getattr(config, "YTDLP_PROXY", None),
+    }
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
+
+    user_agent = getattr(config, "YTDLP_USER_AGENT", "")
+    if user_agent:
+        ydl_opts['user_agent'] = user_agent
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info or info.get('_type') != 'playlist':
+        raise RuntimeError("This link is not a playlist, or YouTube returned no playlist data.")
+
+    entries = []
+    for e in (info.get('entries') or []):
+        if not e:
+            continue
+        entry_url = e.get('url') or e.get('id')
+        if not entry_url:
+            continue
+        # Flat YouTube entries often give only the video id; build a watch URL.
+        if not str(entry_url).startswith("http"):
+            entry_url = f"https://www.youtube.com/watch?v={entry_url}"
+        entries.append({
+            'url': entry_url,
+            'title': e.get('title') or 'Untitled',
+            'duration': e.get('duration') or 0,
+        })
+
+    if not entries:
+        raise RuntimeError("YouTube returned an empty playlist (no playable videos).")
+
+    return {
+        'title': info.get('title') or 'YouTube Playlist',
+        'entries': entries,
     }
 
 
@@ -597,8 +702,19 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 
-def download_media(url: str, format_id: str, format_type: str, cache_id: str, progress_fn=None) -> dict:
-    """Download the file using cookies, postprocess it, and extract thumbnails into a secure task folder."""
+def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None) -> dict:
+    """Download a single media item.
+
+    Two mutually exclusive selection modes:
+
+    * ``format_id`` (single-video flow) — downloads ``{format_id}+bestaudio`` for
+      video or the exact ``format_id`` for audio.
+    * ``format_selector`` (playlist flow) — a robust yt-dlp selector string
+      (see :data:`PLAYLIST_TIERS`) applied per-video, since format_ids differ
+      across a playlist.
+
+    ``format_selector`` wins when both are supplied.
+    """
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
     out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
@@ -626,7 +742,19 @@ def download_media(url: str, format_id: str, format_type: str, cache_id: str, pr
 
     ydl_opts = _apply_pot_options(ydl_opts, url)
 
-    if format_type == 'v':
+    if format_selector:
+        # Playlist path: a robust tier selector is supplied; ignore format_id.
+        ydl_opts['format'] = format_selector
+        if format_type == 'v':
+            ydl_opts['merge_output_format'] = 'mp4'
+        else:
+            # Audio: extract the chosen stream as-is (no re-encode / no 320k bloat).
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'm4a',
+                'preferredquality': '0',
+            }]
+    elif format_type == 'v':
         ydl_opts['format'] = f"{format_id}+bestaudio/best"
         ydl_opts['merge_output_format'] = 'mp4'
     else:

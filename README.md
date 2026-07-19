@@ -225,6 +225,7 @@ crawlers, or not?** The two branches share almost nothing.
 | What you send | Detected as | Path taken |
 |---|---|---|
 | `youtube.com` / `youtu.be` | social → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
+| `youtube.com/playlist?list=…` (or `watch?v=…&list=…`) | social → **YouTube playlist** | flat-extract list → **tier keyboard** (3 video + 3 audio: low/med/high) → download & upload each video |
 | `instagram.com` | social → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
 | `tiktok.com` | social → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · format keyboard |
 | `twitter.com` / `x.com` | social → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
@@ -250,9 +251,16 @@ flowchart TD
     JAR --> YL{YouTube?}
     YL -- yes --> YS["cookies + PO token — the ONLY strategy<br/>provider must be running or it errors<br/>(no cookies-only / no-auth fallback)"]
     YL -- no --> OS["cookies first, then fall back to no-auth"]
-    YS --> XF["extract_formats · yt-dlp lists<br/>real video + audio formats"]
+    YS --> PLQ{URL carries<br/>list= ?}
+    PLQ -- yes · playlist --> PFLAT["flat-extract playlist<br/>(titles + count only, no per-video formats)"]
+    PLQ -- no · single video --> XF
+    PFLAT --> PTK["reply: playlist · video count · TIER keyboard<br/>🎥 video low/med/high · 🎵 audio low/med/high<br/>(a yt-dlp selector picked once, applied per video)"]
+    PTK --> PTIER{tier tapped?<br/>or ▶️ just this video}
+    PTIER -- ▶️ just this video --> XF["extract_formats · yt-dlp lists<br/>real video + audio formats"]
+    PTIER -- a tier --> PLOOP["enqueue ONE queue task<br/>loop each video: download_media(selector)<br/>→ split + upload · one rolling status msg<br/>a bad video is skipped, the rest continue"]
+    PLOOP --> OK3([✅ sent M / N videos])
     OS --> XF
-    XF --> KB["reply: title · duration · keyboard<br/>🎥 top-5 resolutions · 🎵 top-5 bitrates"]
+    XF --> KB["reply: title · duration · keyboard<br/>🎥 top-5 resolutions · 🎵 top-5 bitrates<br/>(button size = video stream + merged best audio)"]
     KB --> TAP{button tapped?}
     TAP -- ❌ Cancel --> XC([drop cached session])
     TAP -- pick a format --> BIG{> 2 GB and<br/>no Premium userbot?}
@@ -268,6 +276,37 @@ flowchart TD
     BODY --> UP2([split if needed → upload<br/>as a plain document])
     UP2 --> OK2([✅ done])
 ```
+
+### Playlists
+
+A YouTube link that carries `list=…` is a **playlist** and is handled differently
+from a single video:
+
+- `youtube.com/playlist?list=…` → straight to the **tier keyboard**.
+- `youtube.com/watch?v=…&list=…` (a video you reached *via* a playlist) → same
+  tier keyboard, plus a **▶️ Just this video** escape button (ytdlnis-style) that
+  drops into the normal single-video flow.
+
+Because per-video `format_id`s differ across a playlist, you don't pick a
+specific stream. Instead you pick a **tier** *before* anything downloads, and the
+bot applies it to every video:
+
+| Tier | Video (merged mp4) | Audio (m4a) |
+|---|---|---|
+| **High** | best ≤ 1080p | best available |
+| **Medium** | best ≤ 720p | ≤ 160 kbps |
+| **Low** | best ≤ 480p | ≤ 70 kbps |
+
+Each tier is a yt-dlp format *selector* with a `/best` fallback, so a video that
+lacks (say) a 480p stream still downloads at the next-best instead of failing.
+The whole playlist occupies **one queue slot**; videos are processed one-by-one,
+each going through the same split/2 GB-4 GB-ceiling/upload pipeline as a single
+download. A video that fails (private, removed, region-blocked) is **skipped, not
+fatal** — you get a `⚠️ Skipped` message and the run continues, ending with a
+`Sent M/N` summary.
+
+> `PLAYLIST_MAX_VIDEOS` (default `50`, env-configurable) caps how many videos a
+> single playlist run will download — a guard against pasting a 1,000-video list.
 
 ---
 

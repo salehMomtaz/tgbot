@@ -108,3 +108,9 @@ IG_COOKIES = "igcookies.txt"
 TT_COOKIES = "ttcookies.txt"
 X_COOKIES = "xcookies.txt"
 COOKIES_FILE = "cookies.txt"
+
+# ---------------------------------------------------------------------------
+# Playlist safety cap (videos per playlist). Protects the VPS from someone
+# pasting a 1,000-video list. The bot downloads the first N and warns the user.
+# ---------------------------------------------------------------------------
+PLAYLIST_MAX_VIDEOS = get_env_int("PLAYLIST_MAX_VIDEOS", 50)
