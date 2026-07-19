@@ -215,6 +215,60 @@ The same pipeline in plain text (renders anywhere, terminal included):
   uploaded (plain document vs. re-encoded media), not *whether* it flows through
   this pipeline.
 
+### How a link is routed & downloaded
+
+Only one handler owns text-that-is-a-link (`downloader_handler.py`, Group 1).
+It fires **only when the message starts with `http://` or `https://`**. Inside,
+the first fork decides almost everything: **is the host one of the six media
+crawlers, or not?** The two branches share almost nothing.
+
+| What you send | Detected as | Path taken |
+|---|---|---|
+| `youtube.com` / `youtu.be` | social → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
+| `instagram.com` | social → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
+| `tiktok.com` | social → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · format keyboard |
+| `twitter.com` / `x.com` | social → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
+| **any other URL** | **direct file** | raw HTTP download — **no yt-dlp, no cookies, no format choice** |
+
+> ⚠️ The "direct file" branch is broader than it looks — it is **not** "all the
+> other yt-dlp sites." Only the six domains above ever reach yt-dlp. A Vimeo,
+> Soundcloud, Dailymotion, Facebook, or Reddit link — even though yt-dlp supports
+> them — is treated as a **direct file URL**: the bot just does an HTTP `GET` on
+> exactly the link you pasted. For a genuine direct file (`…/clip.mp4`,
+> `…/archive.zip`, `…/report.pdf`) that's correct and fast. For a media *page*
+> URL on a non-listed host you'll get the HTML page, not the media. You can also
+> append ` | custom-name.ext` to any link to rename the result.
+
+```mermaid
+flowchart TD
+    M([Authorized user sends text]) --> L{starts with<br/>http / https ?}
+    L -- no --> X1([Admin Console / welcome<br/>not a download])
+    L -- yes --> P["split on the '|' character<br/>url · optional custom name"]
+    P --> SOC{host is youtube / youtu.be<br/>instagram / tiktok /<br/>twitter / x ?}
+
+    SOC -- YES · media crawler --> JAR["pick cookie jar by host<br/>(snapshot copy — live jar stays read-only)"]
+    JAR --> YL{YouTube?}
+    YL -- yes --> YS["cookies + PO token — the ONLY strategy<br/>provider must be running or it errors<br/>(no cookies-only / no-auth fallback)"]
+    YL -- no --> OS["cookies first, then fall back to no-auth"]
+    YS --> XF["extract_formats · yt-dlp lists<br/>real video + audio formats"]
+    OS --> XF
+    XF --> KB["reply: title · duration · keyboard<br/>🎥 top-5 resolutions · 🎵 top-5 bitrates"]
+    KB --> TAP{button tapped?}
+    TAP -- ❌ Cancel --> XC([drop cached session])
+    TAP -- pick a format --> BIG{> 2 GB and<br/>no Premium userbot?}
+    BIG -- yes --> XBIG([⚠️ blocked — pick another<br/>or connect your userbot])
+    BIG -- no --> Q2([enqueue in job queue])
+    Q2 --> DM["download_media via yt-dlp<br/>video: fmt+bestaudio → merge mp4<br/>audio: extract m4a (no re-encode bloat)<br/>ffmpeg: square thumb + embed metadata"]
+    DM --> UP1([split if over the limit → upload])
+    UP1 --> OK1([✅ done])
+
+    SOC -- NO · not a crawler --> DF["treat as a DIRECT FILE URL"]
+    DF --> GET["aiohttp GET · 30-min timeout<br/>name = last path segment (URL-decoded)<br/>or your custom name"]
+    GET --> BODY["stream body to disk · 512 KB chunks<br/>live progress bar"]
+    BODY --> UP2([split if needed → upload<br/>as a plain document])
+    UP2 --> OK2([✅ done])
+```
+
 ---
 
 ## 🍪 Cookies
