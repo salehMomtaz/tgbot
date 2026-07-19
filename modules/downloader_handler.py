@@ -102,15 +102,32 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
 
 
 # ===========================================================================
-# Playlist tier keyboard (pre-fetch quality preference)
+# Playlist keyboards: decision menu → tier selector / paginated explorer
 # ===========================================================================
-def build_playlist_tier_keyboard(cache_id: str, include_single: bool) -> InlineKeyboardMarkup:
-    """Build the pre-fetch quality-tier keyboard for a YouTube playlist.
+# Flow: any playlist link (pure /playlist?list=… or watch?v=…&list=…) lands on
+# a DECISION keyboard first — "download the whole playlist" or "explore videos"
+# and pick which ones. Only then does the user reach quality tiers or a single
+# video's format keyboard. watch?v=&list= URLs also offer a "just this video"
+# shortcut (ytdlnis-style).
 
-    Three video tiers + three audio tiers (low/medium/high). The mapping to real
-    qualities lives in utils.downloader.PLAYLIST_TIERS. When *include_single* is
-    True (a ``watch?v=&list=`` URL), an extra "just this video" escape button is
-    shown so the user can still pick the single video.
+def build_playlist_decision_keyboard(cache_id: str, include_single: bool) -> InlineKeyboardMarkup:
+    """First menu shown for a playlist: whole-playlist vs explore (vs this video)."""
+    rows = [
+        [InlineKeyboardButton("⬇️ Download whole playlist", callback_data=f"pl:{cache_id}:whole")],
+        [InlineKeyboardButton("🔎 Explore videos", callback_data=f"pl:{cache_id}:explore")],
+    ]
+    if include_single:
+        rows.append([InlineKeyboardButton("▶️ Just this video", callback_data=f"pl:{cache_id}:single")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"pl:{cache_id}:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_playlist_tier_keyboard(cache_id: str) -> InlineKeyboardMarkup:
+    """Quality-tier keyboard shown after 'Download whole playlist'.
+
+    Three video tiers + three audio tiers (low/medium/high). Mapping to real
+    qualities lives in utils.downloader.PLAYLIST_TIERS. Includes a back button to
+    the decision menu.
     """
     rows = [
         [InlineKeyboardButton("🎥 High · 1080p", callback_data=f"pl:{cache_id}:vh"),
@@ -119,18 +136,67 @@ def build_playlist_tier_keyboard(cache_id: str, include_single: bool) -> InlineK
         [InlineKeyboardButton("🎵 High · best", callback_data=f"pl:{cache_id}:ah"),
          InlineKeyboardButton("🎵 Medium · ≤160k", callback_data=f"pl:{cache_id}:am"),
          InlineKeyboardButton("🎵 Low · ≤70k", callback_data=f"pl:{cache_id}:al")],
+        [InlineKeyboardButton("🔙 Back", callback_data=f"pl:{cache_id}:menu"),
+         InlineKeyboardButton("❌ Cancel", callback_data=f"pl:{cache_id}:cancel")],
     ]
-    if include_single:
-        rows.append([InlineKeyboardButton("▶️ Just this video", callback_data=f"pl:{cache_id}:single")])
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"pl:{cache_id}:cancel")])
     return InlineKeyboardMarkup(rows)
 
 
-async def begin_playlist_flow(message: Message, url: str, custom_filename, user_id: int, pure: bool):
-    """Read playlist metadata (flat) and post the tier keyboard.
+def _fmt_duration(seconds: int) -> str:
+    if not seconds:
+        return "?"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-    *pure* is True for ``/playlist?list=`` URLs (no single-video escape), False
-    for ``watch?v=&list=`` URLs (escape button offered, ytdlnis-style).
+
+def build_playlist_explore_keyboard(cache_id: str, entries: list, page: int, page_size: int = 8) -> tuple[InlineKeyboardMarkup, int]:
+    """Paginated per-video picker. Returns (keyboard, total_pages).
+
+    Each video is a full-width button 'N. Title · m:ss'; tapping it drops into the
+    normal single-video format flow for that entry. Navigation is page-based.
+    """
+    import math
+    total = len(entries)
+    total_pages = max(1, math.ceil(total / page_size))
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    chunk = entries[start:start + page_size]
+
+    rows = []
+    for offset, e in enumerate(chunk):
+        abs_idx = start + offset
+        title = (e.get("title") or "Untitled")
+        if len(title) > 48:
+            title = title[:47] + "…"
+        dur = _fmt_duration(e.get("duration"))
+        rows.append([InlineKeyboardButton(
+            text=f"{abs_idx + 1}. {title} · {dur}",
+            callback_data=f"plx:{cache_id}:{abs_idx}",
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"pln:{cache_id}:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="none"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"pln:{cache_id}:{page + 1}"))
+    rows.append(nav)
+
+    rows.append([
+        InlineKeyboardButton("🔙 Back", callback_data=f"pl:{cache_id}:menu"),
+        InlineKeyboardButton("⬇️ Whole playlist", callback_data=f"pl:{cache_id}:whole"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"pl:{cache_id}:cancel"),
+    ])
+    return InlineKeyboardMarkup(rows), total_pages
+
+
+async def begin_playlist_flow(message: Message, url: str, custom_filename, user_id: int, pure: bool):
+    """Read playlist metadata (flat) and post the DECISION keyboard.
+
+    *pure* is True for ``/playlist?list=`` URLs (no single-video shortcut), False
+    for ``watch?v=&list=`` URLs (a 'just this video' button is offered too).
     """
     status_msg = await message.reply_text("📋 Reading playlist...")
 
@@ -144,7 +210,7 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
 
         total = len(meta["entries"])
         cap = getattr(config, "PLAYLIST_MAX_VIDEOS", 50)
-        cap_note = f"\n\n⚠️ Playlist has {total} videos; downloading the first {cap}." if total > cap else ""
+        cap_note = f"\n\n⚠️ Playlist has {total} videos; the first {cap} are listed/downloaded." if total > cap else ""
 
         cache_id = str(uuid.uuid4())[:8]
         DOWNLOAD_CACHE[cache_id] = {
@@ -155,11 +221,11 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
             "custom_filename": custom_filename
         }
 
-        keyboard = build_playlist_tier_keyboard(cache_id, include_single=not pure)
+        keyboard = build_playlist_decision_keyboard(cache_id, include_single=not pure)
         await status_msg.delete()
         await message.reply_text(
             f"📋 **Playlist:** {meta['title']}\n📺 **Videos:** {total}{cap_note}\n\n"
-            f"Pick a quality tier — it applies to every video:",
+            f"What do you want to do?",
             reply_markup=keyboard
         )
         await log_event(f"📋 **Playlist ready:** `{meta['title']}` ({total} videos) for User `{user_id}`.")
@@ -307,7 +373,8 @@ def register_downloader_handlers(app: Client):
                     asyncio.run_coroutine_threadsafe(download_progress(curr, tot), loop)
 
                 result = await loop.run_in_executor(
-                    None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress
+                    None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress,
+                    None, (target_fmt.get("height") if action == "v" and target_fmt else None)
                 )
 
                 file_path = result['file_path']
@@ -396,6 +463,39 @@ def register_downloader_handlers(app: Client):
                 await show_format_selection(callback_query.message, status_msg, url, custom_filename, user_id)
 
             await queue.add_task(user_id, status_msg, single_job)
+            return
+
+        # Back to the top-level decision menu.
+        if action == "menu":
+            include_single = not is_pure_playlist_url(cache_data.get("url") or "")
+            await callback_query.answer()
+            await callback_query.message.edit_text(
+                f"📋 **Playlist:** {cache_data['title']}\n"
+                f"📺 **Videos:** {len(cache_data['entries'])}\n\n"
+                f"What do you want to do?",
+                reply_markup=build_playlist_decision_keyboard(cache_id, include_single),
+            )
+            return
+
+        # "Download whole playlist" → quality-tier selector.
+        if action == "whole":
+            await callback_query.answer()
+            await callback_query.message.edit_text(
+                f"📋 **Playlist:** {cache_data['title']}\n\n"
+                f"Pick a quality tier — it applies to every video:",
+                reply_markup=build_playlist_tier_keyboard(cache_id),
+            )
+            return
+
+        # "Explore videos" → first page of the per-video picker.
+        if action == "explore":
+            await callback_query.answer()
+            keyboard, total_pages = build_playlist_explore_keyboard(cache_id, cache_data["entries"], 0)
+            await callback_query.message.edit_text(
+                f"🔎 **{cache_data['title']}**\n"
+                f"Pick the videos to download (page 1/{total_pages}):",
+                reply_markup=keyboard,
+            )
             return
 
         if action not in ("vh", "vm", "vl", "ah", "am", "al"):
@@ -499,6 +599,64 @@ def register_downloader_handlers(app: Client):
                 pass
 
         await queue.add_task(user_id, callback_query.message, playlist_job)
+
+    # =========================================================================
+    # Callback: playlist explorer pagination (pln:...)
+    # =========================================================================
+    @app.on_callback_query(filters.regex(r"^pln:"))
+    async def playlist_explore_nav_handler(client: Client, callback_query: CallbackQuery):
+        parts = callback_query.data.split(":")
+        if len(parts) < 3:
+            return
+        cache_id = parts[1]
+        try:
+            page = int(parts[2])
+        except ValueError:
+            return
+        cache_data = DOWNLOAD_CACHE.get(cache_id)
+        if not cache_data or cache_data.get("type") != "playlist":
+            await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
+            return
+        keyboard, total_pages = build_playlist_explore_keyboard(cache_id, cache_data["entries"], page)
+        shown_page = min(max(page, 0), total_pages - 1) + 1
+        await callback_query.answer()
+        await callback_query.message.edit_text(
+            f"🔎 **{cache_data['title']}**\n"
+            f"Pick the videos to download (page {shown_page}/{total_pages}):",
+            reply_markup=keyboard,
+        )
+
+    # =========================================================================
+    # Callback: pick one video from the explorer → single-video format flow (plx:...)
+    # =========================================================================
+    @app.on_callback_query(filters.regex(r"^plx:"))
+    async def playlist_explore_pick_handler(client: Client, callback_query: CallbackQuery):
+        user_id = callback_query.from_user.id
+        parts = callback_query.data.split(":")
+        if len(parts) < 3:
+            return
+        cache_id = parts[1]
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            return
+        cache_data = DOWNLOAD_CACHE.get(cache_id)
+        if not cache_data or cache_data.get("type") != "playlist":
+            await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
+            return
+        entries = cache_data["entries"]
+        if idx < 0 or idx >= len(entries):
+            await callback_query.answer("⚠️ That video is no longer listed.", show_alert=True)
+            return
+
+        entry = entries[idx]
+        await callback_query.answer()
+        status_msg = await callback_query.message.reply_text(f"🔍 Fetching formats for `{entry['title']}`...")
+
+        async def pick_job():
+            await show_format_selection(callback_query.message, status_msg, entry["url"], cache_data.get("custom_filename"), user_id)
+
+        await queue.add_task(user_id, status_msg, pick_job)
 
 
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:

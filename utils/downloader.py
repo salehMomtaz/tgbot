@@ -452,6 +452,10 @@ def extract_formats(url: str) -> dict:
             continue
 
         size = estimate_format_size(fmt, duration_seconds)
+        # Only fmt['filesize'] is a real content-length (clen for YouTube). Anything
+        # else (filesize_approx from tbr, or the height/bitrate heuristic) is an
+        # ESTIMATE that tends to run high, so the real file is often smaller.
+        exact = bool(fmt.get('filesize'))
 
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
             abr = fmt.get('abr') or 0
@@ -459,7 +463,8 @@ def extract_formats(url: str) -> dict:
                 'format_id': fmt['format_id'],
                 'quality': f"{int(abr)}k",
                 'bytes': size,
-                'bitrate': abr
+                'bitrate': abr,
+                'exact': exact,
             })
 
         elif fmt.get('vcodec') != 'none':
@@ -471,7 +476,8 @@ def extract_formats(url: str) -> dict:
                     'format_id': fmt['format_id'],
                     'quality': f"{resolution}p",
                     'bytes': size,
-                    'height': resolution
+                    'height': resolution,
+                    'exact': exact,
                 })
 
     video_options = sorted(video_options, key=lambda x: x['height'], reverse=True)
@@ -492,16 +498,23 @@ def extract_formats(url: str) -> dict:
             seen_bitrates.add(a['quality'])
 
     # When the user taps a VIDEO button, the bot downloads "{video}+bestaudio" and
-    # merges them into an mp4. The button must therefore show the *merged* size —
-    # video stream + the best audio stream — not the video-only size. Otherwise the
-    # uploaded file is always larger than the button promised (by the audio track).
-    best_audio_bytes = unique_audios[0]['bytes'] if unique_audios else 0
+    # merges them into an mp4. The button therefore shows the *merged* size —
+    # video stream + the best audio stream — not the video-only size.
+    #
+    # Only the real content-length (`filesize`) is exact. filesize_approx (tbr) and
+    # the height/bitrate fallbacks are ESTIMATES that tend to overshoot, so a "~"
+    # prefix warns the user the real file may come out smaller than the number.
+    best_audio = unique_audios[0] if unique_audios else None
+    best_audio_bytes = best_audio['bytes'] if best_audio else 0
+    best_audio_exact = best_audio['exact'] if best_audio else False
     for v in unique_videos:
         v['bytes'] = v['bytes'] + best_audio_bytes
+        prefix = "" if (v['exact'] and best_audio_exact) else "~"
         warn_flag = " ⚠️" if v['bytes'] > (2000 * 1024 * 1024) else ""
-        v['size_str'] = f"{format_size_short(v['bytes'])}{warn_flag}"
+        v['size_str'] = f"{prefix}{format_size_short(v['bytes'])}{warn_flag}"
     for a in unique_audios:
-        a['size_str'] = format_size_short(a['bytes'])
+        prefix = "" if a['exact'] else "~"
+        a['size_str'] = f"{prefix}{format_size_short(a['bytes'])}"
 
     return {
         'title': info.get('title', 'Unknown Title'),
@@ -702,7 +715,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 
-def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None) -> dict:
+def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None) -> dict:
     """Download a single media item.
 
     Two mutually exclusive selection modes:
@@ -714,6 +727,10 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
       across a playlist.
 
     ``format_selector`` wins when both are supplied.
+
+    ``max_height`` caps the video fallback when ``format_id`` is no longer
+    available, so the delivered file stays at the resolution advertised on the
+    button instead of collapsing to a tiny muxed ``/best`` stream.
     """
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
@@ -755,7 +772,16 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 'preferredquality': '0',
             }]
     elif format_type == 'v':
-        ydl_opts['format'] = f"{format_id}+bestaudio/best"
+        # Never let a stale/unmergeable format_id silently collapse to a single
+        # muxed `/best` stream — that file is far smaller AND lower quality than
+        # the button the user tapped, which is exactly the "uploaded file is way
+        # smaller than shown" bug. Fall back to a same-or-lower-resolution MERGED
+        # video+audio instead, matching the size/resolution we advertised.
+        if max_height:
+            fallback = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
+        else:
+            fallback = "bestvideo+bestaudio/best"
+        ydl_opts['format'] = f"{format_id}+bestaudio/{fallback}"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
         # Audio: download the selected audio format as-is; avoid re-encoding to 320kbps
@@ -785,7 +811,12 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
         if "requested format" in error_msg and "not available" in error_msg:
             # Fallback to generic best-effort selectors. The original format_id may
             # have been removed or merged away between extraction and download.
-            fallback_format = "bestaudio/best" if format_type == 'a' else "bestvideo+bestaudio/best"
+            if format_type == 'a':
+                fallback_format = "bestaudio/best"
+            elif max_height:
+                fallback_format = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
+            else:
+                fallback_format = "bestvideo+bestaudio/best"
             ydl_opts['format'] = fallback_format
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
