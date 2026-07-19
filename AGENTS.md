@@ -91,6 +91,21 @@ have to rediscover them.
    "correct" the button back to the video-only size — it would reintroduce the
    mismatch where every uploaded video looked larger than its button.
 
+10. **Metadata fetches bypass the queue; only downloads serialize.** The
+    single-worker `DownloadQueue` (`utils/queue_manager.py`) gates the **real
+    download+upload jobs only** — `queued_transfer_job` (single video),
+    `playlist_job` (whole playlist), and `direct_upload_job` (direct file).
+    Format/playlist *fetches* (`show_format_selection`, `begin_playlist_flow`'s
+    `meta_job`, the playlist `single`/`plx` picks) are spawned concurrently via
+    `_spawn_fetch` (`asyncio.create_task`) and must **not** go through
+    `queue.add_task`. Rationale: a user sending link B while link A downloads
+    must see B's format buttons immediately, not be queued behind A's download.
+    The blocking `extract_formats`/`extract_playlist_meta` calls are offloaded
+    with `loop.run_in_executor` so concurrent fetches (and any running download)
+    keep the event loop responsive — never call them inline. Downloads still run
+    one-at-a-time by design so the user can queue many and collect files later.
+
+
 ## Running / testing
 
 There's no test suite. Verify changes with:
