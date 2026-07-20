@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-07-18.
+code or the git log alone. Last updated: 2026-07-20.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -19,3 +19,14 @@ code or the git log alone. Last updated: 2026-07-18.
 - [VPS two-bots runtime state](vps-two-bots-runtime-state.md) — on the test VPS
   `balebot.service` (PO port 4416) and `tgbot.service` (PO port 4417) both run;
   both are now enabled and survive reboot; a bare `python main.py` is balebot.
+- [YouTube size fix & IP flag](tgbot-youtube-size-and-ip-flag.md) — uploaded<
+  shown bug was a silent `/best` muxed fallback (fixed `5003d78`: use a
+  height-capped **merged** fallback); the test VPS IP gets storyboard-flagged
+  intermittently (not a code bug).
+- [Fetch concurrent / download queued](tgbot-fetch-concurrent-download-queued.md)
+  — metadata fetches bypass the queue and run concurrently; only the real
+  download+upload jobs serialize. Never call `extract_formats` inline.
+- [How download-button sizes are computed](tgbot-ytdlnis-size-approach.md) —
+  ytdlnis/yt-dlp reference: sizes are per-format, yt-dlp never sums a `v+a` merge,
+  so the app must add `video+audio` itself. tgbot's `estimate_format_size` already
+  does this; the real mismatch cause is the selector fallback, not the size math.
