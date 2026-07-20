@@ -118,6 +118,36 @@ gracefully per site:
 
 ---
 
+## 📐 Download size accuracy (button vs. uploaded file)
+
+Users sometimes notice the size on a format button doesn't exactly match the
+file they receive. **The size math is correct** (`estimate_format_size`); the
+only thing that can cause a real mismatch is the **download selector resolving to
+a different stream than the one that was sized**. This mirrors how
+[ytdlnis](https://github.com/deniscerci/ytdlnis) handles it.
+
+- **Sizes are per-format.** yt-dlp exposes `filesize` (exact `clen`/
+  content-length), `filesize_approx` (bitrate × duration), and `tbr`/`vbr`/`abr`.
+  For a merged `video+audio` download yt-dlp does **not** report the combined
+  size, so the button is built as `video_stream + best_audio`
+  (`v['bytes'] += best_audio_bytes`).
+- **Only `filesize`/`clen` is exact.** Everything else is an estimate that tends
+  to **overshoot**, so the real file is often a little *smaller* than the
+  number. Those buttons carry a `~` prefix to say "approximate"; that gap is
+  expected, not a bug.
+- **The historical defect (fixed `5003d78`):** the old single-video selector
+  `{format_id}+bestaudio/best` could **silently** collapse to the final muxed
+  `/best` — a single low-res stream far smaller and lower-quality than the
+  button. The selector is now
+  `{format_id}+bestaudio / bestvideo[height<=H]+bestaudio / best[height<=H] / best`,
+  so every fallback stays **merged and height-capped** until the absolute
+  last-resort muxed stream. A tap can no longer silently drop to a tiny file.
+- **Diagnostic rule for any size complaint:** inspect the selector's fallback
+  chain first (`download_media`), not the estimator. See
+  `docs/memory/tgbot-ytdlnis-size-approach.md` and AGENTS.md invariant #11.
+
+---
+
 ## 📤 Upload ceilings & splitters
 
 Telegram limits: **2 GB** via the Bot API, **4 GB** via a Premium userbot. The

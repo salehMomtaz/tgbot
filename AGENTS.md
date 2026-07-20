@@ -88,8 +88,9 @@ have to rediscover them.
 9. **Video button sizes already include the merged audio track.** In
    `extract_formats`, each video option's `bytes` is `video_stream + best_audio`
    because the download step merges `{format_id}+bestaudio` into an mp4. Do not
-   "correct" the button back to the video-only size — it would reintroduce the
-   mismatch where every uploaded video looked larger than its button.
+   "correct" the button back to the video-only size — the button must match what
+   actually gets downloaded. (This is the *math*; the *selector* invariant below
+   is what actually prevents mismatch.)
 
 10. **Metadata fetches bypass the queue; only downloads serialize.** The
     single-worker `DownloadQueue` (`utils/queue_manager.py`) gates the **real
@@ -104,6 +105,28 @@ have to rediscover them.
     with `loop.run_in_executor` so concurrent fetches (and any running download)
     keep the event loop responsive — never call them inline. Downloads still run
     one-at-a-time by design so the user can queue many and collect files later.
+
+11. **"Uploaded size ≠ button size" is a selector problem, not a size-math
+    problem.** `estimate_format_size` (`filesize` → `filesize_approx` →
+    `tbr`/`vbr`/`abr` × duration) is correct and matches how ytdlnis/yt-dlp size
+    formats — do **not** rewrite it on size-mismatch grounds. yt-dlp's size fields
+    are **per-format**; for a merged `video+audio` download yt-dlp never reports
+    the sum, so the app adds `video + best_audio` itself (done at
+    `v['bytes'] += best_audio_bytes`). Only a real `filesize`/`clen` is exact;
+    every estimate carries a `~` prefix and **tends to overshoot**, so the real
+    file often lands a bit *smaller* than the `~` number — expected, not a bug.
+    The one historical defect was the **download selector silently resolving to a
+    different stream than the one sized**: the old `{format_id}+bestaudio/best`
+    collapsed to a low-res **muxed** `/best`, so the uploaded file came out far
+    smaller (and lower quality) than the button. Fixed in `5003d78`: the
+    single-video video selector is now
+    `{format_id}+bestaudio / bestvideo[height<=H]+bestaudio / best[height<=H] / best`
+    — every fallback stays **merged and height-capped** until the absolute
+    last-resort muxed `/best`, so a tap can never silently drop to a tiny muxed
+    file. The exception path (`utils/downloader.py` `download_media`, "requested
+    format not available") repeats the same merged fallback. **Diagnostic rule:**
+    any size complaint → inspect the selector's fallback chain first, never the
+    estimator. See `docs/memory/tgbot-ytdlnis-size-approach.md`.
 
 
 ## Running / testing
