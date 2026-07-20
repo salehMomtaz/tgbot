@@ -118,13 +118,9 @@ have to rediscover them.
     The one historical defect was the **download selector silently resolving to a
     different stream than the one sized**: the old `{format_id}+bestaudio/best`
     collapsed to a low-res **muxed** `/best`, so the uploaded file came out far
-    smaller (and lower quality) than the button. Fixed in `5003d78`: the
-    single-video video selector is now
-    `{format_id}+bestaudio / bestvideo[height<=H]+bestaudio / best[height<=H] / best`
-    — every fallback stays **merged and height-capped** until the absolute
-    last-resort muxed `/best`, so a tap can never silently drop to a tiny muxed
-    file. The exception path (`utils/downloader.py` `download_media`, "requested
-    format not available") repeats the same merged fallback. **Diagnostic rule:**
+    smaller (and lower quality) than the button. Fixed in `5003d78` via height-capped
+    selectors, and further refined by passing the pre-calculated `best_audio_format_id`
+    directly into `download_media` to force an exact merge match. **Diagnostic rule:**
     any size complaint → inspect the selector's fallback chain first, never the
     estimator. See `docs/memory/tgbot-ytdlnis-size-approach.md`.
 

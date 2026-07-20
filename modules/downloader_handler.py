@@ -102,7 +102,8 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
             "videos": data["videos"],
             "audios": data["audios"],
             "thumbnail_url": data["thumbnail"],
-            "custom_filename": custom_filename
+            "custom_filename": custom_filename,
+            "best_audio_format_id": data["best_audio_format_id"]
         }
 
         keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"])
@@ -395,7 +396,8 @@ def register_downloader_handlers(app: Client):
 
                 result = await loop.run_in_executor(
                     None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress,
-                    None, (target_fmt.get("height") if action == "v" and target_fmt else None)
+                    None, (target_fmt.get("height") if action == "v" and target_fmt else None),
+                    cache_data.get("best_audio_format_id") if action == "v" else None
                 )
 
                 file_path = result['file_path']

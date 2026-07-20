@@ -505,6 +505,7 @@ def extract_formats(url: str) -> dict:
     # the height/bitrate fallbacks are ESTIMATES that tend to overshoot, so a "~"
     # prefix warns the user the real file may come out smaller than the number.
     best_audio = unique_audios[0] if unique_audios else None
+    best_audio_format_id = best_audio['format_id'] if best_audio else None
     best_audio_bytes = best_audio['bytes'] if best_audio else 0
     best_audio_exact = best_audio['exact'] if best_audio else False
     for v in unique_videos:
@@ -521,7 +522,8 @@ def extract_formats(url: str) -> dict:
         'duration': duration_seconds,
         'thumbnail': info.get('thumbnail'),
         'videos': unique_videos[:5],
-        'audios': unique_audios[:5]
+        'audios': unique_audios[:5],
+        'best_audio_format_id': best_audio_format_id
     }
 
 
@@ -715,7 +717,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 
-def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None) -> dict:
+def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None) -> dict:
     """Download a single media item.
 
     Two mutually exclusive selection modes:
@@ -731,6 +733,9 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     ``max_height`` caps the video fallback when ``format_id`` is no longer
     available, so the delivered file stays at the resolution advertised on the
     button instead of collapsing to a tiny muxed ``/best`` stream.
+    
+    ``best_audio_format_id`` is the pre-calculated ID of the best audio stream
+    to force merging with ``format_id``.
     """
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
@@ -781,7 +786,9 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             fallback = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
         else:
             fallback = "bestvideo+bestaudio/best"
-        ydl_opts['format'] = f"{format_id}+bestaudio/{fallback}"
+        
+        audio_part = f"+{best_audio_format_id}" if best_audio_format_id else "+bestaudio"
+        ydl_opts['format'] = f"{format_id}{audio_part}/{fallback}"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
         # Audio: download the selected audio format as-is; avoid re-encoding to 320kbps
