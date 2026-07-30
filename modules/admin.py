@@ -33,7 +33,7 @@ COOKIE_MAP = {
     "igcookies": config.IG_COOKIES,
     "ttcookies": config.TT_COOKIES,
     "xcookies": config.X_COOKIES,
-    "cookies": config.COOKIES_FILE
+    "cookies": config.COOKIES_FILE,
 }
 
 # In-memory dictionary to track administrative states per user
@@ -232,6 +232,30 @@ def register_admin_handlers(app: Client):
             message.stop_propagation()
             return
 
+        # 1b. Per-site cookie jar: user is typing the site name. Validate it,
+        # then flip the state to waiting_for_replace_per_site_<name> so the
+        # document handler below stores the file at cookies/ytdlp/<name>.txt.
+        if state == "waiting_for_per_site_name":
+            import re
+            site_name = input_text.strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*", site_name):
+                await message.reply_text(
+                    "❌ Invalid site name. Use only letters, numbers, dashes and dots "
+                    "(e.g. `reddit`, `tiktok`, `my-site`).",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+            USER_STATES[user_id] = f"waiting_for_replace_per_site_{site_name}"
+            await message.reply_text(
+                f"✅ Site set to **`{site_name}`**.\n\n"
+                f"Now send the **`.txt` cookie file** for `cookies/ytdlp/{site_name}.txt` "
+                "as a document.",
+                reply_markup=back_markup
+            )
+            message.stop_propagation()
+            return
+
         # 2. Handle User ID Input States (Add, Remove, Unban)
         if not is_valid_telegram_id(input_text):
             USER_STATES.pop(user_id, None)
@@ -359,6 +383,56 @@ def register_admin_handlers(app: Client):
             _write_cookie_jar(cookie_key, file_path, content)
             await message.reply_text(f"✅ `{cookie_key}.txt` successfully replaced from document!", reply_markup=back_markup)
             await log_event(f"🍪 **Admin Action:** Cookie profile `{cookie_key}.txt` was replaced via document.")
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
+
+    # Handler for per-site jar uploads (stored under cookies/ytdlp/<site>.txt)
+    @app.on_message(
+        filters.document &
+        filters.private &
+        filters.create(lambda _, __, m: m.from_user.id == config.SYSTEM_CREATOR_ID) &
+        filters.create(lambda _, __, m: USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_per_site_")),
+        group=0
+    )
+    async def admin_per_site_cookie_document_handler(client: Client, message: Message):
+        user_id = message.from_user.id
+        state = USER_STATES.pop(user_id, None)
+        site_name = state.split("waiting_for_replace_per_site_")[1]
+        ytdlp_dir = getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp")
+        os.makedirs(ytdlp_dir, exist_ok=True)
+        file_path = os.path.join(ytdlp_dir, f"{site_name}.txt")
+
+        prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
+        if prompt_id:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+            except Exception:
+                pass
+
+        doc = message.document
+        file_name = (doc.file_name or "").lower()
+        mime = (doc.mime_type or "").lower()
+        if not (file_name.endswith(".txt") or mime.startswith("text/")):
+            await message.reply_text(
+                "❌ Invalid file type. Please send a `.txt` cookie jar file.",
+                reply_markup=back_markup
+            )
+            return
+
+        try:
+            buffer = await client.download_media(message=message, in_memory=True)
+            content = buffer.getvalue().decode("utf-8", errors="replace")
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to download file: {e}", reply_markup=back_markup)
+            return
+
+        try:
+            _write_cookie_jar(f"ytdlp_{site_name}", file_path, content)
+            await message.reply_text(
+                f"✅ Per-site cookie jar saved to `cookies/ytdlp/{site_name}.txt`!",
+                reply_markup=back_markup
+            )
+            await log_event(f"🍪 **Admin Action:** Per-site cookie jar `cookies/ytdlp/{site_name}.txt` uploaded.")
         except Exception as e:
             await message.reply_text(f"❌ Failed to write cookie file: {e}", reply_markup=back_markup)
 
@@ -504,12 +578,26 @@ def register_admin_handlers(app: Client):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("YouTube", callback_data="admin_cookie_select:ytcookies"), InlineKeyboardButton("Instagram", callback_data="admin_cookie_select:igcookies")],
                 [InlineKeyboardButton("TikTok", callback_data="admin_cookie_select:ttcookies"), InlineKeyboardButton("X/Twitter", callback_data="admin_cookie_select:xcookies")],
-                [InlineKeyboardButton("Global (cookies.txt)", callback_data="admin_cookie_select:cookies")],
+                [InlineKeyboardButton("Global (cookies.txt)", callback_data="admin_cookie_select:cookies"), InlineKeyboardButton("➕ Per-Site Jar", callback_data="admin_cookie_add_site")],
                 [InlineKeyboardButton("◀️ Return to Console", callback_data="admin_main")]
             ])
             await callback_query.message.edit_text(
-                "🍪 **Cookie Jars Manager**\nSelect a cookie profile to view or edit:",
+                "🍪 **Cookie Jars Manager**\nSelect a cookie profile to view or edit, or add a per-site jar for any yt-dlp site:",
                 reply_markup=keyboard
+            )
+            await callback_query.answer()
+
+        elif data == "admin_cookie_add_site":
+            USER_STATES[user_id] = "waiting_for_per_site_name"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
+            await callback_query.message.edit_text(
+                "➕ **Per-Site Cookie Jar**\n\n"
+                "Type the site name (e.g. `reddit`, `tiktok`, `soundcloud`) — "
+                "the jar will be stored as `cookies/ytdlp/<site>.txt`.\n\n"
+                "Only letters, numbers, dashes and dots are allowed. "
+                "Lower-case is fine; we'll lower-case it for you.\n\n"
+                "Then send the **`.txt` cookie file** as a document.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Cancel", callback_data="admin_cookies_menu")]])
             )
             await callback_query.answer()
 

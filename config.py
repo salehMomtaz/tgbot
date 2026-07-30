@@ -102,12 +102,14 @@ YTDLP_POT_PLAYER_CLIENT = os.getenv("YTDLP_POT_PLAYER_CLIENT", "mweb")
 # Database and Cookie paths
 # =========================================================================
 DB_FILE = "database.json"
-YT_COOKIES = "ytcookies.txt"
-YT_COOKIES_BACKUP = "ytcookies.backup"
-IG_COOKIES = "igcookies.txt"
-TT_COOKIES = "ttcookies.txt"
-X_COOKIES = "xcookies.txt"
-COOKIES_FILE = "cookies.txt"
+COOKIE_DIR = "cookies"
+YT_COOKIES = "cookies/youtube/ytcookies.txt"
+YT_COOKIES_BACKUP = "cookies/youtube/ytcookies.backup"
+IG_COOKIES = "cookies/instagram/igcookies.txt"
+TT_COOKIES = "cookies/tiktok/ttcookies.txt"
+X_COOKIES = "cookies/twitter/xcookies.txt"
+YTDLP_COOKIES_DIR = "cookies/ytdlp"
+COOKIES_FILE = "cookies/ytdlp/cookies.txt"
 
 # ---------------------------------------------------------------------------
 # Playlist safety cap (videos per playlist). Protects the VPS from someone

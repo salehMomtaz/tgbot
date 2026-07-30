@@ -65,8 +65,20 @@ def get_cookies_for_url(url: str) -> str | None:
     elif "twitter.com" in url_lower or "x.com" in url_lower:
         cookie_path = config.X_COOKIES
     else:
-        # Fallback global cookies file for all other 1,000+ yt-dlp supported sites
-        cookie_path = config.COOKIES_FILE
+        # Check for site-specific cookies in cookies/ytdlp/<sitename>.txt
+        try:
+            parsed = urllib.parse.urlparse(url)
+            domain = parsed.netloc.lower()
+            if domain.startswith("www."):
+                domain = domain[4:]
+            site_name = domain.split(".")[0]
+            site_cookie_file = os.path.join(getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp"), f"{site_name}.txt")
+            if os.path.exists(site_cookie_file) and os.path.getsize(site_cookie_file) > 0:
+                cookie_path = site_cookie_file
+            else:
+                cookie_path = config.COOKIES_FILE
+        except Exception:
+            cookie_path = config.COOKIES_FILE
 
     return _cookie_snapshot(cookie_path)
 
@@ -308,6 +320,18 @@ def _site_cookie_context(url: str) -> tuple[str, str]:
         return ("TikTok", config.TT_COOKIES)
     if "twitter.com" in lower or "x.com" in lower:
         return ("X", config.X_COOKIES)
+    # Per-site jar lookup (cookies/ytdlp/<site>.txt)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        site_name = domain.split(".")[0]
+        site_cookie_file = os.path.join(getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp"), f"{site_name}.txt")
+        if os.path.exists(site_cookie_file) and os.path.getsize(site_cookie_file) > 0:
+            return (site_name, site_cookie_file)
+    except Exception:
+        pass
     return ("the host site", config.COOKIES_FILE)
 
 
@@ -390,10 +414,16 @@ def extract_formats(url: str) -> dict:
     # no-auth fallback. The PO-token provider must be running; if it isn't,
     # _apply_pot_options raises an actionable error before any extraction.
     #
-    # Other sites: try cookies first (fast path), then fall back to no-auth.
+    # Other sites: Instagram works better WITHOUT cookies (cookies trigger HTTP
+    # 400 Bad Request on authenticated API endpoints when session is flagged/stale),
+    # so try no-auth first for Instagram. All other sites try cookies first (fast path).
     original_pot = shared.is_pot_enabled()
     if _is_youtube(url):
         strategies = [("cookies+pot", True)]
+    elif "instagram.com" in url.lower():
+        strategies = [("no-auth", None)]
+        if cookie_path:
+            strategies.append(("cookies", False))
     else:
         strategies = []
         if cookie_path:

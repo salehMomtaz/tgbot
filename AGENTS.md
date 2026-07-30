@@ -17,7 +17,7 @@ have to rediscover them.
   secrets. `.env.example` is the template; `.env` is git-ignored.
 - **Entry point:** `main.py` → `main_engine()`. It wires logger → cookie init+lock
   → disk guard → pyrogram clients → PO provider → FastAPI/uvicorn → background
-  tasks (updater, cache cleaner, PO health loop). SIGTERM is translated to
+  tasks (updater, cache cleaner, PO health loop, auto-forward). SIGTERM is translated to
   `KeyboardInterrupt` for graceful teardown.
 
 ## File map (what to edit for what)
@@ -33,6 +33,7 @@ have to rediscover them.
 | Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` |
+| Add auto-forward relay (IG/TikTok/X self-feed) | `modules/auto_forward.py` + `.env` (`AUTO_FORWARD_*`) |
 
 ## Critical invariants (do not break these)
 
@@ -51,14 +52,18 @@ have to rediscover them.
 3. **YouTube = cookies + PO token, no fallback.** `utils/downloader.py::
    _apply_pot_options` raises `RuntimeError` when the provider is down for a
    YouTube URL. Do not add a cookies-only/no-auth fallback for YouTube. Other
-   sites keep the strategy ladder (cookies → no-auth).
+   sites keep the strategy ladder — but **Instagram flips the ladder**: cookies
+   trigger HTTP 400 on Instagram's authenticated API when the session is stale
+   or bot-flagged, so `extract_formats` tries `no-auth` first for Instagram and
+   falls back to cookies only if that fails. Do not "simplify" by re-ordering
+   the strategies — the Instagram 400 is the documented failure mode.
 
 4. **Cookie jars are read-only at rest.** `main.py::initialize_cookie_jars` locks
-   `ytcookies.txt` to `0o444`. yt-dlp rewrites jars on exit; we prevent that and
-   hand each download a *snapshot* from `get_cookies_for_url`. When you need to
-   write a jar (admin replace/restore), unlock to `0o644`, write, re-lock to
-   `0o444`, then call `_purge_cookie_snapshots`. See `modules/admin.py::
-   _write_cookie_jar`.
+   the YouTube jar (`cookies/youtube/ytcookies.txt`) to `0o444`. yt-dlp rewrites
+   jars on exit; we prevent that and hand each download a *snapshot* from
+   `get_cookies_for_url`. When you need to write a jar (admin replace/restore),
+   unlock to `0o644`, write, re-lock to `0o444`, then call
+   `_purge_cookie_snapshots`. See `modules/admin.py::_write_cookie_jar`.
 
 5. **Keep `[default]` on yt-dlp upgrades.** `utils/updater.py` runs
    `pip install -U --pre "yt-dlp[default]"` — plain `yt-dlp` would silently strip
@@ -123,6 +128,40 @@ have to rediscover them.
     directly into `download_media` to force an exact merge match. **Diagnostic rule:**
     any size complaint → inspect the selector's fallback chain first, never the
     estimator. See `docs/memory/tgbot-ytdlnis-size-approach.md`.
+
+12. **Cookies live under `cookies/<platform>/`, never at the project root.**
+    Layout (`config.COOKIE_DIR`, `config.YTDLP_COOKIES_DIR`):
+    ```
+    cookies/youtube/ytcookies.txt      # YT working jar (+ .backup)
+    cookies/instagram/igcookies.txt
+    cookies/tiktok/ttcookies.txt
+    cookies/twitter/xcookies.txt
+    cookies/ytdlp/<sitename>.txt       # per-site jars for every other yt-dlp site
+    cookies/ytdlp/cookies.txt          # global fallback for sites with no jar
+    ```
+    The four "always-present" jars are listed in `config.COOKIE_JARS` and
+    initialised by `main.py::initialize_cookie_jars`. Per-site jars under
+    `cookies/ytdlp/` are uploaded by the admin via `Admin → Cookies → ➕ Per-Site
+    Jar` (state: `waiting_for_replace_per_site_<name>`); the jar is keyed off the
+    URL's bare domain (`instagram.com` → `instagram`, `reddit.com` → `reddit`).
+    `get_cookies_for_url` (utils/downloader.py) and `_site_cookie_context` look
+    the site up from `urllib.parse.urlparse(url).netloc`, **not** a hardcoded
+    switch — adding a new site is just dropping a `<site>.txt` in `cookies/ytdlp/`.
+    Any pre-existing flat-root jars (`ytcookies.txt`, `igcookies.txt`, etc.) need
+    `mv` into the new layout during deployment; the old paths are not honoured.
+
+13. **Auto-forward = background relay of your Instagram/TikTok/X "saved/liked"
+    posts into Telegram.** `modules/auto_forward.py` polls the public saved/
+    liked feeds of dedicated bot accounts on each platform every
+    `AUTO_FORWARD_POLL_SECONDS` (default 300 s) and forwards anything new to
+    `AUTO_FORWARD_CHAT_ID`. Each platform uses the SAME cookie jar as manual
+    downloads (the bot account's session). State (seen post IDs) lives in
+    `auto_forward_state.json` next to the bot. The relay is **no-op** when
+    `AUTO_FORWARD_CHAT_ID` is 0 or no platform is enabled — set those env vars
+    to enable. The worker is one of the `tasks` in `main.main_engine()`, started
+    after the FastAPI server, so a misconfiguration never blocks the bot.
+    Do not move auto-forward logic into `download_media` — the poll loop is its
+    own coroutine, with its own error containment (`try/except` per platform).
 
 
 ## Running / testing

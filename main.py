@@ -111,12 +111,55 @@ def initialize_cookie_jars():
     If a jar already has content, prepend the header when it is missing.
     Never overwrite existing cookies.
 
+    Cookie folder layout (see config.COOKIE_DIR):
+        cookies/youtube/ytcookies.txt      # YT working jar + .backup
+        cookies/instagram/igcookies.txt
+        cookies/tiktok/ttcookies.txt
+        cookies/twitter/xcookies.txt
+        cookies/ytdlp/<sitename>.txt      # Per-site jars for all other yt-dlp sites
+        cookies/ytdlp/cookies.txt         # Global fallback for any site without a jar
+
     The YouTube working jar is made read-only after init so that yt-dlp cannot
     corrupt it with write-back. Every yt-dlp invocation receives a snapshot copy
     from utils.downloader.get_cookies_for_url() instead.
     """
+    import config
     header = "# Netscape HTTP Cookie File\n"
-    cookie_files = [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, config.COOKIES_FILE]
+
+    # Make sure the folder layout exists so admin uploads and yt-dlp always
+    # have somewhere to land.
+    cookie_dirs = [
+        os.path.dirname(config.YT_COOKIES),
+        os.path.dirname(config.IG_COOKIES),
+        os.path.dirname(config.TT_COOKIES),
+        os.path.dirname(config.X_COOKIES),
+        getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp"),
+    ]
+    for d in cookie_dirs:
+        if d:
+            os.makedirs(d, exist_ok=True)
+
+    # The five always-present jars (four dedicated + one global fallback). Any
+    # extra per-site jar inside cookies/ytdlp/ is admin-uploaded, so we leave
+    # it alone — we only ensure the header is intact if the file already
+    # contains something.
+    cookie_files = [
+        config.YT_COOKIES,
+        config.IG_COOKIES,
+        config.TT_COOKIES,
+        config.X_COOKIES,
+        config.COOKIES_FILE,
+    ]
+
+    # Also walk any pre-existing per-site jars inside cookies/ytdlp/ so an
+    # admin who uploaded them before still gets a valid header prepended if
+    # they accidentally pasted a header-less file.
+    ytdlp_dir = getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp")
+    if os.path.isdir(ytdlp_dir):
+        for entry in os.scandir(ytdlp_dir):
+            if entry.is_file() and entry.name.endswith(".txt"):
+                cookie_files.append(entry.path)
+
     for file_path in cookie_files:
         if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             try:
@@ -364,6 +407,15 @@ async def main_engine():
     ]
     if pot_manager:
         tasks.append(pot_manager.health_check_loop())
+
+    # Auto-forward background task (Instagram / TikTok / X). No-op if
+    # AUTO_FORWARD_CHAT_ID is not set or no platform is enabled.
+    try:
+        from modules.auto_forward import start_auto_forward_task
+        af_task = start_auto_forward_task(app, premium_app)
+        tasks.append(af_task)
+    except Exception as e:
+        logging.warning(f"[AutoForward] Could not start: {e}")
 
     try:
         await asyncio.gather(*tasks)
