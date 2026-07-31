@@ -772,6 +772,13 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
     cookie_path = get_cookies_for_url(url)
 
+    # Instagram: skip cookies at download time too. extract_formats already
+    # proved no-auth works; stale/expired sessions trigger HTTP 400 even when
+    # downloading, not just during metadata extraction. Only retry with
+    # cookies when yt-dlp returns HTTP 400 on a no-auth attempt (login-wall).
+    is_instagram = "instagram.com" in url.lower()
+    use_cookies_now = bool(cookie_path) and not is_instagram
+
     # Conservative disk check: reserve 1 GB + estimated size. The estimate is rough;
     # we verify again before metadata embedding.
     _ensure_disk_space(task_dir, 1024 * 1024 * 1024)
@@ -785,7 +792,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
         'keep_fragments': False,
         'proxy': getattr(config, "YTDLP_PROXY", None),
     }
-    if cookie_path:
+    if use_cookies_now:
         ydl_opts['cookiefile'] = cookie_path
 
     user_agent = getattr(config, "YTDLP_USER_AGENT", "")
@@ -840,11 +847,21 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 progress_fn(downloaded, total)
         ydl_opts['progress_hooks'] = [ytdl_hook]
 
+    # Instagram cookies can be stale or flagged even when extraction worked via
+    # no-auth: downloads fail with HTTP 400 on "Video info extraction failed".
+    # If we’re on Instagram and cookies exist, try no-auth first on a 400 (most
+    # reels), then retry with cookies when the post genuinely requires login.
+    # For non-Instagram URLs this flag is irrelevant (cookies are already used).
+    instagram_has_cookies = bool(is_instagram and cookie_path)
+    instagram_used_cookies = False
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as e:
         error_msg = str(e).lower()
+
+        # Format stale? Fall back to loose selectors (YouTube / any site).
         if "requested format" in error_msg and "not available" in error_msg:
             # Fallback to generic best-effort selectors. The original format_id may
             # have been removed or merged away between extraction and download.
@@ -857,6 +874,25 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             ydl_opts['format'] = fallback_format
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+
+        # Instagram-specific HTTP 400 paths.
+        # Case A: we sent cookies and Instagram returned 400 → the session is
+        #   stale/flagged. Retry without cookies (reels work anonymously).
+        elif is_instagram and use_cookies_now and "http error 400" in error_msg:
+            retry_opts = dict(ydl_opts)
+            retry_opts.pop('cookiefile', None)
+            with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+
+        # Case B: we skipped cookies but Instagram returned 400 → the post is
+        #   login-walled. Retry with cookies (private content needs them).
+        elif instagram_has_cookies and "http error 400" in error_msg:
+            retry_opts = dict(ydl_opts)
+            retry_opts['cookiefile'] = cookie_path
+            instagram_used_cookies = True
+            with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+
         else:
             raise RuntimeError(_classify_ytdl_error(e, url))
 
