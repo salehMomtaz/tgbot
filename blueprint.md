@@ -88,16 +88,22 @@ crashes mid-write, the jar is corrupted. The bot therefore:
 - **Hands each download a disposable snapshot** copied into `cache/cookies/`
   (`utils/downloader.py::get_cookies_for_url`). Snapshots are purged on a timer
   and whenever a jar is replaced.
-- **Backs up the YouTube jar** to `ytcookies.backup` (also read-only). The Admin
-  Console can **Save Backup** and **Restore Backup**, and a missing/empty live jar
-  is auto-restored from the backup at boot.
-- **Unlocks only to write:** when the admin replaces a jar (text paste **or**
-  `.txt` document), `modules/admin.py::_write_cookie_jar` briefly `chmod 644`s the
-  target, writes, re-locks to `444`, and purges stale snapshots.
+- **Backs up the YouTube jar** to `cookies/youtube/ytcookies.backup` (read-only).
+  The Admin Console can **Save Backup** and **Restore Backup**, and a missing/empty
+  live jar is auto-restored at boot.
+- **Cookie jar layout (new):** `cookies/youtube/ytcookies.txt`,
+  `cookies/instagram/igcookies.txt`, `cookies/tiktok/ttcookies.txt`,
+  `cookies/twitter/xcookies.txt`, and `cookies/ytdlp/<site>.txt` for all other
+  yt-dlp sites, plus `cookies/ytdlp/cookies.txt` as the global fallback.
+  Per-site jars are uploaded via the admin console (`➕ Per-Site Jar`).
+- **Unlocks only to write:** when the admin replaces a jar (`.txt` document or
+  text — text paste is rejected for YouTube, accepted for per-site jars),
+  `_write_cookie_jar` briefly unlocks (`chmod 644`), writes atomically
+  (`os.replace`), re-locks (`chmod 444`), and purges stale snapshots.
 
 A **live cookie test** (`diagnose_youtube_access`) probes YouTube three ways — no
-auth, cookies-only, cookies+PO — and reports real-format counts so you know
-*exactly* whether your cookies / PO stack are healthy.
+  auth, cookies-only, cookies+PO — and reports real-format counts so you know
+  *exactly* whether your cookies / PO stack are healthy.
 
 ---
 
@@ -203,6 +209,69 @@ tgbot/
 
 ---
 
+## 🔄 Auto-forward feature (Instagram / TikTok / X relay)
+
+**What it is:** A background worker (`modules/auto_forward.py`) that polls
+your dedicated bot accounts on Instagram, TikTok, and X/Twitter for new posts
+you have saved/liked, then downloads them and sends them to your Telegram chat.
+
+**Why it exists:** You (the user) described this exact need: instead of copying
+every Instagram post link into Telegram manually, you just **share the post to
+your bot account** (e.g. via Instagram's native "Save" or "Like" on a dedicated
+bot profile), and the bot detects it automatically.
+
+**How to use it:**
+
+1. **Set up dedicated accounts.** Create separate accounts on Instagram,
+   TikTok, and X that you will use *only* as bot accounts (e.g. `@mybot_ig`).
+2. **Follow that account from your real account.** When you see a post you want,
+   use the platform's native **Share → Save** (Instagram saved collection) or
+   **Like** (TikTok / X liked feed). The bot polls these public feeds.
+3. **Configure `.env`:**
+   ```
+   AUTO_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
+   IG_AUTO_FORWARD_ENABLED=true
+   IG_AUTO_FORWARD_USERNAME=your_bot_ig_username_without_@
+   TT_AUTO_FORWARD_ENABLED=true
+   TT_AUTO_FORWARD_USERNAME=your_bot_tt_username
+   X_AUTO_FORWARD_ENABLED=true
+   X_AUTO_FORWARD_USERNAME=your_bot_x_username
+   AUTO_FORWARD_POLL_SECONDS=300   # how often to poll (default 5 min)
+   AUTO_FORWARD_MAX_ITEMS=10      # max new items per poll
+   ```
+4. **Provide cookies for the bot account.** The bot uses the same cookie jars
+   (`cookies/instagram/igcookies.txt`, etc.) as manual downloads — log in on
+the bot account in a browser, export cookies with a `.txt` extension, and upload
+via the Admin Console (`🍪 Cookie Jars → Instagram → ✏️ Replace`). Without
+valid session cookies, saved/liked feeds are not accessible.
+5. **Restart the bot:** `sudo systemctl restart tgbot`. The worker starts with
+   the message `[AutoForward] AUTO_FORWARD_CHAT_ID not set; auto-forward disabled.`
+   (or the enabled confirmation when configured). If `CHAT_ID` is 0, it remains
+   no-op and never blocks anything.
+6. **Send a post.** Open Instagram → find a post → tap the bookmark icon (Save).
+   Wait up to `POLL_SECONDS` (default 300s), then check your Telegram chat — the
+   media arrives with caption:
+   `"🔄 Auto-forward from instagram\nTitle..."`.
+
+**What it supports:** Photos (`.jpg`/`.png`/`.webp`) and videos (`.mp4`). The
+poll loop (`_extract_saved_or_liked`) uses `extract_flat=True` to get URLs only,
+then resolves each item through the full download pipeline (`download_media` +
+`process_split_and_upload`), so photos upload as `send_photo` and videos upload
+as `process_split_and_upload`. Per-video errors are contained (`try/except`) —
+a bad entry is skipped, not fatal. State (`auto_forward_state.json`) stores seen
+post IDs per platform to prevent duplicates.
+
+**How it relates to cookies:** Each platform's feed (Instagram `saved/`,
+TikTok `likes/`, X `likes/`) requires the account's session cookie jar — exactly
+the same jar the user uploads for manual downloads. No separate auth mechanism
+exists; the cookie jar *is* the authentication.
+
+**How to disable:** Set `AUTO_FORWARD_CHAT_ID=0` or all `*_ENABLED` to `false` in
+`.env`, then restart. The worker exits cleanly with `[AutoForward] No platforms
+enabled; auto-forward disabled.` and never starts the poll loop.
+
+---
+
 ## ⚙️ Configuration
 
 All runtime secrets/flags live in **`.env`** (copy from `.env.example`). `config.py`
@@ -236,4 +305,8 @@ per-file by the uploader.
 - [x] Phase 10 — **PO-token provider** (bgutil/Deno), localhost-patched & supervised
 - [x] Phase 11 — **Cookie protection** (read-only lock, snapshots, backup/restore, live test)
 - [x] Phase 12 — **Site-aware error classification** & storyboard-only detection
-- [x] Phase 13 — **Docker-withdrawal:** bare-metal install path as the default; docs rewritten
+- [x] Phase 13 — **Docker-withdrawal:** bare-metal install path as the default; docs rewritten.
+- [x] Phase 14 — **Cookie folder reorganization** (`cookies/youtube/`, `instagram/`, `tiktok/`, `twitter/`, `ytdlp/`).
+- [x] Phase 15 — **Instagram no-auth-first fix** (`extract_formats` tries no-auth for Instagram; cookies trigger HTTP 400 when session is stale/flagged).
+- [x] Phase 16 — **Auto-forward relay** (`modules/auto_forward.py`): poll dedicated Instagram / TikTok / X bot accounts' saved/liked feeds and forward new posts to `AUTO_FORWARD_CHAT_ID`. See [Auto-forward feature](#-auto-forward-feature) below.
+- [x] Phase 17 — **Learn course** (`learn/`): 19-lesson Python curriculum using this bot as the case study.

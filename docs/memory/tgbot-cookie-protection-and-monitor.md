@@ -21,7 +21,7 @@ tgbot cookie corruption is solved. Two things were wrong and both are fixed
 **Why yt-dlp can't corrupt the original jar:** `utils/downloader.py`
 (`get_cookies_for_url` → `_cookie_snapshot`) always points yt-dlp at a disposable
 copy in `cache/cookies/<basename>.snapshot`. yt-dlp rewrites *that* snapshot on
-exit, never the original. The original `ytcookies.txt` is locked `0o444` at
+exit, never the original. The original `cookies/youtube/ytcookies.txt` is locked `0o444` at
 startup (`main.py`) and after every Replace. Verified by running a full extraction
 through the bot's exact code path: original md5 unchanged.
 

@@ -6,8 +6,9 @@ the real code that powers the Telegram downloader/streamer bot and explains the
 Python feature behind it.
 
 By the end you will be able to read `main.py`, `utils/downloader.py`,
-`modules/admin.py` and friends, and add your own features to this bot (or build
-a new pyrogram bot) **without an LLM doing it for you**.
+`modules/admin.py`, `modules/auto_forward.py` and friends, add your own
+features, and build similar Telegram bots independently — **without an LLM
+doing it for you**.
 
 ## Who this is for
 

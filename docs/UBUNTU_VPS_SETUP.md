@@ -289,9 +289,19 @@ to prove you're a real logged-in user. The easiest way:
    browser, and make sure a video/feed loads normally.
 3. Click the extension → **Export** → it downloads a `*.txt` file in **Netscape**
    format (starts with `# Netscape HTTP Cookie File`).
-4. You'll upload this to the bot **after it starts** (section 12), via
-   **Cookie Jars → YouTube → Replace** (paste the text, or send the `.txt` file).
-   No need to touch the server files manually.
+4. You'll upload this to the bot **after it starts** (section 12), via the
+    **Admin Console → 🍪 Cookie Jars** menu (YouTube, Instagram, TikTok,
+    X/Twitter, or a custom per-site jar under `cookies/ytdlp/<site>.txt`).
+    The bot now stores cookies in organized subfolders:
+    `cookies/youtube/`, `cookies/instagram/`, `cookies/tiktok/`,
+    `cookies/twitter/`, and `cookies/ytdlp/` for any other site. No need to
+    touch server files manually.
+
+> 💡 **Instagram note:** The bot tries the `no-auth` strategy first for Instagram
+> (cookies trigger HTTP 400 Bad Request when the session is stale or bot-flagged).
+> If the extracted info is missing formats, upload fresh cookies from a real,
+> working browser session (`Admin → Cookies → Instagram → Replace`), then tap
+> `🧪 Test`.
 
 > 💡 For best results, use cookies from a normal, aged account that can actually
 > watch videos. Brand-new or bot-flagged accounts may get "storyboard-only"
@@ -349,6 +359,52 @@ Look for **`active (running)`** in green. 🎉 Your bot is live.
 
 To let a friend use the bot: **👥 List / ➕ Add User** → enter their numeric ID
 (they can get it from @userinfobot). Everyone else is auto-ignored.
+
+---
+
+### Auto-forward: connect your Instagram / TikTok / X accounts
+
+If you want the bot to **automatically download posts you share** (without
+manually copying links), set up the **auto-forward relay**:
+
+**What it is:** A background worker (`modules/auto_forward.py`) that polls
+your dedicated bot account's **saved** (Instagram) or **liked** (TikTok / X)
+posts every `POLL_SECONDS` (default 5 minutes) and sends anything new to your
+Telegram chat (`AUTO_FORWARD_CHAT_ID`).
+
+**How to set it up:**
+
+1. Create or use a dedicated account on Instagram (e.g. `@mybot_ig`), TikTok
+   (`@mybot_tt`), and X (`@mybot_x`).
+2. Log in to that account in your browser, export cookies with the same
+   `.txt` extension, and upload to the bot (`🍪 Cookie Jars → Instagram / TikTok / X`).
+3. In `.env`, set:
+   ```
+   AUTO_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
+   IG_AUTO_FORWARD_ENABLED=true
+   IG_AUTO_FORWARD_USERNAME=your_bot_ig_username
+   TT_AUTO_FORWARD_ENABLED=true
+   TT_AUTO_FORWARD_USERNAME=your_bot_tt_username
+   X_AUTO_FORWARD_ENABLED=true
+   X_AUTO_FORWARD_USERNAME=your_bot_x_username
+   AUTO_FORWARD_POLL_SECONDS=300
+   AUTO_FORWARD_MAX_ITEMS=10
+   ```
+4. Restart the bot: `sudo systemctl restart tgbot`.
+5. From your **real** account, share a post to that bot account via the
+   platform's native **Save** (Instagram) or **Like** (TikTok / X) feature.
+6. Wait up to the poll interval, then check your Telegram chat — the media
+   arrives automatically with the caption:
+   `"🔄 Auto-forward from instagram / tiktok / x"`.
+
+The bot supports **both photo and video** posts (photos upload via `send_photo`,
+video via the normal split+upload pipeline). Per-video download errors are
+skipped, not fatal — a broken entry never crashes the relay loop. State is saved
+in `auto_forward_state.json` so nothing is sent twice.
+
+> 💡 If `AUTO_FORWARD_CHAT_ID` is `0`, the relay is disabled and the bot logs:
+> `[AutoForward] AUTO_FORWARD_CHAT_ID not set; auto-forward disabled.`
+> It never blocks the bot.
 
 ---
 
