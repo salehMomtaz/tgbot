@@ -60,7 +60,10 @@ IG_SESSION_FILE = "direct_ig_session.json"
 X_COOKIES_FILE = "direct_x_cookies.json"
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
-IG_POST_RE = re.compile(r"(instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_\-]+)")
+# xma share targets can point at reels/posts (/reel/, /p/, /tv/) OR stories
+# (/stories/<user>/<media_id>/). yt-dlp handles all of them (stories via the
+# cookie jar); the important part is we never fail to SEE the link.
+IG_POST_RE = re.compile(r"(instagram\.com/(?:reel|reels|p|tv|stories)/[^\s?]+)")
 
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
@@ -218,23 +221,42 @@ async def _send_followups(bot_client, chat_id: int, followups: list[str]) -> Non
 
 
 async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: str,
-                                header_lines: list[str], body: str) -> None:
+                                header_lines: list[str], body: str,
+                                preview_url: str | None = None) -> None:
     """Download *url* via the normal yt-dlp pipeline (cookie jars included)
     and deliver it with the info header + body (split over follow-ups).
-    Runs on the shared single-worker queue behind interactive downloads."""
+    Runs on the shared single-worker queue behind interactive downloads.
+
+    When yt-dlp hard-fails and a *preview_url* (from the DM's share payload)
+    exists, the preview image is delivered as a fallback so the user still
+    sees what the share was, with a note that the full media failed."""
     from utils.downloader import download_media, probe_video_dimensions
     from utils.uploader_handler import process_split_and_upload
     import shutil
     import hashlib
 
     cache_id = f"df_{hashlib.md5(url.encode()).hexdigest()[:10]}"
+    caption, followups = _compose_caption(header_lines, body)
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, download_media, url, None, "v", cache_id, None, None, None, None,
-        )
+        try:
+            result = await loop.run_in_executor(
+                None, download_media, url, None, "v", cache_id, None, None, None, None,
+            )
+        except Exception as dl_error:
+            if not preview_url:
+                raise
+            logger.warning(f"[DirectForward] yt-dlp failed for {url}: {dl_error} — delivering preview image")
+            data = await loop.run_in_executor(None, _fetch_bytes, preview_url, "https://www.instagram.com/")
+            path = f"cache/{cache_id}/preview.jpg"
+            os.makedirs(f"cache/{cache_id}", exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            await bot_client.send_photo(chat_id=chat_id, photo=path,
+                                        caption=f"⚠️ (full media failed to download)\n{caption}")
+            await _send_followups(bot_client, chat_id, followups)
+            return
 
-        caption, followups = _compose_caption(header_lines, body)
         file_path = result["file_path"]
         width, height, _dur = probe_video_dimensions(file_path)
         is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
@@ -307,6 +329,121 @@ def _header_lines(platform: str, sender_label: str, author_label: str | None,
 # =========================================================================
 
 _uid_cache: dict[str, str] = {}
+_ig_api_lock = asyncio.Lock()   # serialize instagrapi calls across executor runs
+
+
+def _ig_pk_from_url(cl, url: str) -> int:
+    """Extract the media pk from any Instagram URL form."""
+    story = re.search(r"instagram\.com/stories/[^/]+/(\d+)", url)
+    if story:
+        return int(story.group(1))
+    return int(cl.media_pk_from_url(url))
+
+
+async def _ig_native_deliver_once(bot_client, chat_id, cl, url: str,
+                                  header_lines: list[str], body: str) -> bool:
+    """Deliver one Instagram post/story natively through the logged-in
+    instagrapi session — photo posts and carousels reliably break yt-dlp's
+    extractor ('No video formats found'), so photos/albums download straight
+    from the CDN here. Returns False (so the caller can fall back to yt-dlp)
+    when the media is actually a video/reel or when probing fails."""
+    loop = asyncio.get_event_loop()
+    async with _ig_api_lock:
+        pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
+        media = await loop.run_in_executor(None, cl.media_info, pk)
+
+    user = getattr(media, "user", None)
+    if user is not None and getattr(user, "username", None):
+        sender_label = header_lines[0].split(" from ", 1)[-1] if header_lines and " from " in header_lines[0] else "paired contact"
+        header_lines = _header_lines("Instagram", sender_label, user.username,
+                                     str(getattr(user, "pk", "")), header_lines[-1] if header_lines else url)
+        body = getattr(media, "caption_text", None) or body
+
+    mt = getattr(media, "media_type", None)        # 1=photo, 2=video, 8=album
+    product_type = getattr(media, "product_type", None)
+    if mt == 2 and product_type == "clips":
+        return False  # reel: yt-dlp handles quality/merge properly
+
+    targets: list[tuple[str, bool]] = []           # (cdn_url, is_video)
+    if mt == 8 and getattr(media, "resources", None):
+        for r in media.resources[:10]:             # Telegram media groups cap at 10
+            v = getattr(r, "video_url", None) or getattr(r, "thumbnail_url", None)
+            if v:
+                targets.append((str(v), bool(getattr(r, "video_url", None))))
+    elif mt in (1, 2):
+        v = getattr(media, "video_url", None) or getattr(media, "thumbnail_url", None)
+        if v:
+            targets.append((str(v), bool(getattr(media, "video_url", None))))
+    if not targets:
+        raise RuntimeError(f"IG media {pk}: no downloadable media version")
+
+    caption, followups = _compose_caption(header_lines, body)
+    os.makedirs("cache", exist_ok=True)
+    files: list[tuple[str, bool]] = []
+    try:
+        for i, (src, is_video) in enumerate(targets):
+            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+            path = f"cache/df_native_{pk}_{i}{'.mp4' if is_video else '.jpg'}"
+            with open(path, "wb") as f:
+                f.write(data)
+            files.append((path, is_video))
+        if len(files) == 1:
+            path, is_video = files[0]
+            if is_video:
+                await bot_client.send_video(chat_id=chat_id, video=path,
+                                            caption=caption, supports_streaming=True)
+            else:
+                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
+        else:
+            from pyrogram.types import InputMediaPhoto, InputMediaVideo
+            group = [
+                (InputMediaVideo(p, caption=caption if j == 0 else "") if is_video
+                 else InputMediaPhoto(p, caption=caption if j == 0 else ""))
+                for j, (p, is_video) in enumerate(files)
+            ]
+            await bot_client.send_media_group(chat_id=chat_id, media=group)
+        await _send_followups(bot_client, chat_id, followups)
+        logger.info(f"[DirectForward/IG] ✅ native relayed {url} (media_type={mt}, {len(files)} file(s))")
+        return True
+    finally:
+        for p, _f in files:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                      url: str, header_lines: list[str], body: str,
+                      preview_url: str | None) -> None:
+    """Route one resolved Instagram link: native path for photo/album/post
+    probe, yt-dlp for reels, preview image as last resort."""
+    async def job():
+        is_ig = "instagram.com" in url
+        senders_label = header_lines[0].split(" from ", 1)[-1] if header_lines else "paired contact"
+        if is_ig and "/reel/" not in url:
+            # posts / carousels / stories: native-first (yt-dlp breaks on them)
+            try:
+                if await _ig_native_deliver_once(bot_client, chat_id, cl, url, header_lines, body):
+                    return
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] native path failed for {url}: {e} — falling back to yt-dlp")
+        if is_ig and "/reel/" in url:
+            # reels: yt-dlp-first (quality merge), native as fallback
+            try:
+                await _download_and_deliver(bot_client, premium_client, chat_id, url,
+                                            header_lines, body, None)
+                return
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] yt-dlp reel failed for {url}: {e} — trying native")
+                try:
+                    if await _ig_native_deliver_once(bot_client, chat_id, cl, url, header_lines, body):
+                        return
+                except Exception as e2:
+                    logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
+        await _download_and_deliver(bot_client, premium_client, chat_id, url,
+                                    header_lines, body, preview_url)
+    _enqueue_relay(queue, chat_id, job)
 
 
 def _ig_resolve_user_id(cl, username: str) -> str | None:
@@ -408,12 +545,12 @@ def _ig_item_url_and_author(cl, m) -> dict | None:
         match = IG_POST_RE.search(str(target_url))
         author = getattr(xs, "header_title_text", None) or None
         if match:
-            code = str(target_url).split("/")[4]
             return {
-                "url": f"https://www.{match.group(1)}/",
+                "url": f"https://www.{match.group(1).rstrip('/')}/",
                 "author_username": author,
                 "author_id": _ig_resolve_user_id(cl, author) if author else None,
                 "body": getattr(xs, "title", None) or "",
+                "preview_url": str(getattr(xs, "preview_url", None) or "") or None,
             }
 
     # ---- classic clip container -----------------------------------------
@@ -504,9 +641,8 @@ async def _ig_process_message(m, cl, loop, queue, chat_id, bot_client, premium_c
         body = resolved.get("body") or ""
         url = resolved["url"]
         logger.info(f"[DirectForward/IG] item {m.id}: {item_type} -> {url} (author @{resolved.get('author_username')})")
-        _enqueue_relay(queue, chat_id,
-                       lambda: _download_and_deliver(bot_client, premium_client, chat_id,
-                                                     url, header, body))
+        _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                          url, header, body, resolved.get("preview_url"))
         return
 
     # 2) Direct media attachment (photo / video uploaded straight into chat).
@@ -544,9 +680,13 @@ async def _ig_process_message(m, cl, loop, queue, chat_id, bot_client, premium_c
     for u in urls:
         header = _header_lines("Instagram", sender_label, None, None, u)
         logger.info(f"[DirectForward/IG] item {m.id}: text url -> {u}")
-        _enqueue_relay(queue, chat_id,
-                       lambda u=u, h=header: _download_and_deliver(
-                           bot_client, premium_client, chat_id, u, h, ""))
+        if "instagram.com" in u:
+            _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                              u, header, "", None)
+        else:
+            _enqueue_relay(queue, chat_id,
+                           lambda u=u, h=header: _download_and_deliver(
+                               bot_client, premium_client, chat_id, u, h, ""))
 
     if not urls:
         logger.info(f"[DirectForward/IG] item {m.id}: {item_type!r} has no relayable media — skipped")
