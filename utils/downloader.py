@@ -1,5 +1,6 @@
 # utils/downloader.py
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -159,6 +160,20 @@ def _is_youtube(url: str) -> bool:
         return False
     lower = url.lower()
     return "youtube.com" in lower or "youtu.be" in lower
+
+
+def normalize_url(url: str) -> str:
+    """Canonicalize URLs that yt-dlp does not understand natively.
+
+    Currently: Instagram highlight-share links in the base64 form
+    ``/s/aGlnaGxpZ2h0:<highlight_id>?story_media_id=...`` (what the IG app
+    produces when you copy/share a highlight) → the supported
+    ``/stories/highlights/<id>/`` form.
+    """
+    m = re.match(r"^https?://(?:www\.)?instagram\.com/s/aGlnaGxpZ2h0:(\d+)", url or "")
+    if m:
+        return f"https://www.instagram.com/stories/highlights/{m.group(1)}/"
+    return url
 
 
 def _apply_pot_options(ydl_opts: dict, url: str) -> dict:
@@ -392,6 +407,7 @@ def _storyboard_error(cookie_path: str | None) -> RuntimeError:
 def extract_formats(url: str) -> dict:
     import utils.shared as shared
 
+    url = normalize_url(url)
     _ensure_disk_space(os.getcwd())
     # Real (on-disk) jar path for this site. Each cookie-authenticated attempt
     # acquires a FRESH snapshot, so a failed attempt never poisons the next one.
@@ -793,6 +809,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     ``best_audio_format_id`` is the pre-calculated ID of the best audio stream
     to force merging with ``format_id``.
     """
+    url = normalize_url(url)
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
     out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
