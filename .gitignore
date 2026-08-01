@@ -34,3 +34,10 @@ bgutil-provider/
 
 # Machine-specific install record written by install.sh, read by uninstall.sh
 tools/install-manifest.txt
+
+# Cookie jars under the layout (private session cookies)
+cookies/
+# Direct-forward client sessions (contain logged-in tokens)
+direct_ig_session.json
+direct_x_cookies.json
+direct_forward_state.json

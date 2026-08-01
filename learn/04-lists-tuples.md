@@ -49,7 +49,7 @@ return {
 `[:5]` is a slice that takes the first five items. If `unique_videos` is
 shorter than 5, the slice is a no-op (no error).
 
-And in `modules/auto_forward.py`, the per-platform feed items are a list:
+And in `modules/direct_forward.py`, the per-platform inbox items are a list:
 
 ```python
 items = _extract_saved_or_liked(platform, username, max_items)

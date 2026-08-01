@@ -12,3 +12,7 @@ python-dotenv
 # yt-dlp plugin that talks to the bgutil PO-token HTTP provider (Deno server).
 # Auto-discovered by yt-dlp; the provider server itself is cloned by ./install.sh.
 bgutil-ytdlp-pot-provider
+# Direct-forward DM relay (modules/direct_forward.py). Local libraries speaking
+# the platforms' own private APIs — no third-party relay services.
+instagrapi
+twikit

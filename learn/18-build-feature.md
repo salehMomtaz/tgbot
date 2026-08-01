@@ -64,7 +64,7 @@ In order: `import time` (module), `async def` (async), `message.reply_text`
 
 Every feature in the changelog was written this way:
 
-- `auto_forward.py` → a background worker + a state JSON file.
+- `direct_forward.py` → a background worker + a state JSON file.
 - `cookies/ytdlp/<site>.txt` → a per-site lookup inside `get_cookies_for_url`.
 - Per-site cookie uploads → a new callback `admin_cookie_add_site` + a state
   machine transition.

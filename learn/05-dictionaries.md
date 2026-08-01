@@ -42,7 +42,7 @@ for key, value in user.items():  # pairs
 ## Nesting
 
 Dictionaries hold lists, lists hold dicts, dicts hold dicts — this nesting is
-how JSON-style data works. `auto_forward_state.json` is literally
+how JSON-style data works. `direct_forward_state.json` is literally
 `{"instagram": ["id1", "id2"], "tiktok": [...], "x": [...]}`.
 
 ## Where this shows up in tgbot

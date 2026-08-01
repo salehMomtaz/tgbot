@@ -6,7 +6,7 @@ the real code that powers the Telegram downloader/streamer bot and explains the
 Python feature behind it.
 
 By the end you will be able to read `main.py`, `utils/downloader.py`,
-`modules/admin.py`, `modules/auto_forward.py` and friends, add your own
+`modules/admin.py`, `modules/direct_forward.py` and friends, add your own
 features, and build similar Telegram bots independently — **without an LLM
 doing it for you**.
 
@@ -40,7 +40,7 @@ way to understanding the whole bot.
 | 08 | [Functions](08-functions.md) | reuse, params | `extract_formats()`, `download_media()` |
 | 09 | [Modules & import](09-modules-import.md) | files as libraries | how `config.py` is shared |
 | 10 | [stdlib: os, sys, datetime](10-stdlib.md) | the standard library | cookie folders, disk space, timestamps |
-| 11 | [Files & JSON](11-files-json.md) | reading/writing | `.env`, `auto_forward_state.json` |
+| 11 | [Files & JSON](11-files-json.md) | reading/writing | `.env`, `direct_forward_state.json` |
 | 12 | [Exceptions (try/except)](12-exceptions.md) | error handling | defensive cookie writes |
 | 13 | [Classes & OOP](13-classes.md) | objects | `Client`, `CallbackQuery` |
 | 14 | [Async / await](14-async.md) | concurrency | `async def`, `asyncio` |

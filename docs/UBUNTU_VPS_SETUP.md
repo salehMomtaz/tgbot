@@ -362,48 +362,49 @@ To let a friend use the bot: **👥 List / ➕ Add User** → enter their numeri
 
 ---
 
-### Auto-forward: connect your Instagram / TikTok / X accounts
+### Direct-forward: relay Instagram / X DMs to Telegram
 
-If you want the bot to **automatically download posts you share** (without
-manually copying links), set up the **auto-forward relay**:
+If you want the bot to **automatically download media you DM to its own
+Instagram or X account** (without copying links into Telegram), set up the
+**direct-forward relay**:
 
-**What it is:** A background worker (`modules/auto_forward.py`) that polls
-your dedicated bot account's **saved** (Instagram) or **liked** (TikTok / X)
-posts every `POLL_SECONDS` (default 5 minutes) and sends anything new to your
-Telegram chat (`AUTO_FORWARD_CHAT_ID`).
+**What it is:** A background worker (`modules/direct_forward.py`) that polls
+the bot account's **DM inbox** every `DIRECT_FORWARD_POLL_SECONDS` (default
+120 s) and relays new photos, videos, reels, story shares, tweet shares and
+plain links to your Telegram chat (`DIRECT_FORWARD_CHAT_ID`). Only DMs from
+your whitelisted account are relayed.
 
 **How to set it up:**
 
-1. Create or use a dedicated account on Instagram (e.g. `@mybot_ig`), TikTok
-   (`@mybot_tt`), and X (`@mybot_x`).
-2. Log in to that account in your browser, export cookies with the same
-   `.txt` extension, and upload to the bot (`🍪 Cookie Jars → Instagram / TikTok / X`).
+1. Create a dedicated account on Instagram (e.g. `@mybot_ig`) and/or X.
+   From your **personal** account, open a DM thread with the bot account.
+2. Upload the bot account's cookie jar (`🍪 Cookie Jars → Instagram / X`).
+   For Instagram this is usually all the auth you need — the DM client
+   bootstraps from the jar's `sessionid`.
 3. In `.env`, set:
    ```
-   AUTO_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
-   IG_AUTO_FORWARD_ENABLED=true
-   IG_AUTO_FORWARD_USERNAME=your_bot_ig_username
-   TT_AUTO_FORWARD_ENABLED=true
-   TT_AUTO_FORWARD_USERNAME=your_bot_tt_username
-   X_AUTO_FORWARD_ENABLED=true
-   X_AUTO_FORWARD_USERNAME=your_bot_x_username
-   AUTO_FORWARD_POLL_SECONDS=300
-   AUTO_FORWARD_MAX_ITEMS=10
+   DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
+   DIRECT_FORWARD_POLL_SECONDS=120
+   IG_DIRECT_ENABLED=true
+   IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
+   X_DIRECT_ENABLED=true
+   X_DIRECT_USERNAME=bot_x_handle
+   X_DIRECT_PASSWORD=bot_x_password
+   X_DIRECT_EMAIL=bot_x_email
+   X_DIRECT_FROM_USER_ID=your_personal_numeric_x_user_id
    ```
 4. Restart the bot: `sudo systemctl restart tgbot`.
-5. From your **real** account, share a post to that bot account via the
-   platform's native **Save** (Instagram) or **Like** (TikTok / X) feature.
-6. Wait up to the poll interval, then check your Telegram chat — the media
-   arrives automatically with the caption:
-   `"🔄 Auto-forward from instagram / tiktok / x"`.
+5. From your **real** account, DM a post / reel / story / photo / video (or
+   paste a link) to the bot account. Within one poll interval the media lands
+   in your Telegram chat with the caption `📥 <Platform> DM from @you`.
 
-The bot supports **both photo and video** posts (photos upload via `send_photo`,
-video via the normal split+upload pipeline). Per-video download errors are
-skipped, not fatal — a broken entry never crashes the relay loop. State is saved
-in `auto_forward_state.json` so nothing is sent twice.
+Per-item errors are skipped, not fatal — a broken DM never crashes the relay.
+State is saved in `direct_forward_state.json` so nothing is sent twice, and
+the first run only primes the cursor (backlog is skipped). Full details:
+`docs/DIRECT_FORWARD_SETUP.md`.
 
-> 💡 If `AUTO_FORWARD_CHAT_ID` is `0`, the relay is disabled and the bot logs:
-> `[AutoForward] AUTO_FORWARD_CHAT_ID not set; auto-forward disabled.`
+> 💡 If `DIRECT_FORWARD_CHAT_ID` is `0`, the relay is disabled and the bot logs:
+> `[DirectForward] DIRECT_FORWARD_CHAT_ID not set; direct-forward disabled.`
 > It never blocks the bot.
 
 ---

@@ -37,7 +37,7 @@ directly.
 
 ## Where this shows up in tgbot
 
-`modules/auto_forward.py` remembers which Instagram/TikTok/X posts it has
+`modules/direct_forward.py` remembers which Instagram/TikTok/X posts it has
 already sent by writing a JSON file:
 
 ```python
@@ -72,5 +72,5 @@ That is how the bot survives a sudden reboot without corrupting cookies.
 4. Add `"id2"` to the `instagram` list and save again.
 5. Print the final state.
 
-This is *exactly* what `auto_forward_state.json` does every time the bot sends
+This is *exactly* what `direct_forward_state.json` does every time the bot sends
 a forwarded video.

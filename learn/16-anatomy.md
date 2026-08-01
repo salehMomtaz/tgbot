@@ -102,7 +102,7 @@ Now put the pieces together. Here is the file map from `AGENTS.md`:
 | `main.py` | entry point, system wiring, progress bars, cookie init |
 | `modules/admin.py` | admin console, cookie upload/replace, PO-token control |
 | `modules/downloader_handler.py` | link → format keyboard → download job |
-| `modules/auto_forward.py` | IG/TikTok/X self-feed relay |
+| `modules/direct_forward.py` | IG/X DM relay |
 | `modules/stream_handler.py` | direct-link streaming server (FastAPI) |
 | `modules/stream_interceptor.py` | forwarded-file → stream link |
 | `utils/downloader.py` | yt-dlp wrapper: extract_formats, download_media |
@@ -145,10 +145,10 @@ message → downloader_handler.is_link()
         → process_split_and_upload() (Telegram)
 ```
 
-**Auto-forward path** (bot account receives a post):
+**Direct-forward path** (bot account receives a DM):
 
 ```
-auto_forward_worker loop (every N seconds)
+_direct_forward_supervisor loop (every N seconds)
   → _extract_saved_or_liked(platform, username)
   → compare against seen IDs
   → _download_and_send() → process_split_and_upload()

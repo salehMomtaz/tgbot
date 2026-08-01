@@ -107,9 +107,8 @@ async def progress_bar_handler(current, total, message, status_title: str):
 
 def initialize_cookie_jars():
     """
-    Ensure cookie files exist with a Netscape header.
-    If a jar already has content, prepend the header when it is missing.
-    Never overwrite existing cookies.
+    Ensure cookie files exist with a Netscape header, then lock every primary
+    jar read-only at rest (0o444).
 
     Cookie folder layout (see config.COOKIE_DIR):
         cookies/youtube/ytcookies.txt      # YT working jar + .backup
@@ -119,12 +118,34 @@ def initialize_cookie_jars():
         cookies/ytdlp/<sitename>.txt      # Per-site jars for all other yt-dlp sites
         cookies/ytdlp/cookies.txt         # Global fallback for any site without a jar
 
-    The YouTube working jar is made read-only after init so that yt-dlp cannot
-    corrupt it with write-back. Every yt-dlp invocation receives a snapshot copy
-    from utils.downloader.get_cookies_for_url() instead.
+    "Read-only at rest" does NOT mean frozen: every yt-dlp run receives a
+    per-run snapshot from utils.cookie_manager, and a successful run merges
+    rotated session cookies BACK into the real jar with an atomic replace that
+    re-applies the lock. That write-back is what keeps Instagram/Google/TikTok/X
+    sessions from going stale (see utils/cookie_manager.py).
     """
+    from utils import cookie_manager
     import config
-    header = "# Netscape HTTP Cookie File\n"
+
+    # One-time migration: historical installs kept jars at the project root
+    # (ytcookies.txt, igcookies.txt, ...). Move them into the layout. `mv -n`
+    # semantics: an existing layout jar always wins over a stale root file.
+    legacy_map = [
+        ("ytcookies.txt", config.YT_COOKIES),
+        ("ytcookies.backup", config.YT_COOKIES_BACKUP),
+        ("igcookies.txt", config.IG_COOKIES),
+        ("ttcookies.txt", config.TT_COOKIES),
+        ("xcookies.txt", config.X_COOKIES),
+        ("cookies.txt", config.COOKIES_FILE),
+    ]
+    for legacy_name, target in legacy_map:
+        if os.path.isfile(legacy_name) and not os.path.exists(target):
+            try:
+                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+                shutil.move(legacy_name, target)
+                print(f"[Cookies] Migrated legacy jar {legacy_name} -> {target}")
+            except Exception as e:
+                print(f"[Cookies] Warning: could not migrate {legacy_name}: {e}")
 
     # Make sure the folder layout exists so admin uploads and yt-dlp always
     # have somewhere to land.
@@ -155,30 +176,21 @@ def initialize_cookie_jars():
     # admin who uploaded them before still gets a valid header prepended if
     # they accidentally pasted a header-less file.
     ytdlp_dir = getattr(config, "YTDLP_COOKIES_DIR", "cookies/ytdlp")
+    per_site_jars = []
     if os.path.isdir(ytdlp_dir):
         for entry in os.scandir(ytdlp_dir):
             if entry.is_file() and entry.name.endswith(".txt"):
-                cookie_files.append(entry.path)
+                per_site_jars.append(entry.path)
+    cookie_files.extend(per_site_jars)
 
     for file_path in cookie_files:
-        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(header)
-                print(f"[Cookies] Initialized empty cookie jar: {file_path}")
-            except Exception as e:
-                print(f"[Cookies] Warning: Could not initialize cookie jar {file_path}: {e}")
-            continue
-
+        existed = os.path.exists(file_path) and os.path.getsize(file_path) > 0
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            if not content.strip().startswith("# Netscape"):
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(header + content)
-                print(f"[Cookies] Added missing Netscape header to: {file_path}")
+            cookie_manager.ensure_netscape_header(file_path)
+            if not existed:
+                print(f"[Cookies] Initialized empty cookie jar: {file_path}")
         except Exception as e:
-            print(f"[Cookies] Warning: Could not check cookie jar {file_path}: {e}")
+            print(f"[Cookies] Warning: Could not initialize cookie jar {file_path}: {e}")
 
     # If YouTube working jar is missing but a protected backup exists, restore it.
     backup_path = getattr(config, "YT_COOKIES_BACKUP", "ytcookies.backup")
@@ -193,15 +205,12 @@ def initialize_cookie_jars():
         except Exception as e:
             print(f"[Cookies] Warning: Could not restore YouTube cookie backup: {e}")
 
-    # Lock the live YouTube jar so yt-dlp can never rewrite it. Admin replace /
-    # savebackup temporarily make it writable when they need to update it.
-    try:
-        if os.path.exists(config.YT_COOKIES) and os.access(config.YT_COOKIES, os.W_OK):
-            os.chmod(config.YT_COOKIES, 0o644)
-        os.chmod(config.YT_COOKIES, 0o444)
-        print(f"[Cookies] Locked {config.YT_COOKIES} read-only to prevent yt-dlp corruption.")
-    except Exception as e:
-        print(f"[Cookies] Warning: Could not lock {config.YT_COOKIES}: {e}")
+    # Lock the four primary jars read-only at rest. yt-dlp never sees these
+    # paths (it gets snapshots); the atomic merge in cookie_manager replaces
+    # the inode and re-applies this lock after capturing session rotation.
+    for file_path in (config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES):
+        cookie_manager.lock_jar(file_path)
+    print("[Cookies] Locked primary jars read-only at rest (write-back merge keeps them fresh).")
 
 async def auto_clean_cache_directory():
     """Periodically sweeps the cache directory every hour to purge orphaned files older than the configured age."""
@@ -289,8 +298,22 @@ async def main_engine():
     # 1. Start the global system logger to pipe all container logs to your channel
     setup_system_logger()
 
-    # 2. Initialize and format cookie files (locks the YouTube jar read-only)
+    # 2. Initialize and format cookie files (locks the primary jars read-only)
     initialize_cookie_jars()
+
+    # 2b. Cookie freshness watchdog: sessions die silently when a jar can't be
+    # kept warm (no successful authenticated run in days). Make it a loud,
+    # actionable log line before the first download fails on it.
+    try:
+        from utils import cookie_manager
+        stale_days = getattr(config, "COOKIE_STALE_WARNING_DAYS", 21)
+        for warning in cookie_manager.freshness_warnings(
+            stale_days,
+            [config.YT_COOKIES, config.IG_COOKIES, config.TT_COOKIES, config.X_COOKIES, config.COOKIES_FILE],
+        ):
+            logging.warning(f"[Cookies] ⚠️ {warning}")
+    except Exception as e:
+        print(f"[Cookies] Freshness check failed: {e}")
 
     # 3. Disk-space sanity check: refuse to run if the filesystem is critically full
     try:
@@ -408,14 +431,16 @@ async def main_engine():
     if pot_manager:
         tasks.append(pot_manager.health_check_loop())
 
-    # Auto-forward background task (Instagram / TikTok / X). No-op if
-    # AUTO_FORWARD_CHAT_ID is not set or no platform is enabled.
+    # Direct-forward background task: relays media you DM to the bot's own
+    # Instagram / X accounts into Telegram. No-op when DIRECT_FORWARD_CHAT_ID
+    # is 0 or no platform is enabled.
     try:
-        from modules.auto_forward import start_auto_forward_task
-        af_task = start_auto_forward_task(app, premium_app)
-        tasks.append(af_task)
+        from modules.direct_forward import start_direct_forward_task
+        df_task = start_direct_forward_task(app, premium_app)
+        if df_task:
+            tasks.append(df_task)
     except Exception as e:
-        logging.warning(f"[AutoForward] Could not start: {e}")
+        logging.warning(f"[DirectForward] Could not start: {e}")
 
     try:
         await asyncio.gather(*tasks)

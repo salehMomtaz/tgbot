@@ -209,66 +209,56 @@ tgbot/
 
 ---
 
-## 🔄 Auto-forward feature (Instagram / TikTok / X relay)
+## 🔄 Direct-forward feature (Instagram / X DM relay)
 
-**What it is:** A background worker (`modules/auto_forward.py`) that polls
-your dedicated bot accounts on Instagram, TikTok, and X/Twitter for new posts
-you have saved/liked, then downloads them and sends them to your Telegram chat.
+**What it is:** A background worker (`modules/direct_forward.py`) that polls
+the **DM inbox** of the bot's own Instagram and/or X account and relays
+anything you DM it — photos, videos, reels, story shares, tweet shares, or
+plain links — into your Telegram chat.
 
 **Why it exists:** You (the user) described this exact need: instead of copying
-every Instagram post link into Telegram manually, you just **share the post to
-your bot account** (e.g. via Instagram's native "Save" or "Like" on a dedicated
-bot profile), and the bot detects it automatically.
+every post link into Telegram manually, you open the chat with the bot account
+on Instagram/X and **forward the post right there**. The bot detects it
+automatically. (This replaces the old saved/liked-feed relay, which
+misread the requirement.)
 
 **How to use it:**
 
-1. **Set up dedicated accounts.** Create separate accounts on Instagram,
-   TikTok, and X that you will use *only* as bot accounts (e.g. `@mybot_ig`).
-2. **Follow that account from your real account.** When you see a post you want,
-   use the platform's native **Share → Save** (Instagram saved collection) or
-   **Like** (TikTok / X liked feed). The bot polls these public feeds.
+1. **Set up dedicated accounts.** Create separate accounts on Instagram and X
+   used *only* as bot accounts (e.g. `@mybot_ig`), and open a DM thread with
+   them from your personal account.
+2. **Provide cookies for the bot account.** Upload `igcookies.txt` /
+   `xcookies.txt` via the Admin Console — the same jars used for manual
+   downloads. The Instagram DM client even bootstraps its login directly from
+   the jar's `sessionid`, so usually **no password login is needed**.
 3. **Configure `.env`:**
    ```
-   AUTO_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
-   IG_AUTO_FORWARD_ENABLED=true
-   IG_AUTO_FORWARD_USERNAME=your_bot_ig_username_without_@
-   TT_AUTO_FORWARD_ENABLED=true
-   TT_AUTO_FORWARD_USERNAME=your_bot_tt_username
-   X_AUTO_FORWARD_ENABLED=true
-   X_AUTO_FORWARD_USERNAME=your_bot_x_username
-   AUTO_FORWARD_POLL_SECONDS=300   # how often to poll (default 5 min)
-   AUTO_FORWARD_MAX_ITEMS=10      # max new items per poll
+   DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
+   DIRECT_FORWARD_POLL_SECONDS=120
+   IG_DIRECT_ENABLED=true
+   IG_DIRECT_FROM_USERNAME=your_personal_ig_handle   # only your DMs are relayed
+   X_DIRECT_ENABLED=true
+   X_DIRECT_USERNAME=bot_x_handle
+   X_DIRECT_PASSWORD=bot_x_password
+   X_DIRECT_EMAIL=bot_x_email
+   X_DIRECT_FROM_USER_ID=your_numeric_x_user_id
    ```
-4. **Provide cookies for the bot account.** The bot uses the same cookie jars
-   (`cookies/instagram/igcookies.txt`, etc.) as manual downloads — log in on
-the bot account in a browser, export cookies with a `.txt` extension, and upload
-via the Admin Console (`🍪 Cookie Jars → Instagram → ✏️ Replace`). Without
-valid session cookies, saved/liked feeds are not accessible.
-5. **Restart the bot:** `sudo systemctl restart tgbot`. The worker starts with
-   the message `[AutoForward] AUTO_FORWARD_CHAT_ID not set; auto-forward disabled.`
-   (or the enabled confirmation when configured). If `CHAT_ID` is 0, it remains
-   no-op and never blocks anything.
-6. **Send a post.** Open Instagram → find a post → tap the bookmark icon (Save).
-   Wait up to `POLL_SECONDS` (default 300s), then check your Telegram chat — the
-   media arrives with caption:
-   `"🔄 Auto-forward from instagram\nTitle..."`.
+4. **Restart the bot:** `sudo systemctl restart tgbot`. Look for
+   `[DirectForward] started -> chat ...` in the logs. Unconfigured pieces log
+   a clear reason and never block the bot.
+5. **DM the bot account.** Share a reel, story, post, photo, video or paste a
+   link. Within one poll interval it lands in your Telegram chat with the
+   caption `📥 <Platform> DM from @you`.
 
-**What it supports:** Photos (`.jpg`/`.png`/`.webp`) and videos (`.mp4`). The
-poll loop (`_extract_saved_or_liked`) uses `extract_flat=True` to get URLs only,
-then resolves each item through the full download pipeline (`download_media` +
-`process_split_and_upload`), so photos upload as `send_photo` and videos upload
-as `process_split_and_upload`. Per-video errors are contained (`try/except`) —
-a bad entry is skipped, not fatal. State (`auto_forward_state.json`) stores seen
-post IDs per platform to prevent duplicates.
+**What it supports:** DM photo/video attachments (sent directly as Telegram
+photo/video), post/reel/clip shares, story shares, tweet shares, and plain
+links in any DM text (routed through the standard yt-dlp pipeline with cookie
+jars, so login-walled content works). Only your whitelisted account's DMs are
+processed. The first run primes the cursor and skips backlog; state lives in
+`direct_forward_state.json`. Full guide: `docs/DIRECT_FORWARD_SETUP.md`.
 
-**How it relates to cookies:** Each platform's feed (Instagram `saved/`,
-TikTok `likes/`, X `likes/`) requires the account's session cookie jar — exactly
-the same jar the user uploads for manual downloads. No separate auth mechanism
-exists; the cookie jar *is* the authentication.
-
-**How to disable:** Set `AUTO_FORWARD_CHAT_ID=0` or all `*_ENABLED` to `false` in
-`.env`, then restart. The worker exits cleanly with `[AutoForward] No platforms
-enabled; auto-forward disabled.` and never starts the poll loop.
+**How to disable:** Set `DIRECT_FORWARD_CHAT_ID=0` or all `*_DIRECT_ENABLED`
+to `false` in `.env`, then restart.
 
 ---
 
@@ -308,5 +298,5 @@ per-file by the uploader.
 - [x] Phase 13 — **Docker-withdrawal:** bare-metal install path as the default; docs rewritten.
 - [x] Phase 14 — **Cookie folder reorganization** (`cookies/youtube/`, `instagram/`, `tiktok/`, `twitter/`, `ytdlp/`).
 - [x] Phase 15 — **Instagram no-auth-first fix** (`extract_formats` tries no-auth for Instagram; cookies trigger HTTP 400 when session is stale/flagged).
-- [x] Phase 16 — **Auto-forward relay** (`modules/auto_forward.py`): poll dedicated Instagram / TikTok / X bot accounts' saved/liked feeds and forward new posts to `AUTO_FORWARD_CHAT_ID`. See [Auto-forward feature](#-auto-forward-feature) below.
+- [x] Phase 16 — **Direct-forward DM relay** (`modules/direct_forward.py`): poll the bot's own Instagram / X DM inboxes and relay DMed media (photos, videos, reels, story shares, tweet shares, links) to `DIRECT_FORWARD_CHAT_ID`. See [Direct-forward feature](#-direct-forward-feature-instagram--x-dm-relay) below.
 - [x] Phase 17 — **Learn course** (`learn/`): 19-lesson Python curriculum using this bot as the case study.

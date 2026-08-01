@@ -31,9 +31,10 @@ have to rediscover them.
 | Add an admin-console feature | `modules/admin.py` (+ keyboard helpers there) |
 | Change how links/messages are handled | `modules/downloader_handler.py` |
 | Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
+| Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` |
-| Add auto-forward relay (IG/TikTok/X self-feed) | `modules/auto_forward.py` + `.env` (`AUTO_FORWARD_*`) |
+| Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) |
 
 ## Critical invariants (do not break these)
 
@@ -52,18 +53,34 @@ have to rediscover them.
 3. **YouTube = cookies + PO token, no fallback.** `utils/downloader.py::
    _apply_pot_options` raises `RuntimeError` when the provider is down for a
    YouTube URL. Do not add a cookies-only/no-auth fallback for YouTube. Other
-   sites keep the strategy ladder — but **Instagram flips the ladder**: cookies
-   trigger HTTP 400 on Instagram's authenticated API when the session is stale
-   or bot-flagged, so `extract_formats` tries `no-auth` first for Instagram and
-   falls back to cookies only if that fails. Do not "simplify" by re-ordering
-   the strategies — the Instagram 400 is the documented failure mode.
+   sites keep the strategy ladder — but **Instagram flips the ladder**:
+   `extract_formats` tries `no-auth` first for Instagram and falls back to
+   cookies only for login-walled content. The historical reason was that stale
+   sessions made cookies trigger HTTP 400 on Instagram's authenticated API;
+   that failure mode is now *prevented* by cookie write-back (invariant #4),
+   not by re-ordering — the no-auth-first order stays because it also conserves
+   the session (public reels should never burn login state). Download time
+   mirrors the ladder (`download_media` retries a 400 with cookies).
 
-4. **Cookie jars are read-only at rest.** `main.py::initialize_cookie_jars` locks
-   the YouTube jar (`cookies/youtube/ytcookies.txt`) to `0o444`. yt-dlp rewrites
-   jars on exit; we prevent that and hand each download a *snapshot* from
-   `get_cookies_for_url`. When you need to write a jar (admin replace/restore),
-   unlock to `0o644`, write, re-lock to `0o444`, then call
-   `_purge_cookie_snapshots`. See `modules/admin.py::_write_cookie_jar`.
+4. **Cookie jars: snapshot per run, write-back on success, locked at rest.**
+   `main.py::initialize_cookie_jars` locks the four primary jars
+   (`cookies/{youtube,instagram,tiktok,twitter}/*.txt`) to `0o444`. Every
+   yt-dlp run gets a *per-run snapshot* from `utils/cookie_manager.py::acquire`
+   (never the real path), and the caller MUST finish with
+   `cookie_manager.commit(snapshot, success=...)`:
+   - success → **overlay merge** of the snapshot into the real jar (atomic
+     temp+rename, lock re-applied). This captures the site's session rotation
+     (`Set-Cookie` on every response) and is *the* fix for jars dying in days.
+     The merge NEVER deletes keys and refuses empty snapshots, so the
+     "yt-dlp wiped the jar on an invalid session" failure mode is impossible.
+   - failure → snapshot discarded; auth-classified errors are recorded in
+     `cookies/meta.json` for the watchdog.
+   Read `utils/cookie_manager.py`'s module docstring before touching any of
+   this. Admin replace/restore still goes through `_write_cookie_jar`
+   (modules/admin.py) which unlocks-by-replace (os.replace works on 0o444),
+   re-locks, purges snapshots, and stamps `last_upload` in meta.json.
+   Freshness: `freshness_warnings()` powers the startup watchdog + the admin
+   Cookies menu status line; knob: `COOKIE_STALE_WARNING_DAYS` (default 21).
 
 5. **Keep `[default]` on yt-dlp upgrades.** `utils/updater.py` runs
    `pip install -U --pre "yt-dlp[default]"` — plain `yt-dlp` would silently strip
@@ -150,18 +167,25 @@ have to rediscover them.
     Any pre-existing flat-root jars (`ytcookies.txt`, `igcookies.txt`, etc.) need
     `mv` into the new layout during deployment; the old paths are not honoured.
 
-13. **Auto-forward = background relay of your Instagram/TikTok/X "saved/liked"
-    posts into Telegram.** `modules/auto_forward.py` polls the public saved/
-    liked feeds of dedicated bot accounts on each platform every
-    `AUTO_FORWARD_POLL_SECONDS` (default 300 s) and forwards anything new to
-    `AUTO_FORWARD_CHAT_ID`. Each platform uses the SAME cookie jar as manual
-    downloads (the bot account's session). State (seen post IDs) lives in
-    `auto_forward_state.json` next to the bot. The relay is **no-op** when
-    `AUTO_FORWARD_CHAT_ID` is 0 or no platform is enabled — set those env vars
-    to enable. The worker is one of the `tasks` in `main.main_engine()`, started
-    after the FastAPI server, so a misconfiguration never blocks the bot.
-    Do not move auto-forward logic into `download_media` — the poll loop is its
-    own coroutine, with its own error containment (`try/except` per platform).
+13. **Direct-forward = DM relay from the bot's own Instagram/X accounts.**
+    `modules/direct_forward.py` (replacing the old saved/liked `auto_forward`)
+    polls the bot account's DM inbox every `DIRECT_FORWARD_POLL_SECONDS`
+    (default 120 s). You DM media/links from YOUR account
+    (`IG_DIRECT_FROM_USERNAME` / `X_DIRECT_FROM_USER_ID` whitelist) to the bot
+    account; it relays photos, videos, reels, story shares, tweet shares and
+    plain links into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi`
+    (sync → always via `run_in_executor`; bootstraps its login from the
+    `sessionid` in the igcookies jar, falls back to user/pass), X uses `twikit`
+    (native async, logs in once, persists cookies to `direct_x_cookies.json`).
+    Both sessions persist to disk (`direct_ig_session.json`) so challenges
+    happen at most once. Each platform runs in its own contained loop
+    (`try/except` per poll; ChallengeRequired → sleep 1h; LoginRequired →
+    re-login once). **No third-party APIs.** Downloads route through the normal
+    yt-dlp pipeline (with cookie jars — write-back keeps them warm) and enqueue
+    on the shared single-worker queue behind interactive downloads (invariant
+    #10). First run primes the cursor and skips backlog. State:
+    `direct_forward_state.json`. The worker starts in `main.main_engine()`
+    after the FastAPI server; a misconfiguration must never block the bot.
 
 
 ## Running / testing
