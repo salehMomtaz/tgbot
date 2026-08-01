@@ -82,6 +82,8 @@ async def log_event(text: str):
 
 async def progress_bar_handler(current, total, message, status_title: str):
     """Draws a visual progress bar and updates text every 5 seconds to avoid rate limiting."""
+    if message is None:
+        return
     now = time.time()
     msg_id = message.id
     if msg_id in LAST_UPDATE_TIME and now - LAST_UPDATE_TIME[msg_id] < 5:

@@ -66,7 +66,8 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
         [InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu"),
          InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue")],
-        [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+        [InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu"),
+         InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
     ])
 
 
@@ -96,6 +97,15 @@ def get_pot_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🛑 Stop Provider", callback_data="admin_pot_action:stop")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_pot_menu")],
         [InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
+    ])
+
+
+def get_direct_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 Pair Instagram", callback_data="admin_direct_pair_ig"),
+         InlineKeyboardButton("💔 Unpair Instagram", callback_data="admin_direct_unpair_ig")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_direct_menu"),
+         InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
 
 
@@ -737,6 +747,66 @@ def register_admin_handlers(app: Client):
 
         elif data.startswith("admin_pot_action:"):
             await _handle_pot_action(client, callback_query, data.split(":")[1])
+
+        elif data == "admin_direct_menu":
+            await _render_direct_menu(callback_query)
+
+        elif data == "admin_direct_pair_ig":
+            from modules import direct_forward
+            code = direct_forward.request_pair_code("ig", requested_by=user_id)
+            await callback_query.message.edit_text(
+                "🔗 **Instagram pairing handshake**\n\n"
+                f"Your one-time code: **`{code}`**\n\n"
+                f"1. Open Instagram on your phone.\n"
+                f"2. Send this code (just the 6 digits) as a **direct message** "
+                f"to the bot's Instagram account.\n"
+                f"3. Within ~2 poll intervals the bot will confirm here that it "
+                f"found your chat.\n\n"
+                "The code expires in 10 minutes. Only messages in YOUR chat "
+                "with the bot account will ever be relayed.",
+                reply_markup=get_direct_menu_keyboard()
+            )
+            await log_event(f"📨 **Admin Action:** Instagram pairing code issued (user {user_id}).")
+            await callback_query.answer()
+
+        elif data == "admin_direct_unpair_ig":
+            from modules import direct_forward
+            removed = direct_forward.unpair_platform("ig")
+            await callback_query.message.edit_text(
+                "💔 Instagram pairing removed. " if removed else "ℹ️ No Instagram pairing existed. ",
+                reply_markup=get_direct_menu_keyboard()
+            )
+            await log_event("📨 **Admin Action:** Instagram DM pairing removed." if removed else
+                            "📨 **Admin Action:** Instagram unpair requested (was unpaired).")
+            await callback_query.answer("Pairing forgotten" if removed else "Nothing to forget",
+                                        show_alert=True)
+
+    # ------------------------------------------------------------------
+    # Direct-forward menu helper (closure over log_event)
+    # ------------------------------------------------------------------
+    async def _render_direct_menu(callback_query: CallbackQuery):
+        from modules import direct_forward
+        state = direct_forward._load_state()
+        ig_enabled = "🟢" if config.IG_DIRECT_ENABLED else "⚪"
+        x_enabled = "🟢" if config.X_DIRECT_ENABLED else "⚪"
+        chat_set = "✅" if getattr(config, "DIRECT_FORWARD_CHAT_ID", 0) else "⚠️ DIRECT_FORWARD_CHAT_ID=0 (relay off)"
+        try:
+            await callback_query.message.edit_text(
+                "📨 **Direct-Forward (DM relay)**\n\n"
+                "The bot relays media you DM to its own Instagram / X accounts.\n\n"
+                f"• Relay chat: {chat_set}\n"
+                f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n"
+                f"• {ig_enabled} Instagram: **{direct_forward.pairing_status('ig', state)}**\n"
+                f"• {x_enabled} X/Twitter: `X_DIRECT_FROM_USER_ID` = "
+                f"`{config.X_DIRECT_FROM_USER_ID or 'not set'}` "
+                "(numeric user ID is the protection; X cannot handshake.)\n\n"
+                "Pairing handshake: tap **🔗 Pair Instagram**, then send the "
+                "code to the bot's Instagram account via Instagram DM.",
+                reply_markup=get_direct_menu_keyboard()
+            )
+        except Exception:
+            pass
+        await callback_query.answer()
 
     # ------------------------------------------------------------------
     # PO Token helpers (closures over app/log_event)

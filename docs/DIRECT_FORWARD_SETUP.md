@@ -14,8 +14,19 @@ You (personal account)  ──DM: "look at this reel"──▶  Bot's IG/X accou
                                               DIRECT_FORWARD_CHAT_ID
 ```
 
-Only DMs from **your whitelisted account** are processed; strangers' messages
-are ignored. The first run primes the cursor and skips the existing backlog.
+Only DMs from **your paired account** are processed — strangers who message the
+bot account are ignored. The first run primes the cursor and skips the existing
+backlog. Pair in one of two ways:
+
+- **Interactive handshake (recommended):** Telegram → Admin Console → 📨
+  Direct-Forward → 🔗 Pair Instagram. The bot issues a one-time 6-digit code
+  (valid 10 min). Send it via Instagram DM to the bot account; the bot confirms
+  the pair in your Telegram chat and locks relays to your Instagram user id.
+- **Static pre-pair:** `IG_DIRECT_FROM_USERNAME` in `.env` (resolved to your
+  numeric user id at startup and persisted).
+
+Unpair any time via the Direct-Forward menu. Deleting `direct_forward_state.json`
+clears both the cursor and the pairing.
 
 ## What you need first
 

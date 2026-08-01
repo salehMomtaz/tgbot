@@ -15,7 +15,7 @@ _BOT_TARGET = 1900 * 1024 * 1024         # ~1.86 GB target per segment (Bot API)
 _BOT_HARD = 2000 * 1024 * 1024           # hard ceiling under Telegram's 2 GB
 
 
-async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False):
+async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False, caption: str | None = None):
     """Sends a single media file using the designated client, passing thumbs to document uploads too."""
     from utils.downloader import probe_video_dimensions
 
@@ -27,7 +27,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         return await client.send_document(
             chat_id=chat_id,
             document=file_path,
-            caption=f"📁 **Part:** `{os.path.basename(file_path)}`",
+            caption=caption or f"📁 **Part:** `{os.path.basename(file_path)}`",
             thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,  # Visual preview for doc mode!
             progress=progress_fn
         )
@@ -40,7 +40,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             performer=uploader,
             duration=int(duration),
             thumb=thumb_path,
-            caption=f"🎵 **{title}**\nUploaded via Downloader Bot",
+            caption=caption or f"🎵 **{title}**\nUploaded via Downloader Bot",
             progress=progress_fn
         )
     else:  # action == 'v'
@@ -54,12 +54,12 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             duration=final_duration,
             thumb=thumb_path,
             supports_streaming=True,
-            caption=f"🎥 **{title}**\nUploaded via Downloader Bot",
+            caption=caption or f"🎥 **{title}**\nUploaded via Downloader Bot",
             progress=progress_fn
         )
 
 
-async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True):
+async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None):
     """On-Demand Sequential Uploader.
 
     Splits the file only if it exceeds the active Telegram ceiling, then streams
@@ -117,7 +117,8 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 part_label = f"part {part_num}" if is_split else "file"
                 await progress_bar_handler(cur, tot, progress_msg, f"Uploading {part_label} to Telegram...")
 
-            await progress_msg.edit_text(f"📤 Uploading part {part_num}...")
+            if progress_msg is not None:
+                await progress_msg.edit_text(f"📤 Uploading part {part_num}...")
 
             await send_single_media(
                 bot_client=bot_client,
@@ -130,7 +131,8 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 duration=duration,
                 thumb_path=thumb_path if not is_split else None,
                 progress_fn=upload_progress,
-                force_document=force_document or is_split
+                force_document=force_document or is_split,
+                caption=caption if part_num == 1 else None,
             )
 
             if part_path != file_path:
@@ -143,7 +145,8 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
             os.remove(file_path)
 
         if delete_progress_after:
-            await progress_msg.delete()
+            if progress_msg is not None:
+                await progress_msg.delete()
 
     except Exception as e:
         for p in parts_list:
