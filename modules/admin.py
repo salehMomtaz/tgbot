@@ -132,18 +132,22 @@ def register_admin_handlers(app: Client):
         return False
 
     def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
-        """Validate and atomically write a cookie jar, keeping ytcookies read-only.
+        """Validate and atomically write a cookie jar, keeping primary jars read-only.
 
         Defense in depth so the live jar can never be corrupted:
           * reject header-only / truncated / malformed jars up front;
           * back up the existing jar to <file>.autobak before touching it;
           * write to a temp file, fsync, then os.replace (atomic) so a crash
             mid-write cannot leave a truncated jar behind;
-          * re-lock ytcookies.txt to 0o444 — yt-dlp must never write the original
-            (it only ever sees a disposable snapshot from get_cookies_for_url);
-          * purge stale yt-dlp snapshots so the next download uses the fresh jar.
+          * re-lock primary jars (YouTube/Instagram/TikTok/X) to 0o444 — yt-dlp
+            never writes these paths directly; rotation write-back happens only
+            through cookie_manager's atomic merge, which re-applies the lock;
+          * purge stale yt-dlp snapshots so the next download uses the fresh jar;
+          * record the upload in cookies/meta.json so the freshness watchdog
+            treats the jar as warm from now on.
         """
         from utils.downloader import _purge_cookie_snapshots
+        from utils import cookie_manager
 
         normalized = content
         if not normalized.strip().startswith("# Netscape"):
@@ -165,16 +169,18 @@ def register_admin_handlers(app: Client):
         # os.replace is a directory-level rename, so it succeeds even when the
         # existing file is 0o444 (read-only). The old inode is unlinked and a
         # fresh one takes its place; we then re-lock that fresh inode.
-        is_yt = cookie_key == "ytcookies"
+        is_primary = file_path in (config.YT_COOKIES, config.IG_COOKIES,
+                                   config.TT_COOKIES, config.X_COOKIES)
         tmp_path = f"{file_path}.tmp.{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(normalized)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, file_path)
-        if is_yt:
+        if is_primary:
             os.chmod(file_path, 0o444)
         _purge_cookie_snapshots(file_path)
+        cookie_manager.touch_cookie_uploaded(file_path)
 
     # =========================================================================
     # Group -1: Global Interceptor Gate (Strict Security Shield)
@@ -603,8 +609,32 @@ def register_admin_handlers(app: Client):
 
         elif data.startswith("admin_cookie_select:"):
             cookie_key = data.split(":")[1]
+            file_path = COOKIE_MAP.get(cookie_key)
+            status_line = ""
+            if file_path:
+                from utils import cookie_manager
+                rec = cookie_manager.get_meta_record(file_path)
+                has_lines = os.path.exists(file_path) and cookie_manager.has_real_cookie_lines(file_path)
+                if not has_lines:
+                    status_line = "\n⚠️ Jar is empty — authenticated downloads will fail."
+                else:
+                    import time as _time
+                    last_ok = rec.get("last_success")
+                    merges = rec.get("merge_count", 0)
+                    last_fail = rec.get("last_failure")
+                    last_up = rec.get("last_upload")
+                    if last_ok:
+                        age_h = int((_time.time() - last_ok) / 3600)
+                        status_line = f"\n✅ Last authenticated success: {age_h}h ago · rotation merges: {merges}"
+                    if last_up:
+                        age_h = int((_time.time() - last_up) / 3600)
+                        status_line += f"\n📤 Last uploaded: {age_h}h ago"
+                    if not last_ok and not last_up and last_fail:
+                        status_line = f"\n❌ Last auth failure: {rec.get('failure_reason', 'unknown')[:120]}"
+                    if not status_line:
+                        status_line = "\nℹ️ Jar present but never validated by a successful run yet."
             await callback_query.message.edit_text(
-                f"🍪 **Cookie Profile: `{cookie_key}.txt`**\nSelect an administration action:",
+                f"🍪 **Cookie Profile: `{cookie_key}.txt`**{status_line}\nSelect an administration action:",
                 reply_markup=get_cookie_action_keyboard(cookie_key)
             )
             await callback_query.answer()
@@ -837,6 +867,7 @@ def register_admin_handlers(app: Client):
     def _run_cookie_test_sync(cookie_key: str, file_path: str, force_pot: bool) -> dict:
         """Synchronous yt-dlp probe. Run inside an executor so it never blocks the loop."""
         from utils.downloader import get_cookies_for_url, _apply_pot_options
+        from utils import cookie_manager
         import utils.shared as shared
 
         test_url = "https://www.youtube.com/watch?v=jSi2LDkyKmI"
@@ -861,9 +892,12 @@ def register_admin_handlers(app: Client):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(test_url, download=False)
         except Exception as exc:
+            cookie_manager.commit(cookie_snapshot, success=False, error_text=str(exc))
             return {"ok": False, "error": str(exc)}
         finally:
             shared.set_pot_enabled(original_pot)
+
+        cookie_manager.commit(cookie_snapshot, success=bool(info))
 
         formats = info.get("formats", []) if info else []
         real_formats = [

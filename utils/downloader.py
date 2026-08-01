@@ -8,52 +8,19 @@ import yt_dlp
 import ffmpeg
 import config
 
-_COOKIE_SNAPSHOT_DIR = "cache/cookies"
+# Cookie snapshots + rotation write-back live in utils/cookie_manager.
+# Keep these thin wrappers so existing imports (admin console etc.) stay stable.
+from utils import cookie_manager
 
 
 def _purge_cookie_snapshots(original_path: str | None = None) -> None:
-    """
-    Remove disposable yt-dlp snapshot copies so the next download gets a fresh jar.
-    If *original_path* is given, only snapshots derived from it are removed.
-    Call this after any admin action that modifies a cookie jar.
-    """
-    if not os.path.isdir(_COOKIE_SNAPSHOT_DIR):
-        return
-    prefix = None
-    if original_path:
-        prefix = f"{os.path.basename(original_path)}.snapshot"
-    for entry in os.scandir(_COOKIE_SNAPSHOT_DIR):
-        if entry.name.endswith(".snapshot") and (prefix is None or entry.name.startswith(prefix)):
-            try:
-                os.remove(entry.path)
-            except Exception:
-                pass
+    """Remove disposable yt-dlp snapshot copies so the next download gets a
+    fresh jar. Call after any admin action that modifies a cookie jar."""
+    cookie_manager.purge_snapshots(original_path)
 
 
-def _cookie_snapshot(original_path: str) -> str | None:
-    """
-    Return a disposable copy of *original_path* for yt-dlp to use.
-    yt-dlp rewrites cookie files on exit; pointing it at a snapshot keeps the
-    admin-uploaded original intact. Snapshots are refreshed on every call.
-    """
-    if not original_path or not os.path.exists(original_path) or os.path.getsize(original_path) == 0:
-        return None
-    os.makedirs(_COOKIE_SNAPSHOT_DIR, exist_ok=True)
-    snap_path = os.path.join(_COOKIE_SNAPSHOT_DIR, f"{os.path.basename(original_path)}.snapshot")
-    # If an old read-only snapshot exists, make it writable so we can refresh it.
-    if os.path.exists(snap_path) and not os.access(snap_path, os.W_OK):
-        try:
-            os.chmod(snap_path, 0o644)
-        except Exception:
-            pass
-    shutil.copy(original_path, snap_path)
-    # yt-dlp must be able to mutate the snapshot on exit; the original stays locked.
-    os.chmod(snap_path, 0o644)
-    return snap_path
-
-
-def get_cookies_for_url(url: str) -> str | None:
-    """Return a snapshot of the correct cookie jar for *url*, or None if unavailable."""
+def _resolve_jar_path(url: str) -> str | None:
+    """Map *url* to its real on-disk cookie jar path (no snapshot)."""
     url_lower = url.lower()
     cookie_path = None
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
@@ -79,8 +46,17 @@ def get_cookies_for_url(url: str) -> str | None:
                 cookie_path = config.COOKIES_FILE
         except Exception:
             cookie_path = config.COOKIES_FILE
+    return cookie_path
 
-    return _cookie_snapshot(cookie_path)
+
+def get_cookies_for_url(url: str) -> str | None:
+    """Return a per-run snapshot of the correct cookie jar for *url*, or None.
+
+    The snapshot belongs to ONE yt-dlp run; the caller must end the run with
+    ``cookie_manager.commit(snapshot, success=...)`` so rotated session cookies
+    are merged back into the real jar (keeps Instagram/Google sessions alive)
+    and the snapshot is deleted."""
+    return cookie_manager.acquire(_resolve_jar_path(url))
 
 
 def diagnose_youtube_access(test_url: str = "https://www.youtube.com/watch?v=jSi2LDkyKmI") -> dict:
@@ -126,6 +102,8 @@ def diagnose_youtube_access(test_url: str = "https://www.youtube.com/watch?v=jSi
     if cookie_path:
         cookie_opts["cookiefile"] = cookie_path
     cookies_only = extract(cookie_opts)
+    if cookie_path:
+        cookie_manager.commit(cookie_path, success=bool(cookies_only))
 
     # 3) Full stack: cookies + PO token + mweb (only if the provider is running).
     #    _apply_pot_options raises when the provider is down, so guard it.
@@ -136,9 +114,12 @@ def diagnose_youtube_access(test_url: str = "https://www.youtube.com/watch?v=jSi
     try:
         if pot_available:
             full_opts = _apply_pot_options(dict(base_opts), test_url)
-            if cookie_path:
-                full_opts["cookiefile"] = cookie_path
+            snap2 = get_cookies_for_url(test_url)
+            if snap2:
+                full_opts["cookiefile"] = snap2
             full_stack = extract(full_opts)
+            if snap2:
+                cookie_manager.commit(snap2, success=bool(full_stack))
     finally:
         shared.set_pot_enabled(original_pot)
 
@@ -215,14 +196,23 @@ def _apply_pot_options(ydl_opts: dict, url: str) -> dict:
 
 
 def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
-    """Estimates the file size of a format in bytes using bitrate or resolution mappings."""
+    """Estimates the file size of a format in bytes using bitrate or resolution mappings.
+
+    ``duration_seconds`` is the authoritative post duration. When Instagram
+    (and some other extractors) do not expose it, we fall back to
+    ``DEFAULT_POST_DURATION`` so every format still gets a rough size —
+    otherwise every button says ``??``.
+    """
+    DEFAULT_POST_DURATION = 60  # Instagram reels / TikTok / short-form posts
+
     size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
     if size > 0:
         return size
 
     tbr = fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr') or 0
-    if tbr > 0 and duration_seconds > 0:
-        return int((duration_seconds * (tbr * 1000)) / 8)
+    if tbr > 0:
+        effective_duration = duration_seconds if duration_seconds > 0 else DEFAULT_POST_DURATION
+        return int((effective_duration * (tbr * 1000)) / 8)
 
     height = fmt.get('height')
     if duration_seconds > 0:
@@ -240,6 +230,15 @@ def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
             mb_per_min = 1.5
 
         return int(duration_minutes * mb_per_min * 1024 * 1024)
+
+    # Duration unknown, tbr unknown — make at least a heuristic guess from height.
+    if height:
+        if height >= 1080:
+            return 15 * 1024 * 1024
+        elif height >= 720:
+            return 8 * 1024 * 1024
+        elif height >= 480:
+            return 4 * 1024 * 1024
 
     return 0
 
@@ -394,7 +393,12 @@ def extract_formats(url: str) -> dict:
     import utils.shared as shared
 
     _ensure_disk_space(os.getcwd())
-    cookie_path = get_cookies_for_url(url)
+    # Real (on-disk) jar path for this site. Each cookie-authenticated attempt
+    # acquires a FRESH snapshot, so a failed attempt never poisons the next one.
+    # A jar with no real cookie lines (missing/header-only) counts as absent.
+    cookie_path = _resolve_jar_path(url)
+    if cookie_path and not cookie_manager.has_real_cookie_lines(cookie_path):
+        cookie_path = None
 
     base_opts = {
         'quiet': True,
@@ -414,9 +418,15 @@ def extract_formats(url: str) -> dict:
     # no-auth fallback. The PO-token provider must be running; if it isn't,
     # _apply_pot_options raises an actionable error before any extraction.
     #
-    # Other sites: Instagram works better WITHOUT cookies (cookies trigger HTTP
-    # 400 Bad Request on authenticated API endpoints when session is flagged/stale),
-    # so try no-auth first for Instagram. All other sites try cookies first (fast path).
+    # Instagram: no-auth FIRST. Public reels/posts resolve anonymously, and
+    # burning the session on public content only shortens its life. Cookies
+    # are the fallback for login-walled content (private follows, sensitive
+    # posts). Rotation write-back (cookie_manager.commit) keeps the jar fresh,
+    # which is what makes this fallback trustworthy. Do not re-order — stale
+    # sessions made cookies trigger HTTP 400 on Instagram's authenticated API;
+    # that failure mode is why the ladder was flipped.
+    #
+    # Other sites: cookies first (fast path), no-auth as fallback.
     original_pot = shared.is_pot_enabled()
     if _is_youtube(url):
         strategies = [("cookies+pot", True)]
@@ -440,8 +450,11 @@ def extract_formats(url: str) -> dict:
             shared.set_pot_enabled(pot_state)
 
         ydl_opts = dict(base_opts)
+        snap_path = None
         if label != "no-auth" and cookie_path:
-            ydl_opts['cookiefile'] = cookie_path
+            snap_path = cookie_manager.acquire(cookie_path)
+            if snap_path:
+                ydl_opts['cookiefile'] = snap_path
         ydl_opts = _apply_pot_options(ydl_opts, url)
 
         try:
@@ -455,6 +468,9 @@ def extract_formats(url: str) -> dict:
                 shared.set_pot_enabled(original_pot)
 
         if info is None:
+            if snap_path:
+                cookie_manager.commit(snap_path, success=False,
+                                      error_text=str(last_error) if last_error else None)
             continue
 
         if _is_live_or_storyboard_only(info):
@@ -462,9 +478,14 @@ def extract_formats(url: str) -> dict:
             # Treat this as a failure and fall back to the next strategy.
             last_error = _storyboard_error(cookie_path if label != "no-auth" else None)
             info = None
+            if snap_path:
+                cookie_manager.commit(snap_path, success=False, error_text=str(last_error))
             continue
 
-        # Real formats found; stop climbing the ladder.
+        # Real formats found; stop climbing the ladder. A cookie-backed win
+        # merges any rotated session cookies back into the real jar.
+        if snap_path:
+            cookie_manager.commit(snap_path, success=True)
         break
 
     if info is None:
@@ -621,7 +642,12 @@ def extract_playlist_meta(url: str) -> dict:
         ydl_opts['user_agent'] = user_agent
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            cookie_manager.commit(cookie_path, success=False, error_text=str(e))
+            raise
+    cookie_manager.commit(cookie_path, success=True)
 
     if not info or info.get('_type') != 'playlist':
         raise RuntimeError("This link is not a playlist, or YouTube returned no playlist data.")
@@ -770,14 +796,20 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
     out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
-    cookie_path = get_cookies_for_url(url)
+
+    # Resolve the real jar first; acquire a per-run snapshot only when this
+    # attempt will actually authenticate. A header-only jar counts as absent.
+    site_jar = _resolve_jar_path(url)
+    if site_jar and not cookie_manager.has_real_cookie_lines(site_jar):
+        site_jar = None
 
     # Instagram: skip cookies at download time too. extract_formats already
     # proved no-auth works; stale/expired sessions trigger HTTP 400 even when
     # downloading, not just during metadata extraction. Only retry with
     # cookies when yt-dlp returns HTTP 400 on a no-auth attempt (login-wall).
     is_instagram = "instagram.com" in url.lower()
-    use_cookies_now = bool(cookie_path) and not is_instagram
+    use_cookies_now = bool(site_jar) and not is_instagram
+    cookie_path = cookie_manager.acquire(site_jar) if use_cookies_now else None
 
     # Conservative disk check: reserve 1 GB + estimated size. The estimate is rough;
     # we verify again before metadata embedding.
@@ -852,14 +884,22 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     # If we’re on Instagram and cookies exist, try no-auth first on a 400 (most
     # reels), then retry with cookies when the post genuinely requires login.
     # For non-Instagram URLs this flag is irrelevant (cookies are already used).
-    instagram_has_cookies = bool(is_instagram and cookie_path)
-    instagram_used_cookies = False
+    #
+    # Cookie bookkeeping: `snap_in_play` is the snapshot attached to the CURRENT
+    # yt-dlp attempt. On success it is merged back (rotation captures fresh
+    # session cookies); on failure it is discarded and, when the error smells
+    # like an auth failure, recorded against the jar for the admin watchdog.
+    instagram_has_cookies = bool(is_instagram and site_jar)
+    snap_in_play = cookie_path  # None unless the first attempt authenticates
+    last_attempt_error: str | None = None
+    info = None
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as e:
         error_msg = str(e).lower()
+        last_attempt_error = str(e)
 
         # Format stale? Fall back to loose selectors (YouTube / any site).
         if "requested format" in error_msg and "not available" in error_msg:
@@ -872,29 +912,46 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             else:
                 fallback_format = "bestvideo+bestaudio/best"
             ydl_opts['format'] = fallback_format
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as e2:
+                last_attempt_error = str(e2)
 
         # Instagram-specific HTTP 400 paths.
         # Case A: we sent cookies and Instagram returned 400 → the session is
         #   stale/flagged. Retry without cookies (reels work anonymously).
         elif is_instagram and use_cookies_now and "http error 400" in error_msg:
+            cookie_manager.commit(snap_in_play, success=False, error_text=last_attempt_error)
+            snap_in_play = None
             retry_opts = dict(ydl_opts)
             retry_opts.pop('cookiefile', None)
-            with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as e2:
+                last_attempt_error = str(e2)
 
         # Case B: we skipped cookies but Instagram returned 400 → the post is
         #   login-walled. Retry with cookies (private content needs them).
         elif instagram_has_cookies and "http error 400" in error_msg:
+            snap_in_play = cookie_manager.acquire(site_jar)
             retry_opts = dict(ydl_opts)
-            retry_opts['cookiefile'] = cookie_path
-            instagram_used_cookies = True
-            with yt_dlp.YoutubeDL(retry_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+            if snap_in_play:
+                retry_opts['cookiefile'] = snap_in_play
+            try:
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as e2:
+                last_attempt_error = str(e2)
 
-        else:
+        if info is None:
+            cookie_manager.commit(snap_in_play, success=False, error_text=last_attempt_error)
             raise RuntimeError(_classify_ytdl_error(e, url))
+
+    # The winning attempt's snapshot is merged back on success (no-op when
+    # the win was a no-auth attempt: snap_in_play is None).
+    cookie_manager.commit(snap_in_play, success=True)
 
     # Determine the expected filename from the options used for the successful download.
     filename = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info)
