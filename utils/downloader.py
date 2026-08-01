@@ -165,14 +165,22 @@ def _is_youtube(url: str) -> bool:
 def normalize_url(url: str) -> str:
     """Canonicalize URLs that yt-dlp does not understand natively.
 
-    Currently: Instagram highlight-share links in the base64 form
-    ``/s/aGlnaGxpZ2h0:<highlight_id>?story_media_id=...`` (what the IG app
+    Currently: Instagram highlight-share links in the base64 token form
+    ``/s/<base64("highlight:"+id)>?story_media_id=...`` (what the IG app
     produces when you copy/share a highlight) → the supported
     ``/stories/highlights/<id>/`` form.
     """
-    m = re.match(r"^https?://(?:www\.)?instagram\.com/s/aGlnaGxpZ2h0:(\d+)", url or "")
+    m = re.match(r"^https?://(?:www\.)?instagram\.com/s/([A-Za-z0-9\-_+/=]+)", url or "")
     if m:
-        return f"https://www.instagram.com/stories/highlights/{m.group(1)}/"
+        try:
+            import base64
+            token = m.group(1)
+            decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8", "replace")
+            hm = re.match(r"highlight:(\d+)", decoded)
+            if hm:
+                return f"https://www.instagram.com/stories/highlights/{hm.group(1)}/"
+        except Exception:
+            pass
     return url
 
 
