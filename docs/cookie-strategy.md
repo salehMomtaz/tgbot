@@ -9,13 +9,19 @@ time of writing), and the resulting cookie strategy for tgbot.
 ### 1. vaaski/telegram-ytdl (TypeScript, active, 208 commits)
 
 **Cookie approach:** Single `storage/cookies.txt` file. `cookieArgs()` checks
-if the file exists and passes it via `--cookies` to yt-dlp. yt-dlp handles
-atomic writes natively (`--cookies` uses `MozillaCookieJar.dump()` → temp file +
-rename). No fancy protection — relies purely on yt-dlp's robust jar handling.
+if the file exists and passes it via `--cookies` to yt-dlp. yt-dlp rewrites
+that jar itself on exit (`YoutubeDL.__exit__` → `save_cookies()` →
+`YoutubeDLCookieJar.save()`, a plain `open(file, "w")` overwrite — see
+`yt_dlp/cookies.py`). No fancy protection — relies purely on yt-dlp's jar
+lifecycle.
 
-**Key insight:** The simplest approach works best. Don't fight yt-dlp's cookie
-system; work with it. yt-dlp updates the jar on every request, keeping cookies
-"live" as it iterates through the request batch.
+**Key insight:** The simplest approach works best *for a sequential CLI*.
+Don't fight yt-dlp's cookie system; work with it: yt-dlp merges every
+`Set-Cookie` it receives into the in-memory jar and persists it on exit, so
+the session stays "warm" across runs. (The actual atomic-write hardening is
+ours — yt-dlp's own save is a plain overwrite, safe for them because a CLI
+has a single writer at a time; a bot with concurrent extractions must not
+inherit that.)
 
 ### 2. cobalt.tools / imputnet/cobalt (Node.js, very active, 44k stars)
 
