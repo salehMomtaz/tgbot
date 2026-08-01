@@ -332,6 +332,111 @@ _uid_cache: dict[str, str] = {}
 _ig_api_lock = asyncio.Lock()   # serialize instagrapi calls across executor runs
 
 
+# -------------------------------------------------------------------------
+# IG DM item resolution — over the RAW direct_v2/threads payload.
+#
+# We deliberately do NOT use instagrapi's typed `direct_messages()` here: its
+# DirectMessage model *drops* fields that matter for shares — notably
+# ``original_media_igid`` (the story/post's media pk on photo shares) and
+# ``auxiliary_text`` ("Sent @user's story highlight"). The raw dicts keep
+# everything, so every item type can be resolved.
+# -------------------------------------------------------------------------
+
+def _ig_raw_xma_entries(item: dict) -> list[dict]:
+    """Collect XMA share-entry dicts from a raw DM item, whatever key they sit
+    under (``xma_share``, ``xma_story_share``, ``xma_media_share``, ...) —
+    Instagram renames these between app versions and instagrapi versions."""
+    entries: list[dict] = []
+    for v in (item or {}).values():
+        if isinstance(v, list):
+            for e in v:
+                if isinstance(e, dict) and any(
+                        k in e for k in ("preview_url", "video_url", "target_url",
+                                         "header_title_text", "xma_layout_type")):
+                    entries.append(e)
+        elif isinstance(v, dict) and any(
+                k in v for k in ("preview_url", "video_url", "target_url")):
+            entries.append(v)
+    return entries
+
+
+def _ig_resolve_raw(item: dict) -> dict | None:
+    """Normalize one raw DM item into a relayable form:
+      {"kind": "url",       url, author, preview, body}   — share with a link (XMA/legacy)
+      {"kind": "ig_pk",     pk, author, preview}          — share identified only by media pk (photo stories/highlights)
+      {"kind": "attachment", url, is_photo}               — photo/video uploaded straight into the chat
+      {"kind": "text_urls", urls}                         — plain text containing links
+    Returns None when the item carries nothing relayable."""
+    item_type = (item.get("item_type") or "").lower()
+
+    # 1) XMA containers (modern clips & post/story shares)
+    xma_entries = _ig_raw_xma_entries(item)
+    for e in xma_entries:
+        link = e.get("video_url") or e.get("target_url")
+        if link and "instagram.com" in str(link):
+            m = IG_POST_RE.search(str(link))
+            if m:
+                return {"kind": "url",
+                        "url": f"https://www.{m.group(1).rstrip('/')}/",
+                        "author": e.get("header_title_text"),
+                        "preview": e.get("preview_url"),
+                        "body": e.get("title") or e.get("title_text") or ""}
+
+    # 2) Story/highlight shares and pk-only items: original_media_igid points
+    #    at the underlying media (works for expired stories inside highlights).
+    pk = item.get("original_media_igid")
+    if pk:
+        author = None
+        aux = item.get("auxiliary_text") or ""
+        am = re.search(r"@([A-Za-z0-9_.]+)", aux)
+        if am:
+            author = am.group(1)
+        if not author and xma_entries:
+            author = xma_entries[0].get("header_title_text")
+        return {"kind": "ig_pk", "pk": int(pk), "author": author,
+                "preview": xma_entries[0].get("preview_url") if xma_entries else None}
+
+    # 3) Direct media attachment (photo / video uploaded into the chat)
+    media = item.get("media") or item.get("visual_media")
+    if isinstance(media, dict):
+        video_url = media.get("video_url")
+        img = None
+        iv = media.get("image_versions2")
+        if isinstance(iv, dict):
+            cands = iv.get("candidates") or []
+            if cands:
+                img = cands[0].get("url")
+        src = video_url or media.get("thumbnail_url") or img
+        if src:
+            return {"kind": "attachment", "url": src, "is_photo": not bool(video_url)}
+
+    # 4) Classic share containers (older app versions)
+    for key in ("reel_share", "media_share", "felix_share", "clip"):
+        payload = item.get(key)
+        if not isinstance(payload, dict):
+            continue
+        md = payload.get("media") or payload.get("clip") or payload
+        if not isinstance(md, dict):
+            continue
+        code = md.get("code")
+        pk2 = md.get("pk") or md.get("id")
+        user = md.get("user") or {}
+        author = user.get("username") if isinstance(user, dict) else None
+        if code:
+            return {"kind": "url", "url": f"https://www.instagram.com/reel/{code}/",
+                    "author": author, "preview": None,
+                    "body": (md.get("caption") or {}).get("text", "") if isinstance(md.get("caption"), dict) else ""}
+        if pk2:
+            return {"kind": "ig_pk", "pk": int(pk2), "author": author, "preview": None}
+
+    # 5) Plain text with links
+    text = item.get("text") or ""
+    urls = URL_RE.findall(text)
+    if urls:
+        return {"kind": "text_urls", "urls": urls}
+    return None
+
+
 def _ig_pk_from_url(cl, url: str) -> int:
     """Extract the media pk from any Instagram URL form."""
     story = re.search(r"instagram\.com/stories/[^/]+/(\d+)", url)
@@ -340,27 +445,34 @@ def _ig_pk_from_url(cl, url: str) -> int:
     return int(cl.media_pk_from_url(url))
 
 
-async def _ig_native_deliver_once(bot_client, chat_id, cl, url: str,
-                                  header_lines: list[str], body: str) -> bool:
+async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
+                                  header_lines: list[str], body: str,
+                                  url: str | None = None) -> bool:
     """Deliver one Instagram post/story natively through the logged-in
     instagrapi session — photo posts and carousels reliably break yt-dlp's
     extractor ('No video formats found'), so photos/albums download straight
     from the CDN here. Returns False (so the caller can fall back to yt-dlp)
-    when the media is actually a video/reel or when probing fails."""
+    when the media is actually a reel (clips product type)."""
     loop = asyncio.get_event_loop()
     async with _ig_api_lock:
-        pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
         media = await loop.run_in_executor(None, cl.media_info, pk)
+
+    mt = getattr(media, "media_type", None)        # 1=photo, 2=video, 8=album
+    product_type = getattr(media, "product_type", None)
 
     user = getattr(media, "user", None)
     if user is not None and getattr(user, "username", None):
         sender_label = header_lines[0].split(" from ", 1)[-1] if header_lines and " from " in header_lines[0] else "paired contact"
+        if not url:
+            code = getattr(media, "code", None)
+            if code:
+                seg = "reel" if product_type == "clips" else "p"
+                url = f"https://www.instagram.com/{seg}/{code}/"
+            else:
+                url = f"https://www.instagram.com/stories/{user.username}/{pk}/"
         header_lines = _header_lines("Instagram", sender_label, user.username,
-                                     str(getattr(user, "pk", "")), header_lines[-1] if header_lines else url)
+                                     str(getattr(user, "pk", "")), url)
         body = getattr(media, "caption_text", None) or body
-
-    mt = getattr(media, "media_type", None)        # 1=photo, 2=video, 8=album
-    product_type = getattr(media, "product_type", None)
     if mt == 2 and product_type == "clips":
         return False  # reel: yt-dlp handles quality/merge properly
 
@@ -416,15 +528,23 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, url: str,
 def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                       url: str, header_lines: list[str], body: str,
                       preview_url: str | None) -> None:
-    """Route one resolved Instagram link: native path for photo/album/post
-    probe, yt-dlp for reels, preview image as last resort."""
+    """Route one resolved Instagram link: probe the media pk, deliver photos/
+    albums/stories natively, reels via yt-dlp (quality merge), preview image
+    or yt-dlp as fallbacks."""
     async def job():
         is_ig = "instagram.com" in url
-        senders_label = header_lines[0].split(" from ", 1)[-1] if header_lines else "paired contact"
-        if is_ig and "/reel/" not in url:
+        pk = None
+        if is_ig:
+            loop = asyncio.get_event_loop()
+            async with _ig_api_lock:
+                try:
+                    pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
+                except Exception as e:
+                    logger.warning(f"[DirectForward/IG] could not resolve media pk for {url}: {e}")
+        if pk and "/reel/" not in url:
             # posts / carousels / stories: native-first (yt-dlp breaks on them)
             try:
-                if await _ig_native_deliver_once(bot_client, chat_id, cl, url, header_lines, body):
+                if await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header_lines, body, url):
                     return
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] native path failed for {url}: {e} — falling back to yt-dlp")
@@ -436,11 +556,12 @@ def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                 return
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] yt-dlp reel failed for {url}: {e} — trying native")
-                try:
-                    if await _ig_native_deliver_once(bot_client, chat_id, cl, url, header_lines, body):
-                        return
-                except Exception as e2:
-                    logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
+                if pk:
+                    try:
+                        if await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header_lines, body, url):
+                            return
+                    except Exception as e2:
+                        logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
         await _download_and_deliver(bot_client, premium_client, chat_id, url,
                                     header_lines, body, preview_url)
     _enqueue_relay(queue, chat_id, job)
@@ -523,178 +644,97 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
     raise RuntimeError("Instagram login failed (all methods exhausted).")
 
 
-# -------------------------------------------------------------------------
-# IG DM item resolution → a normalized dict we know how to deliver
-# -------------------------------------------------------------------------
-
-def _ig_canonical_url(code: str, product_type: str | None) -> str:
-    return f"https://www.instagram.com/{'reel' if product_type == 'clips' else 'p'}/{code}/"
-
-
-def _ig_item_url_and_author(cl, m) -> dict | None:
-    """Resolve a shared-content DM item into
-    {"url", "author_username", "author_id", "body"} or None when it carries
-    no downloadable media reference."""
-    item_type = (getattr(m, "item_type", "") or "").lower()
-
-    # ---- XMA shares (the modern form; covers xma_clip, xma_media_share,
-    # xma_story_share, xma_reel_share, ...) ------------------------------
-    xs = getattr(m, "xma_share", None)
-    if xs is not None and (item_type.startswith("xma") or item_type in ("clip", "media_share")):
-        target_url = getattr(xs, "video_url", None) or getattr(xs, "target_url", None) or ""
-        match = IG_POST_RE.search(str(target_url))
-        author = getattr(xs, "header_title_text", None) or None
-        if match:
-            return {
-                "url": f"https://www.{match.group(1).rstrip('/')}/",
-                "author_username": author,
-                "author_id": _ig_resolve_user_id(cl, author) if author else None,
-                "body": getattr(xs, "title", None) or "",
-                "preview_url": str(getattr(xs, "preview_url", None) or "") or None,
-            }
-
-    # ---- classic clip container -----------------------------------------
-    clip = getattr(m, "clip", None)
-    if item_type == "clip" and clip is not None:
-        code = getattr(clip, "code", None)
-        user = getattr(clip, "user", None)
-        author = getattr(user, "username", None) if user else None
-        author_id = getattr(user, "pk", None) if user else None
-        if code:
-            return {
-                "url": _ig_canonical_url(code, getattr(clip, "product_type", None)),
-                "author_username": author,
-                "author_id": str(author_id) if author_id else (_ig_resolve_user_id(cl, author) if author else None),
-                "body": getattr(clip, "caption_text", None) or "",
-            }
-
-    # ---- reel_share / media_share / felix_share containers --------------
-    for attr in ("reel_share", "media_share", "felix_share"):
-        payload = getattr(m, attr, None)
-        if payload is None:
-            continue
-        media = payload
-        if isinstance(payload, dict):
-            media = payload.get("media") or payload.get("clip") or payload
-        if isinstance(media, dict):
-            code = media.get("code")
-            pk = media.get("pk") or media.get("id")
-            user = media.get("user") or {}
-            author = user.get("username") if isinstance(user, dict) else None
-        else:
-            code = getattr(media, "code", None)
-            pk = getattr(media, "pk", None)
-            user = getattr(media, "user", None)
-            author = getattr(user, "username", None) if user else None
-        if not code and pk:
-            try:
-                info = cl.media_info(pk)
-                code = info.code
-                if not author and info.user is not None:
-                    author = info.user.username
-                    return {
-                        "url": _ig_canonical_url(code, info.product_type),
-                        "author_username": author,
-                        "author_id": str(info.user.pk),
-                        "body": info.caption_text or "",
-                    }
-            except Exception:
-                pass
-        if code:
-            return {
-                "url": _ig_canonical_url(code, getattr(media, "product_type", None) if not isinstance(media, dict) else media.get("product_type")),
-                "author_username": author,
-                "author_id": _ig_resolve_user_id(cl, author) if author else None,
-                "body": (media.get("caption", {}) or {}).get("text", "") if isinstance(media, dict) and isinstance(media.get("caption"), dict) else (media.get("caption_text", "") if isinstance(media, dict) else ""),
-            }
-
-    # ---- story shares ----------------------------------------------------
-    ss = getattr(m, "story_share", None)
-    if item_type == "story_share" and ss is not None:
-        payload = ss if isinstance(ss, dict) else getattr(ss, "dict", lambda: {})()
-        media = payload.get("media") or {}
-        user = media.get("user") or {}
-        username = user.get("username") or payload.get("message")
-        media_id = media.get("id") or payload.get("story_id")
-        if username and media_id:
-            return {
-                "url": f"https://www.instagram.com/stories/{username}/{media_id}/",
-                "author_username": username,
-                "author_id": _ig_resolve_user_id(cl, username),
-                "body": "",
-            }
-    return None
-
-
-async def _ig_process_message(m, cl, loop, queue, chat_id, bot_client, premium_client,
-                              paired_username: str) -> None:
+async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
+                              bot_client, premium_client, paired_username: str) -> None:
+    """Process one RAW direct_v2 DM item (dict) from the paired contact."""
     sender_label = f"@{paired_username}" if paired_username else "paired contact"
-    item_type = (getattr(m, "item_type", "") or "").lower()
+    item_id = item.get("item_id", "?")
+    item_type = (item.get("item_type") or "").lower()
+    resolved = _ig_resolve_raw(item)
+    kind = (resolved or {}).get("kind")
 
-    # 1) Shared post / reel / clip / story (xma + classic containers).
-    resolved = _ig_item_url_and_author(cl, m)
-    if resolved:
+    if kind == "url":
         header = _header_lines("Instagram", sender_label,
-                               resolved.get("author_username"),
-                               resolved.get("author_id"),
+                               resolved.get("author"),
+                               _ig_resolve_user_id(cl, resolved.get("author")) if resolved.get("author") else None,
                                resolved["url"])
-        body = resolved.get("body") or ""
-        url = resolved["url"]
-        logger.info(f"[DirectForward/IG] item {m.id}: {item_type} -> {url} (author @{resolved.get('author_username')})")
+        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> {resolved['url']} (author @{resolved.get('author')})")
         _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
-                          url, header, body, resolved.get("preview_url"))
+                          resolved["url"], header, resolved.get("body") or "",
+                          resolved.get("preview"))
         return
 
-    # 2) Direct media attachment (photo / video uploaded straight into chat).
-    media = getattr(m, "media", None) or getattr(m, "visual_media", None)
-    if item_type in ("media", "visual_media") and media is not None:
-        video_url = getattr(media, "video_url", None)
-        photo_url = getattr(media, "thumbnail_url", None)
-        is_photo = not video_url
-        src = str(video_url or photo_url)
-        if src:
-            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
-            ext = ".jpg" if is_photo else ".mp4"
-            path = f"cache/df_ig_dm_{m.id}{ext}"
-            os.makedirs("cache", exist_ok=True)
-            with open(path, "wb") as f:
-                f.write(data)
-            caption, followups = _compose_caption(
-                _header_lines("Instagram", sender_label, None, None, None), "")
-            if is_photo:
-                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
-            else:
-                await bot_client.send_video(chat_id=chat_id, video=path,
-                                            caption=caption, supports_streaming=True)
-            await _send_followups(bot_client, chat_id, followups)
+    if kind == "ig_pk":
+        pk = resolved["pk"]
+        author = resolved.get("author")
+        header = _header_lines("Instagram", sender_label, author,
+                               _ig_resolve_user_id(cl, author) if author else None, None)
+        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> native pk {pk} (author @{author})")
+
+        async def job(pk=pk, header=header, preview=resolved.get("preview")):
             try:
-                os.remove(path)
-            except Exception:
-                pass
-            logger.info(f"[DirectForward/IG] item {m.id}: {item_type} -> direct attachment delivered")
-            return
+                ok = await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header, "", None)
+                if ok:
+                    return
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] native pk {pk} failed: {e}")
+            if preview:
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None, _fetch_bytes, preview, "https://www.instagram.com/")
+                path = f"cache/df_pk_{pk}.jpg"
+                with open(path, "wb") as f:
+                    f.write(data)
+                cap = "⚠️ (full media unavailable)\n" + "\n".join(header) if header else "⚠️ media"
+                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=cap)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        _enqueue_relay(queue, chat_id, job)
+        return
 
-    # 3) Plain text with one or more links.
-    text = getattr(m, "text", None) or ""
-    urls = URL_RE.findall(text)
-    for u in urls:
-        header = _header_lines("Instagram", sender_label, None, None, u)
-        logger.info(f"[DirectForward/IG] item {m.id}: text url -> {u}")
-        if "instagram.com" in u:
-            _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
-                              u, header, "", None)
+    if kind == "attachment":
+        src, is_photo = resolved["url"], resolved["is_photo"]
+        data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+        ext = ".jpg" if is_photo else ".mp4"
+        path = f"cache/df_ig_dm_{item_id}{ext}"
+        os.makedirs("cache", exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        caption, followups = _compose_caption(
+            _header_lines("Instagram", sender_label, None, None, None), "")
+        if is_photo:
+            await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
-            _enqueue_relay(queue, chat_id,
-                           lambda u=u, h=header: _download_and_deliver(
-                               bot_client, premium_client, chat_id, u, h, ""))
+            await bot_client.send_video(chat_id=chat_id, video=path,
+                                        caption=caption, supports_streaming=True)
+        await _send_followups(bot_client, chat_id, followups)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> direct attachment delivered")
+        return
 
-    if not urls:
-        logger.info(f"[DirectForward/IG] item {m.id}: {item_type!r} has no relayable media — skipped")
+    if kind == "text_urls":
+        for u in resolved["urls"]:
+            header = _header_lines("Instagram", sender_label, None, None, u)
+            logger.info(f"[DirectForward/IG] item {item_id}: text url -> {u}")
+            if "instagram.com" in u:
+                _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                                  u, header, "", None)
+            else:
+                _enqueue_relay(queue, chat_id,
+                               lambda u=u, h=header: _download_and_deliver(
+                                   bot_client, premium_client, chat_id, u, h, ""))
+        return
+
+    logger.info(f"[DirectForward/IG] item {item_id}: {item_type!r} has no relayable media — skipped")
 
 
-async def _ig_pairing_scan(m, cl, thread_users: dict, state: dict,
+async def _ig_pairing_scan(item: dict, thread_users: dict, state: dict,
                            bot_client, chat_id: int) -> bool:
-    """Check one incoming DM for an active pairing code; on match, lock the
+    """Check one raw DM item for an active pairing code; on match, lock the
     pair and confirm in Telegram. Returns True when the message was consumed."""
     pending = _pending_pairs.get("ig")
     if not pending:
@@ -702,10 +742,10 @@ async def _ig_pairing_scan(m, cl, thread_users: dict, state: dict,
     if pending["expires_at"] <= time.time():
         _pending_pairs.pop("ig", None)
         return False
-    text = (getattr(m, "text", None) or "").strip()
+    text = (item.get("text") or "").strip()
     if pending["code"] not in text:
         return False
-    sender_uid = str(getattr(m, "user_id", "") or "")
+    sender_uid = str(item.get("user_id") or "")
     username = thread_users.get(sender_uid, "")
     if not sender_uid:
         return False
@@ -768,10 +808,12 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
             last = 0
             for th in threads:
-                msgs = await loop.run_in_executor(None, lambda tid=th.id: cl.direct_messages(tid, amount=1))
-                if msgs:
+                raw = await loop.run_in_executor(
+                    None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 1}))
+                items = (raw or {}).get("thread", {}).get("items", [])
+                if items:
                     try:
-                        last = max(last, int(msgs[0].id))
+                        last = max(last, int(items[0]["item_id"]))
                     except Exception:
                         pass
             if last:
@@ -803,19 +845,20 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 # EXCEPT while a pairing handshake is pending (scan everything).
                 if not pairing_active and (not pair_uid or pair_uid not in thread_users):
                     continue
-                msgs = await loop.run_in_executor(
-                    None, lambda tid=th.id: cl.direct_messages(tid, amount=25))
+                raw = await loop.run_in_executor(
+                    None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 25}))
+                items = ((raw or {}).get("thread", {}) or {}).get("items", []) or []
                 last_seen = _cursor(state, "ig")
                 new_msgs = []
-                for m in msgs:
-                    if m.is_sent_by_viewer:
+                for m in items:
+                    if m.get("is_sent_by_viewer"):
                         continue
                     try:
-                        if int(m.id) > last_seen:
+                        if int(m["item_id"]) > last_seen:
                             new_msgs.append(m)
                     except Exception:
-                        logger.warning(f"[DirectForward/IG] weird item id {getattr(m, 'id', '!')!r} skip")
-                new_msgs.sort(key=lambda m: int(m.id))
+                        logger.warning(f"[DirectForward/IG] weird item id {m.get('item_id', '!')!r} skip")
+                new_msgs.sort(key=lambda m: int(m["item_id"]))
 
                 pair_username = ""
                 if pair:
@@ -825,19 +868,19 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     consumed = False
                     try:
                         if pairing_active:
-                            consumed = await _ig_pairing_scan(m, cl, thread_users, state,
+                            consumed = await _ig_pairing_scan(m, thread_users, state,
                                                               bot_client, chat_id)
                             pair = _get_pair(state, "ig")
                             pairing_active = "ig" in _pending_pairs
-                        if not consumed and pair and str(getattr(m, "user_id", "")) == pair["user_id"]:
+                        if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
                             await _ig_process_message(m, cl, loop, queue, chat_id,
                                                       bot_client, premium_client, pair.get("username", ""))
                     except Exception as e:
-                        logger.error(f"[DirectForward/IG] item {getattr(m, 'id', '?')} failed: {e}")
+                        logger.error(f"[DirectForward/IG] item {m.get('item_id', '?')} failed: {e}")
                     # Always advance past attempted items: one bad DM must not
                     # block the relay forever.
                     try:
-                        _bump_cursor(state, "ig", int(m.id))
+                        _bump_cursor(state, "ig", int(m["item_id"]))
                     except Exception:
                         pass
                 if new_msgs:
