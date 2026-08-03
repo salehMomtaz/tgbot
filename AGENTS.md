@@ -82,9 +82,12 @@ have to rediscover them.
    Freshness: `freshness_warnings()` powers the startup watchdog + the admin
    Cookies menu status line; knob: `COOKIE_STALE_WARNING_DAYS` (default 21).
 
-5. **Keep `[default]` on yt-dlp upgrades.** `utils/updater.py` runs
-   `pip install -U --pre "yt-dlp[default]"` — plain `yt-dlp` would silently strip
-   the certifi/curllib extras. The `--pre` channel is what keeps it on nightly.
+5. **Keep `[default,curl-cffi]` on yt-dlp upgrades.** `utils/updater.py` runs
+   `pip install -U --pre "yt-dlp[default,curl-cffi]"` — plain `yt-dlp` would
+   silently strip the certifi/curllib extras, and dropping `curl-cffi` removes
+   the impersonation engine yt-dlp's TikTok proof-of-work challenge solver
+   needs (its absence resurfaces as "malformed site" failures on TikTok).
+   The `--pre` channel is what keeps it on nightly.
 
 6. **`.env` parsing in `run.sh` must stay dotenv-style**, never `source .env`.
    Values like `YTDLP_USER_AGENT` contain characters bash treats as code. The
@@ -128,23 +131,28 @@ have to rediscover them.
     keep the event loop responsive — never call them inline. Downloads still run
     one-at-a-time by design so the user can queue many and collect files later.
 
-11. **"Uploaded size ≠ button size" is a selector problem, not a size-math
-    problem.** `estimate_format_size` (`filesize` → `filesize_approx` →
-    `tbr`/`vbr`/`abr` × duration) is correct and matches how ytdlnis/yt-dlp size
-    formats — do **not** rewrite it on size-mismatch grounds. yt-dlp's size fields
-    are **per-format**; for a merged `video+audio` download yt-dlp never reports
-    the sum, so the app adds `video + best_audio` itself (done at
-    `v['bytes'] += best_audio_bytes`). Only a real `filesize`/`clen` is exact;
-    every estimate carries a `~` prefix and **tends to overshoot**, so the real
-    file often lands a bit *smaller* than the `~` number — expected, not a bug.
-    The one historical defect was the **download selector silently resolving to a
-    different stream than the one sized**: the old `{format_id}+bestaudio/best`
-    collapsed to a low-res **muxed** `/best`, so the uploaded file came out far
-    smaller (and lower quality) than the button. Fixed in `5003d78` via height-capped
-    selectors, and further refined by passing the pre-calculated `best_audio_format_id`
-    directly into `download_media` to force an exact merge match. **Diagnostic rule:**
-    any size complaint → inspect the selector's fallback chain first, never the
-    estimator. See `docs/memory/tgbot-ytdlnis-size-approach.md`.
+11. **"Uploaded size ≠ button size": check the selector first, the estimator
+    second, and blind metadata last.** Three distinct failure classes, in
+    historical order of discovery:
+    (a) **Selector collapse** (fixed `5003d78`): `{format_id}+bestaudio/best`
+    silently dropped to a low-res muxed `/best`. The height-capped fallback
+    chain + passing `best_audio_format_id` into `download_media` forces the
+    exact merge that was sized. `estimate_format_size` itself
+    (`filesize` → `filesize_approx` → `tbr`/`vbr`/`abr` × duration) is correct
+    — do not rewrite it.
+    (b) **Blind-guess metadata** (fixed via `_apply_cdn_size_probes`):
+    Instagram DASH reels expose NO `filesize`, NO `tbr`, often NO `duration`,
+    so the 60 s fallback heuristic overshot real files 2–3× (measured `~5M`
+    vs 2 MB). Button-visible formats in that class now get an exact CDN
+    `Content-Length` probe (HEAD, Range-GET fallback) and become `exact`.
+    YouTube/TikTok report stream metadata and are NEVER probed — don't widen
+    the probe scope to them; it's wasted traffic.
+    (c) **Residual `~` overshoot**: ordinary tbr-based estimates still carry a
+    `~` prefix and run a little high. Expected, not a bug.
+    Muxed single-stream sites (TikTok) have no audio merge, so exactness is the
+    video's own; the joint video+audio rule only applies when a separate
+    best-audio stream exists. Sizes display rounded (nearest MB, sub-MB as KB).
+    See `docs/memory/tgbot-ytdlnis-size-approach.md`.
 
 12. **Cookies live under `cookies/<platform>/`, never at the project root.**
     Layout (`config.COOKIE_DIR`, `config.YTDLP_COOKIES_DIR`):
@@ -170,22 +178,40 @@ have to rediscover them.
 13. **Direct-forward = DM relay from the bot's own Instagram/X accounts.**
     `modules/direct_forward.py` (replacing the old saved/liked `auto_forward`)
     polls the bot account's DM inbox every `DIRECT_FORWARD_POLL_SECONDS`
-    (default 120 s). You DM media/links from YOUR account
-    (`IG_DIRECT_FROM_USERNAME` / `X_DIRECT_FROM_USER_ID` whitelist) to the bot
+    (default 300 s **± `DIRECT_FORWARD_POLL_JITTER_PCT`%**, never a fixed
+    machine cadence — fixed short polling is what got the first IG account
+    flagged "automated behavior"). Anti-detection posture, in order of weight:
+    several-minute jittered intervals; `delay_range = [2, 4]` pacing every
+    private-API call; **per-thread `last_activity_at` watermarks** so an idle
+    cycle costs zero thread-item fetches; a persisted session/device
+    (`direct_ig_session.json` — deleting it is the #1 checkpoint trigger);
+    optional ONE stable proxy (`DIRECT_FORWARD_PROXY`, residential near the
+    account owner, never rotated); checkpoint challenges freeze the worker
+    3–5 h (no retry storms) until a human passes them in the official app.
+    You DM media/links from YOUR account (`IG_DIRECT_FROM_USERNAME` /
+    `X_DIRECT_FROM_USER_ID` whitelist or the pairing handshake) to the bot
     account; it relays photos, videos, reels, story shares, tweet shares and
     plain links into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi`
     (sync → always via `run_in_executor`; bootstraps its login from the
     `sessionid` in the igcookies jar, falls back to user/pass), X uses `twikit`
     (native async, logs in once, persists cookies to `direct_x_cookies.json`).
-    Both sessions persist to disk (`direct_ig_session.json`) so challenges
-    happen at most once. Each platform runs in its own contained loop
-    (`try/except` per poll; ChallengeRequired → sleep 1h; LoginRequired →
-    re-login once). **No third-party APIs.** Downloads route through the normal
-    yt-dlp pipeline (with cookie jars — write-back keeps them warm) and enqueue
-    on the shared single-worker queue behind interactive downloads (invariant
-    #10). First run primes the cursor and skips backlog. State:
-    `direct_forward_state.json`. The worker starts in `main.main_engine()`
-    after the FastAPI server; a misconfiguration must never block the bot.
+    Each platform runs in its own contained loop (`try/except` per poll;
+    LoginRequired → re-login once). **No third-party APIs.** Downloads route
+    through the normal yt-dlp pipeline (with cookie jars — write-back keeps
+    them warm) and enqueue on the shared single-worker queue behind
+    interactive downloads (invariant #10). First run primes the cursor and
+    skips backlog. State: `direct_forward_state.json` (+ `thread_activity`
+    watermarks). The worker starts in `main.main_engine()` after the FastAPI
+    server; a misconfiguration must never block the bot.
+
+14. **Interactive responses quote the user's link message.** The format
+    keyboard, playlist menus, skip warnings and **every uploaded file part**
+    sent on behalf of a link quote-reply to that link's message
+    (`origin_message_id` is captured into `DOWNLOAD_CACHE` and threaded into
+    `process_split_and_upload(reply_to_message_id=...)`). A deleted origin is
+    tolerated: `send_reply_safe` retries once without the quote. Direct-forward
+    relays pass `None` (no origin message exists). Keep new user-facing sends
+    on the same rule.
 
 
 ## Running / testing
@@ -236,6 +262,7 @@ mirror is added regardless inside `ensure_local_log_handler`. New code should us
 
 ## Gotchas
 
+- **TikTok shortlinks are pre-resolved by us, not yt-dlp.** `vt./vm./vn.tiktok.com/<code>` expands to the canonical `tiktok.com/@user/video/<id>` inside `normalize_url` (browser UA + 1 h TTL cache) because yt-dlp's own short-link extractor uses a bare `facebookexternalhit/1.1` HEAD and hits TikTok's stochastic anti-bot interstitial — surfacing as "The site changed its layout or the URL is malformed". `curl-cffi` must stay installed for yt-dlp's proof-of-work webpage solver; TikTok extractions/downloads also get one extra no-auth retry. Don't feed shortlinks straight to yt-dlp again.
 - **pyrogram `Peer id invalid`** is monkey-patched in `main.py`
   (`get_peer_type_patched`) and the log channel peer is resolved at startup
   (`app.get_chat`). Don't remove either.

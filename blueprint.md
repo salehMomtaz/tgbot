@@ -140,7 +140,16 @@ a different stream than the one that was sized**. This mirrors how
 - **Only `filesize`/`clen` is exact.** Everything else is an estimate that tends
   to **overshoot**, so the real file is often a little *smaller* than the
   number. Those buttons carry a `~` prefix to say "approximate"; that gap is
-  expected, not a bug.
+  expected, not a bug — **except** when no usable metadata exists at all; see
+  the next bullet.
+- **Blind-guess formats get an exact CDN probe** (`_apply_cdn_size_probes`):
+  Instagram DASH reels (and similar direct-CDN sites) expose formats with no
+  `filesize`, no `tbr`, and frequently no `duration`, so the 60-second fallback
+  heuristic overshot real files by 2–3× (measured: button `~5M`, upload `2 MB`).
+  For button-visible formats in that class the extractor HEADs the stream URL
+  (Range-GET fallback) and uses the real `Content-Length` — the button turns
+  exact and drops the `~`. YouTube/TikTok (which report stream metadata) are
+  never probed, so no extra traffic is wasted there.
 - **The historical defect (fixed `5003d78`):** the old single-video selector
   `{format_id}+bestaudio/best` could **silently** collapse to the final muxed
   `/best` — a single low-res stream far smaller and lower-quality than the
@@ -148,6 +157,11 @@ a different stream than the one that was sized**. This mirrors how
   `{format_id}+bestaudio / bestvideo[height<=H]+bestaudio / best[height<=H] / best`,
   so every fallback stays **merged and height-capped** until the absolute
   last-resort muxed stream. A tap can no longer silently drop to a tiny file.
+- **Muxed sites have no merge overhead.** TikTok reels are single streams with
+  audio inside; the selector `+bestaudio` finds nothing and the fallback chain
+  lands on the same muxed stream, so the button's exactness rule is
+  `video.exact` alone (the joint video+audio rule only applies when a separate
+  best-audio stream exists).
 - **Diagnostic rule for any size complaint:** inspect the selector's fallback
   chain first (`download_media`), not the estimator. See
   `docs/memory/tgbot-ytdlnis-size-approach.md` and AGENTS.md invariant #11.

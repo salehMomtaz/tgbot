@@ -41,3 +41,6 @@ cookies/
 direct_ig_session.json
 direct_x_cookies.json
 direct_forward_state.json
+
+# OpenCode session export in markdown
+session-ses_0438.md

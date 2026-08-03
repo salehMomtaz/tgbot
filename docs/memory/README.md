@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-07-20.
+code or the git log alone. Last updated: 2026-08-03.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -30,3 +30,15 @@ code or the git log alone. Last updated: 2026-07-20.
   ytdlnis/yt-dlp reference: sizes are per-format, yt-dlp never sums a `v+a` merge,
   so the app must add `video+audio` itself. tgbot's `estimate_format_size` already
   does this; the real mismatch cause is the selector fallback, not the size math.
+- [Exact CDN size probe](tgbot-exact-cdn-size-probe.md) — Instagram DASH reels
+  carry no `filesize`/`tbr`/`duration`, so the 60 s heuristic overshot 2–3×;
+  button-visible blind-guess formats now get an exact `Content-Length` HEAD
+  (Range-GET fallback) and drop the `~`.
+- [TikTok shortlink fix](tgbot-tiktok-shortlink-fix.md) — `vt./vm./vn.` links
+  died on TikTok's stochastic anti-bot interstitial (yt-dlp's bare
+  facebookexternalhit HEAD); we pre-resolve with a browser UA, pin
+  `yt-dlp[default,curl-cffi]` for the PoW webpage solver, and retry once.
+- [Instagram anti-detection posture](tgbot-ig-anti-detection.md) — the DM
+  poller got the account flagged; jittered ≥several-minute cadence,
+  activity-watermark zero-idle-cost polling, stable session/device, optional
+  single residential proxy, and 3–5 h checkpoint freezes.

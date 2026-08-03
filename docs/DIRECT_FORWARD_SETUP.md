@@ -48,7 +48,7 @@ uses, kept warm by cookie write-back. So:
 
 ```
 DIRECT_FORWARD_CHAT_ID=123456789        # your numeric Telegram user id
-DIRECT_FORWARD_POLL_SECONDS=120
+DIRECT_FORWARD_POLL_SECONDS=300
 IG_DIRECT_ENABLED=true
 IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
 ```
@@ -61,8 +61,41 @@ Session persistence: after the first successful login the client dumps its
 session to `direct_ig_session.json` (git-ignored, `chmod 600`) and resumes it
 on every restart, so Instagram challenges you at most once.
 
-If Instagram challenges the bot (CheckpointRequired), the worker pauses for an
-hour and logs a loud, actionable line — upload a fresh jar and restart.
+If Instagram challenges the bot (CheckpointRequired), the worker freezes for
+~3–5 hours and logs a loud, actionable line. The **durable fix** is to open the
+official Instagram app on the bot account and pass the checkpoint there, then
+restart the bot (retry storms only deepen the flag).
+
+## Avoiding checkpoints ("We suspect automated behavior")
+
+Instagram flags accounts on behavior, not one bad request. The poller is the
+loudest signal, so it is built to look human (instagrapi + instagram-private-api
+community best practices):
+
+| Lever                            | What tgbot does                                             | Knob |
+|----------------------------------|-------------------------------------------------------------|------|
+| Poll cadence                     | Several minutes, never seconds                              | `DIRECT_FORWARD_POLL_SECONDS` (≥ 300 recommended) |
+| Machine-perfect cadence          | Each interval is randomized                                 | `DIRECT_FORWARD_POLL_JITTER_PCT` (default 40 ⇒ ±40%) |
+| Request bursts                   | `delay_range = [2, 4]` paces every private-API call         | — (fixed) |
+| Idle request volume              | inbox `last_activity_at` → unchanged threads cost **0** calls | — (automatic) |
+| Session identity                 | persisted `direct_ig_session.json`, same device/UA forever  | — (automatic) |
+| IP reputation                    | optional **one stable** residential proxy for the account   | `DIRECT_FORWARD_PROXY` |
+| Checkpoint response              | freeze 3–5 h; never a retry storm                           | — (fixed) |
+
+**Practical rules that matter most:**
+
+1. **Keep the session, don't re-login.** `direct_ig_session.json` IS the
+   account's trusted device. Deleting it (or re-logging with password every
+   boot) is the #1 checkpoint trigger. Let it persist; only replace
+   `igcookies.txt` when the downloader jar actually dies.
+2. **One account, one IP.** If the VPS datacenter IP keeps getting flagged,
+   put the DM session behind ONE residential proxy close to where the account
+   normally lives (`DIRECT_FORWARD_PROXY=socks5h://user:pass@host:port`) and
+   never change it. Per-request rotation is worse than no proxy.
+3. **Don't run a second poller.** Two devices polling the same inbox 24/7
+   (another bot, a desktop client) doubles the automation signal.
+4. **Challenged? Pass it in the app**, then restart. Fresh jars + restart in a
+   loop looks like account sharing.
 
 ## X / Twitter
 
