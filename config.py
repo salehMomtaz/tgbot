@@ -140,7 +140,16 @@ COOKIE_STALE_WARNING_DAYS = get_env_int("COOKIE_STALE_WARNING_DAYS", 21)
 # library (bootstrapped from your igcookies.txt sessionid when possible),
 # X/Twitter uses the local `twikit` library.
 DIRECT_FORWARD_CHAT_ID = get_env_int("DIRECT_FORWARD_CHAT_ID", 0)
-DIRECT_FORWARD_POLL_SECONDS = get_env_int("DIRECT_FORWARD_POLL_SECONDS", 120)
+DIRECT_FORWARD_POLL_SECONDS = get_env_int("DIRECT_FORWARD_POLL_SECONDS", 300)
+# Humanization: Instagram flags machine-perfect fixed-cadence polling far more
+# easily than jittered, several-minute intervals. The effective delay between
+# inbox sweeps is POLL_SECONDS ± JITTER_PCT (0 disables jitter).
+DIRECT_FORWARD_POLL_JITTER_PCT = get_env_int("DIRECT_FORWARD_POLL_JITTER_PCT", 40)
+# Optional dedicated proxy for the DM sessions (http://user:pass@host:port or
+# socks5h://...). One STABLE residential proxy per account is far safer than a
+# datacenter IP; rotating proxies per request will get the account flagged.
+# When unset, falls back to nothing (direct connection).
+DIRECT_FORWARD_PROXY = os.getenv("DIRECT_FORWARD_PROXY", "").strip() or None
 
 # Instagram direct-forward
 IG_DIRECT_ENABLED = os.getenv("IG_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")

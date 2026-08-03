@@ -36,6 +36,17 @@ a numeric user id once and persisted). X cannot offer an inbox-wide pairing
 handshake (twikit can only read DM history of a known user id), so the X
 protection is the numeric ``X_DIRECT_FROM_USER_ID`` itself.
 
+Anti-detection posture (Instagram)
+----------------------------------
+The poller is the account's loudest signal, so it behaves like a human, not a
+cron job: jittered poll intervals (base ±40%), 2–4 s random pacing between
+private-API requests, per-thread activity watermarks (inbox listing marks
+unchanged threads ⇒ zero item fetches while idle), one stable session/device
+persisted to disk, optional single fixed proxy for the account's lifetime, and
+multi-hour freezes on checkpoint challenges instead of retry storms.
+``DIRECT_FORWARD_POLL_SECONDS`` / ``_JITTER_PCT`` / ``DIRECT_FORWARD_PROXY``
+tune it in .env. See docs/DIRECT_FORWARD_SETUP.md → "Avoiding checkpoints".
+
 Sessions persist to disk (direct_ig_session.json / direct_x_cookies.json).
 First run primes the cursor and skips backlog. Delete direct_forward_state.json
 to re-prime (this also clears the pairing). No third-party APIs.
@@ -67,6 +78,29 @@ IG_POST_RE = re.compile(r"(instagram\.com/(?:reel|reels|p|tv|stories)/[^\s?]+)")
 
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
+
+
+def _poll_interval() -> float:
+    """Effective delay between inbox sweeps: base ± jitter.
+
+    Instagram flags machine-perfect fixed-cadence polling far more easily than
+    a humanized, jittered several-minute rhythm (instagrapi best-practices:
+    read-only monitoring should poll "several minutes rather than seconds").
+    """
+    base = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
+    jitter_pct = max(0, min(90, getattr(config, "DIRECT_FORWARD_POLL_JITTER_PCT", 40)))
+    if jitter_pct:
+        base *= random.uniform(1 - jitter_pct / 100, 1 + jitter_pct / 100)
+    return base
+
+
+def _activity_stamp(thread) -> str:
+    """Serialize a thread's last_activity_at for the state watermark map."""
+    last_act = getattr(thread, "last_activity_at", None)
+    try:
+        return last_act.isoformat() if last_act else ""
+    except Exception:
+        return ""
 
 
 # =========================================================================
@@ -779,7 +813,15 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
 
     loop = asyncio.get_event_loop()
     cl = IGClient()
-    cl.delay_range = [1, 3]
+    # Human pacing between every private-API request (instagrapi best practice:
+    # random, short delays — never machine-paced bursts).
+    cl.delay_range = [2, 4]
+    # One STABLE proxy for the whole account lifetime (residential preferred);
+    # churning IPs is a top checkpoint trigger.
+    ig_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
+    if ig_proxy:
+        cl.set_proxy(ig_proxy)
+        logger.info("[DirectForward/IG] using configured DIRECT_FORWARD_PROXY for the DM session")
 
     try:
         await loop.run_in_executor(None, lambda: _ig_login(cl))
@@ -822,15 +864,17 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         except Exception as e:
             logger.warning(f"[DirectForward/IG] priming peek failed: {e}")
 
-    poll = max(30, config.DIRECT_FORWARD_POLL_SECONDS)
+    poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
     pair = _get_pair(state, "ig")
     if pair:
-        logger.info(f"[DirectForward/IG] polling DMs from @{pair['username']} (id {pair['user_id']}) every {poll}s")
+        logger.info(f"[DirectForward/IG] polling DMs from @{pair['username']} (id {pair['user_id']}) "
+                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
     else:
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
 
     while True:
+        state_dirty = False
         try:
             threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
             pair = _get_pair(state, "ig")
@@ -845,6 +889,20 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 # EXCEPT while a pairing handshake is pending (scan everything).
                 if not pairing_active and (not pair_uid or pair_uid not in thread_users):
                     continue
+
+                # Activity watermark: the inbox listing already carries each
+                # thread's last_activity_at, so an unchanged thread costs ZERO
+                # private-API calls. This is the biggest request-volume cut for
+                # an idle poller (20 thread fetches/cycle → ~0), and API volume
+                # is what Instagram's automation model watches.
+                activity = state.setdefault("ig", {}).setdefault("thread_activity", {})
+                act_key = str(th.id)
+                act_now = _activity_stamp(th)
+                if act_now and activity.get(act_key) == act_now and not pairing_active:
+                    continue
+                activity[act_key] = act_now
+                state_dirty = True
+
                 raw = await loop.run_in_executor(
                     None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 25}))
                 items = ((raw or {}).get("thread", {}) or {}).get("items", []) or []
@@ -885,12 +943,19 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         pass
                 if new_msgs:
                     _save_state(state)
+            if state_dirty:
+                _save_state(state)
             cl.dump_settings(IG_SESSION_FILE)
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
+            # Do NOT hammer a challenged session: re-trying hourly only deepens
+            # the flag. Freeze for hours; the durable fix is a human passing
+            # the checkpoint in the official app, then restarting the bot.
+            freeze = random.uniform(3 * 3600, 5 * 3600)
             logger.error(f"[DirectForward/IG] Instagram challenged the session: {e}. "
-                         f"Upload a fresh igcookies.txt via Admin → Cookies, then restart. "
-                         f"Pausing this worker until next hour.")
-            await asyncio.sleep(3600)
+                         f"Pausing this worker for ~{freeze / 3600:.1f}h. "
+                         f"Open the official Instagram app on the bot account and pass the "
+                         f"checkpoint there, then restart the bot for a clean resume.")
+            await asyncio.sleep(freeze)
         except LoginRequired:
             logger.warning(f"[DirectForward/IG] session expired — attempting re-login.")
             try:
@@ -901,9 +966,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 await asyncio.sleep(3600)
         except Exception as e:
             logger.error(f"[DirectForward/IG] poll error: {e}")
-            await asyncio.sleep(min(600, poll))
+            await asyncio.sleep(min(600, _poll_interval()))
 
-        await asyncio.sleep(poll)
+        await asyncio.sleep(_poll_interval())
 
 
 # =========================================================================
@@ -1017,7 +1082,12 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                      "X_DIRECT_FROM_USER_ID — X direct-forward disabled.")
         return
 
-    client = XClient(language="en-US")
+    x_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
+    try:
+        client = XClient(language="en-US", proxy=x_proxy) if x_proxy else XClient(language="en-US")
+    except TypeError:  # older twikit without a proxy kwarg
+        logger.warning("[DirectForward/X] twikit has no proxy support — DIRECT_FORWARD_PROXY ignored for X")
+        client = XClient(language="en-US")
     try:
         if os.path.exists(X_COOKIES_FILE) and os.path.getsize(X_COOKIES_FILE) > 0:
             client.load_cookies(X_COOKIES_FILE)
@@ -1048,8 +1118,9 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
             logger.warning(f"[DirectForward/X] priming peek failed: {e}")
 
     sender_label = f"x-user `{config.X_DIRECT_FROM_USER_ID}`"
-    poll = max(30, config.DIRECT_FORWARD_POLL_SECONDS)
-    logger.info(f"[DirectForward/X] polling DM history from {sender_label} every {poll}s")
+    poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
+    logger.info(f"[DirectForward/X] polling DM history from {sender_label} every ~{poll}s "
+                f"(jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
 
     while True:
         try:
@@ -1070,9 +1141,9 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                 _save_state(state)
         except Exception as e:
             logger.error(f"[DirectForward/X] poll error: {e}")
-            await asyncio.sleep(min(600, poll))
+            await asyncio.sleep(min(600, _poll_interval()))
 
-        await asyncio.sleep(poll)
+        await asyncio.sleep(_poll_interval())
 
 
 # =========================================================================
