@@ -4,7 +4,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+import requests
 import yt_dlp
 import ffmpeg
 import config
@@ -165,10 +168,13 @@ def _is_youtube(url: str) -> bool:
 def normalize_url(url: str) -> str:
     """Canonicalize URLs that yt-dlp does not understand natively.
 
-    Currently: Instagram highlight-share links in the base64 token form
-    ``/s/<base64("highlight:"+id)>?story_media_id=...`` (what the IG app
-    produces when you copy/share a highlight) → the supported
-    ``/stories/highlights/<id>/`` form.
+    Currently:
+    * Instagram highlight-share links in the base64 token form
+      ``/s/<base64("highlight:"+id)>?story_media_id=...`` (what the IG app
+      produces when you copy/share a highlight) → the supported
+      ``/stories/highlights/<id>/`` form.
+    * TikTok share shortlinks ``vt./vm./vn.tiktok.com/<code>`` → the canonical
+      ``www.tiktok.com/@user/video/<id>`` URL (see :func:`_resolve_tiktok_short_url`).
     """
     m = re.match(r"^https?://(?:www\.)?instagram\.com/s/([A-Za-z0-9\-_+/=]+)", url or "")
     if m:
@@ -181,7 +187,69 @@ def normalize_url(url: str) -> str:
                 return f"https://www.instagram.com/stories/highlights/{hm.group(1)}/"
         except Exception:
             pass
-    return url
+    return _resolve_tiktok_short_url(url)
+
+
+# ---------------------------------------------------------------------------
+# TikTok shortlink pre-resolution
+# ---------------------------------------------------------------------------
+# yt-dlp's own short-link extractor resolves vt./vm./vn.tiktok.com with a bare
+# facebookexternalhit HEAD request, no impersonation, no cookies. When TikTok
+# answers with its anti-bot interstitial instead of a plain 301 (stochastic,
+# IP/fingerprint based), the whole extraction dies as "Unable to extract ..."
+# and the user sees "The site changed its layout or the URL is malformed.".
+# Resolving the redirect ourselves with a real browser UA (one retry, results
+# cached for an hour) is far more consistent, and yt-dlp then receives a
+# canonical www.tiktok.com URL it handles natively — challenge solver included.
+_TIKTOK_SHORT_RE = re.compile(r"^https?://(?:vt|vm|vn)\.tiktok\.com/", re.IGNORECASE)
+_TIKTOK_RESOLVE_TTL = 3600
+_tiktok_resolve_cache: dict[str, tuple[str, float]] = {}
+
+
+def _resolve_tiktok_short_url(url: str) -> str:
+    """Expand a TikTok share shortlink to its canonical URL when possible.
+
+    On any failure the original short URL is returned unchanged, so yt-dlp
+    still gets its own chance through the built-in short-link extractor.
+    Both ``extract_formats`` and ``download_media`` normalize the same URL —
+    the TTL cache keeps that from doubling the network round-trips.
+    """
+    if not url or not _TIKTOK_SHORT_RE.match(url):
+        return url
+
+    now = time.time()
+    cached = _tiktok_resolve_cache.get(url)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    headers = {"User-Agent": getattr(config, "YTDLP_USER_AGENT", "") or _SIZE_PROBE_UA}
+    proxies = None
+    proxy = getattr(config, "YTDLP_PROXY", None)
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
+
+    resolved = url
+    for _attempt in range(2):
+        try:
+            # stream=True + close(): we only need the redirect chain, not the body.
+            resp = requests.get(url, headers=headers, timeout=10,
+                                allow_redirects=True, proxies=proxies, stream=True)
+            final = resp.url
+            resp.close()
+            # Accept only a genuine content hop (/@user/video|photo|t/...); a
+            # login/interstitial hop means TikTok is playing games — keep the
+            # short form and let yt-dlp's challenge solver deal with it.
+            if (final and not _TIKTOK_SHORT_RE.match(final)
+                    and "tiktok.com/@" in final):
+                resolved = final
+        except Exception:
+            continue
+        break
+
+    if len(_tiktok_resolve_cache) > 500:
+        _tiktok_resolve_cache.clear()
+    _tiktok_resolve_cache[url] = (resolved, now + _TIKTOK_RESOLVE_TTL)
+    return resolved
 
 
 def _apply_pot_options(ydl_opts: dict, url: str) -> dict:
@@ -273,7 +341,88 @@ def format_size_short(size_bytes: int) -> str:
     size_mb = size_bytes / (1024 * 1024)
     if size_mb >= 1024:
         return f"{round(size_mb / 1024, 1)}G"
-    return f"{int(size_mb)}M"
+    if size_mb >= 1:
+        return f"{round(size_mb)}M"
+    return f"{round(size_bytes / 1024)}K"
+
+
+# ---------------------------------------------------------------------------
+# Exact CDN size probes
+# ---------------------------------------------------------------------------
+# Some sites (Instagram DASH reels above all) expose formats with NO filesize,
+# NO tbr, and often NO duration — the estimator's 60-second default heuristic
+# then overshoots the real file by 2-3x, which is the "button says ~5M but the
+# upload is 2M" bug. These streams are direct CDN URLs, so a cheap HEAD (or a
+# 1-byte Range GET when HEAD is rejected) returns the EXACT content-length and
+# the button becomes exact instead of a guess.
+_SIZE_PROBE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def _probe_remote_size(url: str | None, http_headers: dict | None = None, timeout: int = 8) -> int | None:
+    """Return the exact byte size of a direct stream URL, or None when unknown.
+
+    HEAD first; if the CDN answers without a usable content-length, a 1-byte
+    Range GET exposes the total via ``Content-Range: bytes 0-0/<total>``.
+    Never raises — estimation stays the fallback.
+    """
+    if not url:
+        return None
+
+    headers = dict(http_headers or {})
+    if "User-Agent" not in headers:
+        headers["User-Agent"] = getattr(config, "YTDLP_USER_AGENT", "") or _SIZE_PROBE_UA
+
+    proxies = None
+    proxy = getattr(config, "YTDLP_PROXY", None)
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
+
+    try:
+        resp = requests.head(url, headers=headers, timeout=timeout,
+                             allow_redirects=True, proxies=proxies)
+        length = int(resp.headers.get("Content-Length") or 0)
+        if resp.status_code == 200 and length > 0:
+            return length
+
+        range_headers = dict(headers, Range="bytes=0-0")
+        resp = requests.get(url, headers=range_headers, timeout=timeout,
+                            stream=True, proxies=proxies)
+        resp.close()
+        content_range = resp.headers.get("Content-Range", "")
+        m = re.match(r"bytes \d+-\d+/(\d+)", content_range)
+        if m:
+            return int(m.group(1))
+        length = int(resp.headers.get("Content-Length") or 0)
+        return length if length > 0 else None
+    except Exception:
+        return None
+
+
+def _apply_cdn_size_probes(items: list[dict]) -> None:
+    """Fill exact byte sizes (in place) for button formats that need probing.
+
+    *items* are the clipped, button-visible video/audio dicts. Only entries
+    flagged ``probe`` at collection time (no filesize / filesize_approx / tbr,
+    or a video whose post duration yt-dlp could not tell) are probed — sites
+    like YouTube that already report stream metadata keep their estimates and
+    we never waste ~10 extra requests on them.
+    """
+    targets = [i for i in items if i.get("probe") and i.get("probe_url")]
+    if not targets:
+        return
+    workers = min(4, len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        sizes = list(pool.map(
+            lambda i: _probe_remote_size(i["probe_url"], i.get("probe_headers")),
+            targets,
+        ))
+    for item, size in zip(targets, sizes):
+        if size and size > 0:
+            item["bytes"] = size
+            item["exact"] = True
 
 
 def _disk_usage_percent(path: str) -> float:
@@ -463,6 +612,11 @@ def extract_formats(url: str) -> dict:
         if cookie_path:
             strategies.append(("cookies", False))
         strategies.append(("no-auth", None))
+        if "tiktok.com" in url.lower():
+            # TikTok's anti-bot interstitial is stochastic — the same URL flips
+            # between pass and fail across attempts. One extra no-auth retry is
+            # cheap and converts many "site changed its layout" failures.
+            strategies.append(("no-auth", None))
 
     info = None
     last_error = None
@@ -532,6 +686,14 @@ def extract_formats(url: str) -> dict:
         # ESTIMATE that tends to run high, so the real file is often smaller.
         exact = bool(fmt.get('filesize'))
 
+        # Mark formats whose size would otherwise be a blind guess for an exact
+        # CDN content-length probe (see _apply_cdn_size_probes). Instagram DASH
+        # reels are the driver: no filesize, no usable tbr, often no duration.
+        has_stream_meta = bool(
+            fmt.get('filesize_approx') or fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr')
+        )
+        probe_worthy = (not exact) and (duration_seconds <= 0 or not has_stream_meta)
+
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
             abr = fmt.get('abr') or 0
             audio_options.append({
@@ -540,6 +702,9 @@ def extract_formats(url: str) -> dict:
                 'bytes': size,
                 'bitrate': abr,
                 'exact': exact,
+                'probe': probe_worthy,
+                'probe_url': fmt.get('url') if probe_worthy else None,
+                'probe_headers': fmt.get('http_headers') if probe_worthy else None,
             })
 
         elif fmt.get('vcodec') != 'none':
@@ -553,6 +718,9 @@ def extract_formats(url: str) -> dict:
                     'bytes': size,
                     'height': resolution,
                     'exact': exact,
+                    'probe': probe_worthy,
+                    'probe_url': fmt.get('url') if probe_worthy else None,
+                    'probe_headers': fmt.get('http_headers') if probe_worthy else None,
                 })
 
     video_options = sorted(video_options, key=lambda x: x['height'], reverse=True)
@@ -572,20 +740,34 @@ def extract_formats(url: str) -> dict:
             unique_audios.append(a)
             seen_bitrates.add(a['quality'])
 
+    # Clip to what the keyboard shows BEFORE probing — only displayed buttons
+    # deserve the extra CDN requests.
+    unique_videos = unique_videos[:5]
+    unique_audios = unique_audios[:5]
+
+    # Exact CDN content-length probes for blind-guess formats (IG DASH reels
+    # with no duration/bitrate metadata). Upgrades bytes/exact in place, so the
+    # merged button below sums exact parts and drops the "~" prefix.
+    _apply_cdn_size_probes(unique_videos + unique_audios)
+
     # When the user taps a VIDEO button, the bot downloads "{video}+bestaudio" and
     # merges them into an mp4. The button therefore shows the *merged* size —
     # video stream + the best audio stream — not the video-only size.
     #
-    # Only the real content-length (`filesize`) is exact. filesize_approx (tbr) and
-    # the height/bitrate fallbacks are ESTIMATES that tend to overshoot, so a "~"
-    # prefix warns the user the real file may come out smaller than the number.
+    # Only a real content-length (`filesize`, or a successful CDN probe) is
+    # exact. filesize_approx (tbr) and the height/bitrate fallbacks are
+    # ESTIMATES that tend to overshoot, so a "~" prefix warns the user the real
+    # file may come out smaller than the number.
     best_audio = unique_audios[0] if unique_audios else None
     best_audio_format_id = best_audio['format_id'] if best_audio else None
     best_audio_bytes = best_audio['bytes'] if best_audio else 0
     best_audio_exact = best_audio['exact'] if best_audio else False
     for v in unique_videos:
         v['bytes'] = v['bytes'] + best_audio_bytes
-        prefix = "" if (v['exact'] and best_audio_exact) else "~"
+        # When there is no separate audio stream (muxed downloads like TikTok),
+        # nothing gets merged in — the video's own exactness decides the prefix.
+        exact_total = v['exact'] and (best_audio_exact if best_audio else True)
+        prefix = "" if exact_total else "~"
         warn_flag = " ⚠️" if v['bytes'] > (2000 * 1024 * 1024) else ""
         v['size_str'] = f"{prefix}{format_size_short(v['bytes'])}{warn_flag}"
     for a in unique_audios:
@@ -596,8 +778,8 @@ def extract_formats(url: str) -> dict:
         'title': info.get('title', 'Unknown Title'),
         'duration': duration_seconds,
         'thumbnail': info.get('thumbnail'),
-        'videos': unique_videos[:5],
-        'audios': unique_audios[:5],
+        'videos': unique_videos,
+        'audios': unique_audios,
         'best_audio_format_id': best_audio_format_id
     }
 
@@ -964,6 +1146,22 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             retry_opts = dict(ydl_opts)
             if snap_in_play:
                 retry_opts['cookiefile'] = snap_in_play
+            try:
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as e2:
+                last_attempt_error = str(e2)
+
+        # TikTok's anti-bot interstitial fails stochastically between attempts
+        # — a clean no-cookies retry converts many of them. The first attempt's
+        # cookie snapshot is closed out as a non-auth failure (block pages are
+        # not login errors, so the watchdog stays quiet).
+        if info is None and "tiktok.com" in url.lower():
+            if snap_in_play:
+                cookie_manager.commit(snap_in_play, success=False)
+                snap_in_play = None
+            retry_opts = dict(ydl_opts)
+            retry_opts.pop('cookiefile', None)
             try:
                 with yt_dlp.YoutubeDL(retry_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
