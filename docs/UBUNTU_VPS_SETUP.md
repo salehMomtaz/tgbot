@@ -370,9 +370,11 @@ Instagram or X account** (without copying links into Telegram), set up the
 
 **What it is:** A background worker (`modules/direct_forward.py`) that polls
 the bot account's **DM inbox** every `DIRECT_FORWARD_POLL_SECONDS` (default
-120 s) and relays new photos, videos, reels, story shares, tweet shares and
+300 s, randomly jittered ±40% — Instagram flags machine-paced polling) and
+relays new photos, videos, reels, story shares, tweet shares and
 plain links to your Telegram chat (`DIRECT_FORWARD_CHAT_ID`). Only DMs from
-your whitelisted account are relayed.
+your paired account are relayed. See also `docs/DIRECT_FORWARD_SETUP.md` →
+"Avoiding checkpoints".
 
 **How to set it up:**
 
@@ -384,7 +386,7 @@ your whitelisted account are relayed.
 3. In `.env`, set:
    ```
    DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
-   DIRECT_FORWARD_POLL_SECONDS=120
+   DIRECT_FORWARD_POLL_SECONDS=300
    IG_DIRECT_ENABLED=true
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
    X_DIRECT_ENABLED=true
