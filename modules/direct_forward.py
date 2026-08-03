@@ -645,7 +645,11 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
     if os.path.exists(IG_SESSION_FILE) and os.path.getsize(IG_SESSION_FILE) > 0:
         try:
             cl.load_settings(IG_SESSION_FILE)
-            cl.login(config.IG_DIRECT_USERNAME or None, config.IG_DIRECT_PASSWORD or None)
+            # Validate the persisted session WITHOUT calling login(): instagrapi's
+            # login() demands both username+password, but a good persisted session
+            # needs neither — account_info() alone proves it's alive. Requiring a
+            # password here made the resume path dead-on-arrival for setups that
+            # rely on cookie-jar sessionids (the common direct-forward config).
             cl.account_info()  # forces a session check
             logger.info(f"{log_prefix} Resumed persisted direct session.")
             return
@@ -812,24 +816,56 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         return
 
     loop = asyncio.get_event_loop()
-    cl = IGClient()
     # Human pacing between every private-API request (instagrapi best practice:
     # random, short delays — never machine-paced bursts).
-    cl.delay_range = [2, 4]
-    # One STABLE proxy for the whole account lifetime (residential preferred);
-    # churning IPs is a top checkpoint trigger.
     ig_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
-    if ig_proxy:
-        cl.set_proxy(ig_proxy)
-        logger.info("[DirectForward/IG] using configured DIRECT_FORWARD_PROXY for the DM session")
 
-    try:
-        await loop.run_in_executor(None, lambda: _ig_login(cl))
-        cl.dump_settings(IG_SESSION_FILE)
-        os.chmod(IG_SESSION_FILE, 0o600)
-    except Exception as e:
-        logger.error(f"[DirectForward/IG] login failed: {e}")
-        return
+    def _make_client():
+        c = IGClient()
+        c.delay_range = [2, 4]
+        # One STABLE proxy for the whole account lifetime (residential preferred);
+        # churning IPs is a top checkpoint trigger.
+        if ig_proxy:
+            c.set_proxy(ig_proxy)
+            logger.info("[DirectForward/IG] using configured DIRECT_FORWARD_PROXY for the DM session")
+        return c
+
+    # The cookie jar (and hence the sessionid) can change after startup: the
+    # admin uploads a fresh igcookies.txt mid-run, or a previous worker died on
+    # a stale jar. NEVER exit on a login failure — retry on the poll cadence so
+    # a freshly-uploaded jar is picked up without a bot restart. Each attempt
+    # gets a fresh client: a half-failed instagrapi login can poison cl state.
+    #
+    # Exception: a real CHALLENGE (checkpoint / please-wait) must NOT be retried
+    # on a machine cadence — that deepens the flag. Freeze for hours instead
+    # (the durable fix is a human passing the checkpoint in the official app).
+    # LoginRequired mid-poll is handled separately inside the loop.
+    cl = _make_client()
+    login_attempt = 0
+    while True:
+        try:
+            await loop.run_in_executor(None, lambda: _ig_login(cl))
+            cl.dump_settings(IG_SESSION_FILE)
+            os.chmod(IG_SESSION_FILE, 0o600)
+            break
+        except (ChallengeRequired, PleaseWaitFewMinutes) as e:
+            freeze = random.uniform(3 * 3600, 5 * 3600)
+            logger.error(f"[DirectForward/IG] Instagram challenged the login: {e}. "
+                         f"Pausing this worker for ~{freeze / 3600:.1f}h. "
+                         f"Open the official Instagram app on the bot account and pass the "
+                         f"checkpoint there, then restart the bot for a clean resume.")
+            await asyncio.sleep(freeze)
+            cl = _make_client()
+        except Exception as e:
+            login_attempt += 1
+            if login_attempt == 1:
+                logger.error(f"[DirectForward/IG] login failed: {e}. "
+                             f"Retrying every ~{_poll_interval()}s — a fresh "
+                             f"igcookies.txt upload will be picked up automatically.")
+            else:
+                logger.warning(f"[DirectForward/IG] login retry {login_attempt} failed: {e}")
+            cl = _make_client()
+            await asyncio.sleep(_poll_interval())
 
     state = _load_state()
 
