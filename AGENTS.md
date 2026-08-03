@@ -188,6 +188,11 @@ have to rediscover them.
     optional ONE stable proxy (`DIRECT_FORWARD_PROXY`, residential near the
     account owner, never rotated); checkpoint challenges freeze the worker
     3–5 h (no retry storms) until a human passes them in the official app.
+    **The IG worker NEVER dies on a login failure** — it retries on the poll
+    cadence with a fresh client per attempt, so a mid-run `igcookies.txt`
+    re-upload is picked up without a bot restart; only real challenge errors
+    trigger the multi-hour freeze. `_ig_login` validates the persisted session
+    via `account_info()` (not `login()`, which demands a password).
     You DM media/links from YOUR account (`IG_DIRECT_FROM_USERNAME` /
     `X_DIRECT_FROM_USER_ID` whitelist or the pairing handshake) to the bot
     account; it relays photos, videos, reels, story shares, tweet shares and

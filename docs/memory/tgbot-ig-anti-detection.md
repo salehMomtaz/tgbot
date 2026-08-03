@@ -32,6 +32,7 @@ stay on private API. Full source list lives in this repo's session notes and
 | Identity | unchanged: persisted session/device first, sessionid bootstrap 2nd, password last; settings re-dumped per cycle |
 | IP | `DIRECT_FORWARD_PROXY` — ONE stable proxy for the account's whole life; applied to instagrapi (`set_proxy`) and twikit (guarded) |
 | Checkpoint | freeze **3–5 h randomized**, log tells the human to pass it in the official app; no retry storms |
+| Login resilience | **worker never dies on a login failure** — retries each poll with a *fresh* client (half-failed instagrapi login poisons state), so a mid-run `igcookies.txt` re-upload is picked up without a bot restart; challenge errors still freeze 3–5 h |
 
 ## Operational notes
 
