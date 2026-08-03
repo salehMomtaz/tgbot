@@ -19,7 +19,7 @@ from utils.downloader import (
     is_pure_playlist_url,
     PLAYLIST_TIERS,
 )
-from utils.uploader_handler import process_split_and_upload
+from utils.uploader_handler import process_split_and_upload, send_reply_safe
 
 
 def is_link(text: str) -> bool:
@@ -86,8 +86,15 @@ def build_format_keyboard(cache_id: str, videos: list, audios: list) -> InlineKe
     return InlineKeyboardMarkup(keyboard_rows)
 
 
-async def show_format_selection(message: Message, status_msg: Message, url: str, custom_filename, user_id: int):
-    """Extract formats for a single media URL and post the selection keyboard."""
+async def show_format_selection(message: Message, status_msg: Message, url: str, custom_filename, user_id: int, origin_message_id: int | None = None):
+    """Extract formats for a single media URL and post the selection keyboard.
+
+    *origin_message_id* is the user's original link message. The keyboard (and
+    later the uploaded file) quote-replies to it, even when we got here via a
+    callback chain (playlist decision menu → explorer → a video) where the
+    local *message* is one of the bot's own menus.
+    """
+    reply_to_id = origin_message_id or message.id
     await status_msg.edit_text("🔍 Fetching format attributes...")
     try:
         # extract_formats is a blocking yt-dlp call — run it off the event loop
@@ -103,18 +110,24 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
             "audios": data["audios"],
             "thumbnail_url": data["thumbnail"],
             "custom_filename": custom_filename,
-            "best_audio_format_id": data["best_audio_format_id"]
+            "best_audio_format_id": data["best_audio_format_id"],
+            "origin_message_id": reply_to_id,
         }
 
         keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"])
 
         await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
         await status_msg.delete()
-        await message.reply_text(
-            f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
-            f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
-            f"Select an option below:",
-            reply_markup=keyboard
+        await send_reply_safe(
+            message._client.send_message,
+            reply_to_id,
+            chat_id=message.chat.id,
+            text=(
+                f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
+                f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
+                f"Select an option below:"
+            ),
+            reply_markup=keyboard,
         )
     except Exception as e:
         await status_msg.edit_text(f"❌ Extraction failed.\nError: `{str(e)}`")
@@ -218,7 +231,10 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
     *pure* is True for ``/playlist?list=`` URLs (no single-video shortcut), False
     for ``watch?v=&list=`` URLs (a 'just this video' button is offered too).
     """
-    status_msg = await message.reply_text("📋 Reading playlist...")
+    status_msg = await send_reply_safe(
+        message._client.send_message, message.id,
+        chat_id=message.chat.id, text="📋 Reading playlist...",
+    )
 
     async def meta_job():
         try:
@@ -239,15 +255,20 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
             "url": url,
             "title": meta["title"],
             "entries": meta["entries"],
-            "custom_filename": custom_filename
+            "custom_filename": custom_filename,
+            "origin_message_id": message.id,
         }
 
         keyboard = build_playlist_decision_keyboard(cache_id, include_single=not pure)
         await status_msg.delete()
-        await message.reply_text(
-            f"📋 **Playlist:** {meta['title']}\n📺 **Videos:** {total}{cap_note}\n\n"
-            f"What do you want to do?",
-            reply_markup=keyboard
+        await send_reply_safe(
+            message._client.send_message, message.id,
+            chat_id=message.chat.id,
+            text=(
+                f"📋 **Playlist:** {meta['title']}\n📺 **Videos:** {total}{cap_note}\n\n"
+                f"What do you want to do?"
+            ),
+            reply_markup=keyboard,
         )
         await log_event(f"📋 **Playlist ready:** `{meta['title']}` ({total} videos) for User `{user_id}`.")
 
@@ -289,7 +310,10 @@ def register_downloader_handlers(app: Client):
                 return
 
             # --- Single-video flow ---
-            status_msg = await message.reply_text("📥 Received. Analyzing link formats...")
+            status_msg = await send_reply_safe(
+                message._client.send_message, message.id,
+                chat_id=message.chat.id, text="📥 Received. Analyzing link formats...",
+            )
 
             # Fetch formats immediately & concurrently — NOT queued. Only the
             # actual download (queued when the user taps a format button) is
@@ -297,7 +321,10 @@ def register_downloader_handlers(app: Client):
             # earlier downloads run.
             _spawn_fetch(show_format_selection(message, status_msg, url, custom_filename, user_id))
         else:
-            status_msg = await message.reply_text("📥 Received URL. Queueing job...")
+            status_msg = await send_reply_safe(
+                message._client.send_message, message.id,
+                chat_id=message.chat.id, text="📥 Received URL. Queueing job...",
+            )
 
             async def direct_upload_job():
                 await status_msg.edit_text("⚡ Starting direct URL download...")
@@ -327,7 +354,8 @@ def register_downloader_handlers(app: Client):
                         uploader="Direct Link",
                         duration=0,
                         thumb_path=None,
-                        progress_msg=status_msg
+                        progress_msg=status_msg,
+                        reply_to_message_id=message.id,
                     )
                     await log_event(f"✅ **Direct Upload:** Finished for User `{user_id}` from source `{url}`.")
                 except Exception as e:
@@ -428,7 +456,8 @@ def register_downloader_handlers(app: Client):
                     uploader=uploader,
                     duration=result['duration'],
                     thumb_path=thumb_path,
-                    progress_msg=callback_query.message
+                    progress_msg=callback_query.message,
+                    reply_to_message_id=cache_data.get("origin_message_id"),
                 )
 
                 DOWNLOAD_CACHE.pop(cache_id, None)
@@ -478,11 +507,19 @@ def register_downloader_handlers(app: Client):
             await callback_query.answer()
             url = cache_data.get("url")
             custom_filename = cache_data.get("custom_filename")
+            origin_id = cache_data.get("origin_message_id")
             DOWNLOAD_CACHE.pop(cache_id, None)
             await callback_query.message.delete()
-            status_msg = await callback_query.message.reply_text("🔍 Fetching format attributes...")
+            status_msg = await send_reply_safe(
+                callback_query._client.send_message, origin_id,
+                chat_id=callback_query.message.chat.id,
+                text="🔍 Fetching format attributes...",
+            )
 
-            _spawn_fetch(show_format_selection(callback_query.message, status_msg, url, custom_filename, user_id))
+            _spawn_fetch(show_format_selection(
+                callback_query.message, status_msg, url, custom_filename, user_id,
+                origin_message_id=origin_id,
+            ))
             return
 
         # Back to the top-level decision menu.
@@ -535,6 +572,7 @@ def register_downloader_handlers(app: Client):
 
         progress_msg = callback_query.message
         chat_id = callback_query.message.chat.id
+        origin_id = cache_data.get("origin_message_id")
 
         async def playlist_job():
             success = 0
@@ -590,14 +628,17 @@ def register_downloader_handlers(app: Client):
                         thumb_path=result["thumb_path"],
                         progress_msg=progress_msg,
                         delete_progress_after=False,  # keep the rolling message across videos
+                        reply_to_message_id=origin_id,
                     )
                     success += 1
                     await log_event(f"✅ **Playlist item {idx}/{total}:** `{result['title']}` sent.")
                 except Exception as e:
                     skipped += 1
                     try:
-                        await callback_query.message.reply_text(
-                            f"⚠️ Skipped video {idx}/{total} `{entry_title}`\nError: `{str(e)}`"
+                        await send_reply_safe(
+                            callback_query._client.send_message, origin_id,
+                            chat_id=chat_id,
+                            text=f"⚠️ Skipped video {idx}/{total} `{entry_title}`\nError: `{str(e)}`",
                         )
                     except Exception:
                         pass
@@ -670,10 +711,19 @@ def register_downloader_handlers(app: Client):
             return
 
         entry = entries[idx]
+        origin_id = cache_data.get("origin_message_id")
         await callback_query.answer()
-        status_msg = await callback_query.message.reply_text(f"🔍 Fetching formats for `{entry['title']}`...")
+        status_msg = await send_reply_safe(
+            callback_query._client.send_message, origin_id,
+            chat_id=callback_query.message.chat.id,
+            text=f"🔍 Fetching formats for `{entry['title']}`...",
+        )
 
-        _spawn_fetch(show_format_selection(callback_query.message, status_msg, entry["url"], cache_data.get("custom_filename"), user_id))
+        _spawn_fetch(show_format_selection(
+            callback_query.message, status_msg, entry["url"],
+            cache_data.get("custom_filename"), user_id,
+            origin_message_id=origin_id,
+        ))
 
 
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:

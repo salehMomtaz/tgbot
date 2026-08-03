@@ -2,6 +2,7 @@
 import os
 import asyncio
 from pyrogram import Client
+from pyrogram.errors import MessageIdInvalid, RPCError
 from utils.gate import is_document_mode
 
 # Telegram upload ceilings (bytes).
@@ -15,8 +16,34 @@ _BOT_TARGET = 1900 * 1024 * 1024         # ~1.86 GB target per segment (Bot API)
 _BOT_HARD = 2000 * 1024 * 1024           # hard ceiling under Telegram's 2 GB
 
 
-async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False, caption: str | None = None):
-    """Sends a single media file using the designated client, passing thumbs to document uploads too."""
+async def send_reply_safe(send_fn, reply_to_message_id: int | None = None, **kwargs):
+    """Send via *send_fn*, quoting *reply_to_message_id* when given.
+
+    The quoted message may have been deleted by the user in the meantime —
+    Telegram then rejects the send with an RPC error (MESSAGE_ID_INVALID /
+    "message to be replied not found"). On that specific failure we retry
+    once WITHOUT the quote instead of failing the upload. Any other error
+    class propagates unchanged.
+    """
+    if reply_to_message_id is not None:
+        try:
+            return await send_fn(reply_to_message_id=reply_to_message_id, **kwargs)
+        except MessageIdInvalid:
+            pass  # known bad reply target — fall through to unquoted send
+        except RPCError as e:
+            text = str(e).upper()
+            if "MESSAGE_ID_INVALID" not in text and "REPLIED" not in text and "TO_REPLY" not in text:
+                raise
+    return await send_fn(**kwargs)
+
+
+async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False, caption: str | None = None, reply_to_message_id: int | None = None):
+    """Sends a single media file using the designated client, passing thumbs to document uploads too.
+
+    When *reply_to_message_id* is set (the user's original link message), the
+    media message quote-replies to it so chat context stays attached to the
+    request that produced the file.
+    """
     from utils.downloader import probe_video_dimensions
 
     file_size = os.path.getsize(file_path)
@@ -24,7 +51,9 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
     client = premium_client if use_premium else bot_client
 
     if force_document:
-        return await client.send_document(
+        return await send_reply_safe(
+            client.send_document,
+            reply_to_message_id,
             chat_id=chat_id,
             document=file_path,
             caption=caption or f"📁 **Part:** `{os.path.basename(file_path)}`",
@@ -33,7 +62,9 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         )
 
     if action == 'a':
-        return await client.send_audio(
+        return await send_reply_safe(
+            client.send_audio,
+            reply_to_message_id,
             chat_id=chat_id,
             audio=file_path,
             title=title,
@@ -46,7 +77,9 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
     else:  # action == 'v'
         width, height, parsed_duration = probe_video_dimensions(file_path)
         final_duration = parsed_duration if parsed_duration > 0 else int(duration)
-        return await client.send_video(
+        return await send_reply_safe(
+            client.send_video,
+            reply_to_message_id,
             chat_id=chat_id,
             video=file_path,
             width=width,
@@ -59,7 +92,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         )
 
 
-async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None):
+async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None, reply_to_message_id: int | None = None):
     """On-Demand Sequential Uploader.
 
     Splits the file only if it exceeds the active Telegram ceiling, then streams
@@ -68,6 +101,10 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
 
     When *delete_progress_after* is False the status message is left intact
     (used by the playlist loop, which reuses one rolling message across videos).
+
+    Every uploaded part quote-replies to *reply_to_message_id* (the user's
+    original link message) when provided; DM-relay callers pass None because
+    there is no originating Telegram message to quote.
     """
     from utils.downloader import split_file_generator, split_video_by_size_generator
     from main import progress_bar_handler
@@ -133,6 +170,7 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 progress_fn=upload_progress,
                 force_document=force_document or is_split,
                 caption=caption if part_num == 1 else None,
+                reply_to_message_id=reply_to_message_id,
             )
 
             if part_path != file_path:
