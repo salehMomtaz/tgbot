@@ -528,11 +528,25 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
     files: list[tuple[str, bool]] = []
     try:
         for i, (src, is_video) in enumerate(targets):
-            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+            try:
+                data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] resource {i} download failed: {e} — skipping")
+                continue
+            # Guard against empty / interstitial-HTML payloads. Instagram's CDN
+            # occasionally 200s a dead resource with an empty body or an HTML
+            # error page; Telegram rejects those with [400 MEDIA_EMPTY], which
+            # used to sink the ENTIRE carousel group.
+            head = data[:256].lstrip().lower()
+            if len(data) < 500 or head.startswith(b"<html") or head.startswith(b"<!doctype"):
+                logger.warning(f"[DirectForward/IG] resource {i} invalid payload ({len(data)}B) — skipping")
+                continue
             path = f"cache/df_native_{pk}_{i}{'.mp4' if is_video else '.jpg'}"
             with open(path, "wb") as f:
                 f.write(data)
             files.append((path, is_video))
+        if not files:
+            raise RuntimeError(f"IG media {pk}: all {len(targets)} resource(s) were empty/invalid")
         if len(files) == 1:
             path, is_video = files[0]
             if is_video:
@@ -547,7 +561,27 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                  else InputMediaPhoto(p, caption=caption if j == 0 else ""))
                 for j, (p, is_video) in enumerate(files)
             ]
-            await bot_client.send_media_group(chat_id=chat_id, media=group)
+            try:
+                await bot_client.send_media_group(chat_id=chat_id, media=group)
+            except Exception:
+                # One corrupt item still inside the group can fail the whole
+                # call (MEDIA_EMPTY). Send the survivors individually instead
+                # of dropping the post entirely.
+                sent_any = False
+                for j, (p, is_video) in enumerate(files):
+                    try:
+                        if is_video:
+                            await bot_client.send_video(chat_id=chat_id, video=p,
+                                                        caption=caption if not sent_any else "",
+                                                        supports_streaming=True)
+                        else:
+                            await bot_client.send_photo(chat_id=chat_id, photo=p,
+                                                        caption=caption if not sent_any else "")
+                        sent_any = True
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/IG] item {j} individual send failed: {e}")
+                if not sent_any:
+                    raise
         await _send_followups(bot_client, chat_id, followups)
         logger.info(f"[DirectForward/IG] ✅ native relayed {url} (media_type={mt}, {len(files)} file(s))")
         return True
