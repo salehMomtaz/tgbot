@@ -261,6 +261,25 @@ if [[ -f "$PROJECT_DIR/deploy/tgbot.service" ]]; then
     note "systemd-unit:/etc/systemd/system/tgbot.service"
 fi
 
+# 6c. Render + install the standalone system-monitor unit (no MemoryMax
+# placeholder — the monitor is tiny). Runs independently of the bot so system
+# reports keep flowing even when tgbot is down. Like tgbot.service, it is
+# installed but NOT auto-enabled; enable it with:
+#     sudo systemctl enable --now tgbot-monitor
+if [[ -f "$PROJECT_DIR/deploy/tgbot-monitor.service" ]]; then
+    log "Rendering system-monitor unit → /etc/systemd/system/tgbot-monitor.service"
+    TMP_MON="$(mktemp)"
+    sed \
+        -e "s|__USER__|${REAL_USER}|g" \
+        -e "s|__GROUP__|${REAL_GROUP}|g" \
+        -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
+        "$PROJECT_DIR/deploy/tgbot-monitor.service" > "$TMP_MON"
+    $SUDO cp "$TMP_MON" /etc/systemd/system/tgbot-monitor.service
+    rm -f "$TMP_MON"
+    $SUDO systemctl daemon-reload
+    note "systemd-unit:/etc/systemd/system/tgbot-monitor.service"
+fi
+
 # ---------------------------------------------------------------------------
 # Seed a .env from .env.example if none exists (newbie convenience)
 # ---------------------------------------------------------------------------
@@ -281,18 +300,24 @@ cat >&2 <<EOF
 [install]   • bgutil provider (ref $BGUTIL_REF)   : ok
 [install]   • Swap                                : $(swapon --show --noheadings 2>/dev/null | awk '{print $1}' | paste -sd, - || echo n/a)
 [install]   • systemd unit                        : installed (not started)
+[install]   • system-monitor unit                 : installed (not started)
 
 Next steps:
   1. Edit .env with your real API_ID / API_HASH / BOT_TOKEN / SYSTEM_CREATOR_ID
-     (and LOG_CHANNEL_ID / PREMIUM_STRING_SESSION if you use them).
+     and LOG_CHANNEL_ID (now REQUIRED — the bot refuses to start without it).
   2. Upload YouTube cookies via the bot (Admin Console → Cookie Jars → YouTube).
   3. Start the bot as a managed service (recommended, survives reboot + auto-restart):
        sudo systemctl enable --now tgbot
      If you were running it in tmux, stop that first (two polling instances conflict):
        tmux kill-session -t tgbot
      (Ad-hoc alternative without systemd: tmux new-session -s tgbot './run.sh')
+  4. Start the standalone system monitor (keeps reporting even if the bot is down):
+       sudo systemctl enable --now tgbot-monitor
+     (It also auto-spawns when the bot starts, so this is optional — but enabling
+     the unit makes it survive reboots unconditionally.)
 
 Logs:
        sudo journalctl -u tgbot -f        # live service log
        tail -f logs/bot.log               # the bot's own timestamped log
+       sudo journalctl -u tgbot-monitor -f   # live system-monitor log
 EOF

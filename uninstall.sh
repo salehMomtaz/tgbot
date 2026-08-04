@@ -65,6 +65,16 @@ if [[ -f /etc/systemd/system/tgbot.service ]]; then
     fi
 fi
 
+# 1c. Remove the standalone system-monitor unit (if installed).
+if [[ -f /etc/systemd/system/tgbot-monitor.service ]]; then
+    if ask "Stop, disable, and remove the tgbot-monitor systemd service?"; then
+        $SUDO systemctl disable --now tgbot-monitor 2>/dev/null || true
+        $SUDO rm -f /etc/systemd/system/tgbot-monitor.service
+        $SUDO systemctl daemon-reload
+        log "Removed tgbot-monitor systemd unit."
+    fi
+fi
+
 # 2. bgutil-provider/
 if [[ -d "bgutil-provider" ]]; then
     if ask "Remove bgutil-provider/ (cloned PO-token provider, ~200 MB)?"; then
