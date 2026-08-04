@@ -348,6 +348,19 @@ Don't port it to Go.
 
 ## Gotchas
 
+- **Entrypoint scripts must stay executable — systemd calls `run.sh` directly.**
+  `deploy/tgbot.service` has `ExecStart=__PROJECT_DIR__/run.sh`, so `run.sh`
+  (plus `install.sh`/`uninstall.sh`, invoked as `./…`) MUST keep the exec bit.
+  If `git` ever checks them out as `100644` (e.g. the mode was committed wrong,
+  or a `git pull` resets a working copy), the unit crash-loops with
+  `status=203/EXEC` ("executable not found") and `NRestarts` climbs every ~5 s
+  — the bot goes totally silent. Symptom fingerprint: `systemctl status tgbot`
+  shows `activating (auto-restart)` + `203/EXEC`, while `logs/bot.log` ends
+  cleanly. These scripts are committed as `100755`; `install.sh` also runs
+  `chmod +x` on them every invocation. If you re-add a script or a pull strips
+  the bit, fix the git index with `git update-index --chmod=+x <file>` and
+  commit the mode change — don't just chmod the VPS copy (it won't survive the
+  next pull).
 - **TikTok shortlinks are pre-resolved by us, not yt-dlp.** `vt./vm./vn.tiktok.com/<code>` expands to the canonical `tiktok.com/@user/video/<id>` inside `normalize_url` (browser UA + 1 h TTL cache) because yt-dlp's own short-link extractor uses a bare `facebookexternalhit/1.1` HEAD and hits TikTok's stochastic anti-bot interstitial — surfacing as "The site changed its layout or the URL is malformed". `curl-cffi` must stay installed for yt-dlp's proof-of-work webpage solver; TikTok extractions/downloads also get one extra no-auth retry. Don't feed shortlinks straight to yt-dlp again.
 - **pyrogram `Peer id invalid`** is monkey-patched in `main.py`
   (`get_peer_type_patched`) and the log channel peer is resolved at startup

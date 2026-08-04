@@ -51,3 +51,7 @@ code or the git log alone. Last updated: 2026-08-04.
 - [Go feasibility](go-feasibility.md) — analysis of Go as a complementary
   language: full rewrite rejected (yt-dlp is irreplaceable); the standalone
   system monitor is the one recommended Go sidecar — **implemented 2026-08-04**.
+- [Silent 203/EXEC outage](tgbot-silent-203-exec.md) — `run.sh` lost its exec
+  bit (tracked `100644` in git, reset by a pull) so systemd crash-looped with
+  `status=203/EXEC` while `bot.log` stayed clean; fixed the git mode,
+  hardened `install.sh`, documented the fingerprint.
