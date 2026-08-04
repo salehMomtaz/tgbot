@@ -43,6 +43,12 @@ import html
 import shutil
 import requests
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # self-contained: reads .env even when run standalone
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Configuration (all overridable via .env)
 # ---------------------------------------------------------------------------
