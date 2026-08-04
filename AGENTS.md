@@ -221,22 +221,36 @@ have to rediscover them.
 
  15. **System monitor is a static Go binary, independent of the bot.** The
      health monitor lives in `cmd/tgbot-monitor/` (Go, stdlib-only — no
-     psutil/netdata/glances) and is built by install.sh into
-     `build/tgbot-monitor`; `utils/system_monitor.py` is only a thin spawner
-     (`spawn_detached_monitor` / `is_running`) so main.py can launch it. It
-     reads `/proc` and posts to Telegram via the raw Bot HTTP API (NOT
-     pyrogram), and is meant to outlive the bot — so it keeps sending
-     `#system` reports and 80% warnings (CPU/RAM/disk `SYSMON_WARN_PCT`) even
-     when `tgbot` is down. It runs as `deploy/tgbot-monitor.service` (systemd
-     template, `ExecStart` = the Go binary, installed but not auto-enabled) or
-     a detached bot spawn. The binary writes `system_monitor.pid` on start and
-     removes it on exit; the Python spawner's `is_running()` dedupes via that
-     pidfile + a `/proc` cmdline scan so the two never stack. Both the report
-     and the warning carry the VPS local date-time. The log channel is
-     MANDATORY for both the bot and the monitor (`LOG_CHANNEL_ID`, `main.py`
-     refuses to start without it). Go port rationale:
-     `docs/go-feasibility.md`; full design: `docs/memory/tgbot-system-monitor.md`.
-     Tests: `cd cmd/tgbot-monitor && go test ./...`.
+     psutil/netdata/glances). It ships as **prebuilt static binaries**
+     (`prebuilt/tgbot-monitor-linux-amd64` and `-arm64`, built with
+     `CGO_ENABLED=0`) and install.sh picks the one matching `uname -m`
+     (`x86_64`→amd64, `aarch64`→arm64) and copies it to `build/tgbot-monitor`;
+     only if the prebuilt is missing does install.sh lazily apt-install
+     `golang-go` and `go build` from source. `build/` is gitignored; the
+     prebuilt dir is committed. When you change `cmd/tgbot-monitor/`, you MUST
+     rebuild BOTH prebuilt binaries (on any box with Go: `GOOS=linux
+     GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o
+     prebuilt/tgbot-monitor-linux-amd64 .` and the same for `arm64`) or a
+     fresh install will silently ship the stale binary. `utils/system_monitor.py`
+     is only a thin spawner (`spawn_detached_monitor` / `is_running`) so
+     main.py can launch it. It reads `/proc` and posts to Telegram via the raw
+     Bot HTTP API (NOT pyrogram), and is meant to outlive the bot — so it keeps
+     sending `#system` reports and 80% warnings (CPU/RAM/disk `SYSMON_WARN_PCT`)
+     even when `tgbot` is down. It runs as `deploy/tgbot-monitor.service`
+     (systemd template, `ExecStart` = the Go binary, installed but not
+     auto-enabled) or a detached bot spawn. The binary writes
+     `system_monitor.pid` on start and removes it on exit; the Python spawner's
+     `is_running()` dedupes via that pidfile + a `/proc` cmdline scan so the
+     two never stack. Reports/warnings are sent as **rich messages**
+     (`sendRichMessage`, rich HTML with a metrics table + `<ol>` top lists)
+     with an automatic `sendMessage` fallback — the plain fallback text is
+     byte-compatible with the pre-rich format, so the channel renders
+     identically on any Bot API version. Both the report and the warning carry
+     the VPS local date-time. The log channel is MANDATORY for both the bot and
+     the monitor (`LOG_CHANNEL_ID`, `main.py` refuses to start without it). Go
+     port rationale: `docs/go-feasibility.md`; full design:
+     `docs/memory/tgbot-system-monitor.md`. Tests:
+     `cd cmd/tgbot-monitor && go test ./...`.
 
 16. **User-facing "analyzing" status messages stream via `sendRichMessageDraft`.**
     `utils/rich_stream.py::RichStream` (Bot API 10.1+ streaming drafts) replaces
@@ -253,7 +267,9 @@ have to rediscover them.
       messages** (they need `edit_text` by message id; a draft has no id and
       expires in 30 s). Do not widen streaming to long-running jobs.
     - Only the downloader's private-chat flows use it; the Go monitor's
-      `#system` reports and the log channel keep plain formatting.
+      `#system` reports and the log-channel handler send **rich messages**
+      (`sendRichMessage`) with a plain `sendMessage` fallback (invariant #15),
+      not streaming drafts.
     - Ephemeral Messages (`receiver_user_id`, `callback_query_id`, Bot API
       10.2) are a **group-chat** feature; this bot is private-only, so they are
       intentionally not used. Don't add them for private chats.

@@ -92,6 +92,16 @@ test suite (`go test`).
   `SYSMON_WARN_PCT`, `SYSMON_WARN_SECONDS`, `SYSMON_TOP_N`,
   `SYSMON_HISTORY_SAMPLES`, `SYSMON_DISK_PATHS` (all in `config.py` +
   `.env.example`; the Go binary reads the same names).
+- The repo ships **prebuilt static binaries** (`prebuilt/tgbot-monitor-linux-
+  amd64` / `-arm64`); install.sh copies the one matching `uname -m` to
+  `build/tgbot-monitor` and only lazily apt-installs `golang-go` + builds from
+  source if the prebuilt is missing. When you change `cmd/tgbot-monitor/`,
+  rebuild BOTH prebuilts (`GOOS=linux GOARCH=amd64|arm64 CGO_ENABLED=0 go
+  build -trimpath -ldflags="-s -w"`) or fresh installs ship the stale binary.
+- Reports/warnings go out as **rich messages** (`sendRichMessage`, `rich_message:
+  {"html": ...}`) with a metrics `<table>` and `<ol>` top lists; the goroutine
+  falls back to `sendMessage` with the plain HTML if the rich endpoint is
+  rejected, so the channel works on any Bot API version.
 - Build manually: `cd cmd/tgbot-monitor && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../build/tgbot-monitor .`
 - Tests: `cd cmd/tgbot-monitor && go test ./...` (this is the project's one
   test suite — the Python side still has none).

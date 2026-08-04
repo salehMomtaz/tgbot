@@ -49,6 +49,7 @@ class TelegramChannelHandler(logging.Handler):
         self.bot_token = bot_token
         self.channel_id = channel_id
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self.api_rich_url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
 
     def emit(self, record):
         try:
@@ -73,10 +74,21 @@ class TelegramChannelHandler(logging.Handler):
             if len(escaped_entry) > 3500:
                 escaped_entry = escaped_entry[:3500] + "\n... [TRUNCATED] ..."
 
-            payload = {
+            # Rich message (sendRichMessage) with a sendMessage fallback. The
+            # plain text is kept byte-identical to the pre-rich format so log
+            # channels render the same on any Bot API version.
+            rich_html = (
+                f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n"
+                f"<pre>{escaped_entry}</pre>"
+            )
+            payload_rich = {
                 "chat_id": self.channel_id,
-                "text": f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n<pre>{escaped_entry}</pre>",
-                "parse_mode": "HTML"
+                "rich_message": {"html": rich_html},
+            }
+            payload_plain = {
+                "chat_id": self.channel_id,
+                "text": rich_html,
+                "parse_mode": "HTML",
             }
 
             # Define target post execution
@@ -87,7 +99,10 @@ class TelegramChannelHandler(logging.Handler):
                         {"http": config.REQUESTS_PROXY, "https": config.REQUESTS_PROXY}
                         if getattr(config, "REQUESTS_PROXY", None) else None
                     )
-                    requests.post(self.api_url, json=payload, timeout=5, proxies=proxies)
+                    resp = requests.post(self.api_rich_url, json=payload_rich, timeout=5, proxies=proxies)
+                    ok = resp.status_code == 200 and resp.json().get("ok", False)
+                    if not ok:
+                        requests.post(self.api_url, json=payload_plain, timeout=5, proxies=proxies)
                 except Exception:
                     pass
 

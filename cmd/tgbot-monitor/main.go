@@ -18,39 +18,66 @@ import (
 // sampler never blocks.
 // ---------------------------------------------------------------------------
 
-func sendTelegram(cfg config, text string) {
+func sendTelegram(cfg config, richText, plainText string) {
 	if cfg.botToken == "" || cfg.logChannelID == 0 {
 		return
 	}
-	payload := map[string]interface{}{
+	richPayload := map[string]interface{}{
+		"chat_id":      cfg.logChannelID,
+		"rich_message": map[string]interface{}{"html": richText[:minInt(len(richText), 32000)]},
+	}
+	fallbackPayload := map[string]interface{}{
 		"chat_id":    cfg.logChannelID,
-		"text":       text[:minInt(len(text), 4000)],
+		"text":       plainText[:minInt(len(plainText), 4000)],
 		"parse_mode": "HTML",
 	}
+
+	// Try the rich endpoint first; the plain sendMessage is the fallback for
+	// Bot API versions that don't support sendRichMessage yet.
+	go func() {
+		richOK := postJSON(cfg, "sendRichMessage", richPayload)
+		if !richOK {
+			postJSON(cfg, "sendMessage", fallbackPayload)
+		}
+	}()
+}
+
+// postJSON POSTs payload to method on the Bot HTTP API and reports whether the
+// call succeeded. A non-2xx status or a JSON body with ok:false counts as
+// failure (drives the rich→plain fallback).
+func postJSON(cfg config, method string, payload map[string]interface{}) bool {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return false
 	}
-	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.botToken)
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/%s", cfg.botToken, method)
 
-	go func() {
-		req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
-		if err != nil {
-			return
+	req, err := http.NewRequest("POST", urlStr, bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 8 * time.Second}
+	if cfg.requestsProxy != "" {
+		if u, err := url.Parse(cfg.requestsProxy); err == nil {
+			client.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
 		}
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 8 * time.Second}
-		if cfg.requestsProxy != "" {
-			if u, err := url.Parse(cfg.requestsProxy); err == nil {
-				client.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
-			}
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return
-		}
-		resp.Body.Close()
-	}()
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false
+	}
+	return out.OK
 }
 
 func minInt(a, b int) int {
@@ -133,7 +160,7 @@ func run(cfg config) int {
 			if !warnActive || time.Since(lastWarnTs) >= time.Duration(cfg.warnSeconds)*time.Second {
 				text := formatWarning(cfg, samples, s)
 				if text != "" {
-					sendTelegram(cfg, text)
+					sendTelegram(cfg, formatWarningRich(cfg, samples, s), text)
 					fmt.Printf("[system_monitor] warning sent (%s)\n", secondLine(text))
 				}
 				lastWarnTs = time.Now()
@@ -145,7 +172,7 @@ func run(cfg config) int {
 
 		// --- Periodic report every REPORT_EVERY_SAMPLES samples. ---
 		if len(samples)%cfg.reportEvery == 0 && (len(samples)-1) != lastReportIdx {
-			sendTelegram(cfg, formatReport(cfg, samples, s))
+			sendTelegram(cfg, formatReportRich(cfg, samples, s), formatReport(cfg, samples, s))
 			lastReportIdx = len(samples) - 1
 			fmt.Printf("[system_monitor] report sent (%d samples)\n", len(samples))
 		}
@@ -186,7 +213,7 @@ func splitLines(s string) []string {
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println("tgbot-monitor 1.0.0 (Go)")
+		fmt.Println("tgbot-monitor 1.1.0 (Go)")
 		return
 	}
 	cfg := loadConfig()

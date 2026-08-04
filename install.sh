@@ -15,10 +15,12 @@
 #   6. A 2 GB swap file — created if none exists, or grown in place if an
 #      existing one is smaller (e.g. a VPS that shipped with 1 GB). This gives
 #      a 1 GB VPS headroom to run Deno + canvas + yt-dlp + ffmpeg without OOM.
-#   7. The Go toolchain (apt golang-go) + a build of the standalone system
-#      monitor (cmd/tgbot-monitor) into build/tgbot-monitor. The monitor is the
-#      one component written in Go (see docs/go-feasibility.md); everything
-#      else is Python.
+#   7. The system monitor (cmd/tgbot-monitor → build/tgbot-monitor). Two
+#      prebuilt static binaries ship with the repo (prebuilt/tgbot-monitor-
+#      linux-amd64 / -arm64, CGO_ENABLED=0) so a fresh install needs no Go
+#      toolchain: install.sh copies the one matching `uname -m`. Only if the
+#      prebuilt is missing does it lazily apt-install golang-go and build from
+#      source. Everything else in the project is Python.
 #
 # It is safe to re-run: every step checks for its target first and skips when
 # already satisfied. A record of what it changed is written to
@@ -76,9 +78,10 @@ dpkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "inst
 # ---------------------------------------------------------------------------
 # 1+2. apt packages (system + canvas build libs)
 # ---------------------------------------------------------------------------
-# golang-go provides the toolchain for building the standalone system monitor
-# (cmd/tgbot-monitor → build/tgbot-monitor).
-SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates golang-go)
+# golang-go is NOT in SYSTEM_PKGS: the monitor ships as prebuilt binaries
+# (prebuilt/tgbot-monitor-linux-amd64 / -arm64). Go is installed lazily only
+# if a prebuilt is missing and a source build is needed (see section 5b).
+SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates)
 CANVAS_PKGS=(build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev)
 
 missing=()
@@ -189,24 +192,54 @@ log "(First run compiles native libs and can take a few minutes on a small VPS.)
          ( cd bgutil-provider/server && deno install --allow-scripts ); }
 
 # ---------------------------------------------------------------------------
-# 5b. Build the standalone system monitor (Go) → build/tgbot-monitor
+# 5b. Install the standalone system monitor (Go) → build/tgbot-monitor
 # ---------------------------------------------------------------------------
 # The monitor is the project's one Go component (docs/go-feasibility.md). It is
-# a static stdlib-only binary; `go build` here bakes the current source into a
-# self-contained executable the systemd unit runs directly.
-log "Building system monitor (cmd/tgbot-monitor) → build/tgbot-monitor ..."
-if ! have go; then
-    warn "go not found after apt step — system monitor will not be built."
-    warn "The bot still runs; you lose the #system reports/80% warnings."
-else
-    mkdir -p build
-    ( cd "$PROJECT_DIR/cmd/tgbot-monitor" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$PROJECT_DIR/build/tgbot-monitor" . ) \
-        || { warn "'go build' failed — system monitor will not be built."; \
-             warn "Check the build output above."; }
-    if [[ -x "$PROJECT_DIR/build/tgbot-monitor" ]]; then
-        log "System monitor built: $("$PROJECT_DIR/build/tgbot-monitor" --version 2>/dev/null || echo 'binary present')"
-        note "gobin:$PROJECT_DIR/build/tgbot-monitor"
+# a static stdlib-only binary. Two prebuilt static binaries ship with the repo
+# (prebuilt/tgbot-monitor-linux-amd64 / -arm64, built with CGO_ENABLED=0), so
+# a fresh install doesn't need the Go toolchain at all: we pick the binary for
+# the current machine's arch and copy it. If the arch is unexpected or the
+# prebuilt is missing (e.g. someone deleted it), we fall back to `go build`
+# from source. Either way the result lands at build/tgbot-monitor and is
+# byte-identical for the same source/arch.
+log "Installing system monitor (cmd/tgbot-monitor) → build/tgbot-monitor ..."
+mkdir -p build
+MONITOR_ARCH="$(uname -m)"
+PREBUILT_SRC=""
+case "$MONITOR_ARCH" in
+    x86_64|amd64)      PREBUILT_SRC="$PROJECT_DIR/prebuilt/tgbot-monitor-linux-amd64"; MONITOR_ARCH="amd64" ;;
+    aarch64|arm64)     PREBUILT_SRC="$PROJECT_DIR/prebuilt/tgbot-monitor-linux-arm64"; MONITOR_ARCH="arm64" ;;
+    *)                 MONITOR_ARCH="unknown" ;;
+esac
+
+if [[ -f "$PREBUILT_SRC" && -x "$PREBUILT_SRC" ]]; then
+    if cp "$PREBUILT_SRC" "$PROJECT_DIR/build/tgbot-monitor" && chmod +x "$PROJECT_DIR/build/tgbot-monitor"; then
+        log "System monitor installed (prebuilt linux/$MONITOR_ARCH)"
+    else
+        warn "prebuilt copy failed — falling back to source build."
+        PREBUILT_SRC=""
     fi
+else
+    warn "no prebuilt binary for arch '$MONITOR_ARCH' — falling back to source build."
+    warn "(expected prebuilt/tgbot-monitor-linux-\$MONITOR_ARCH; source build needs the Go toolchain.)"
+fi
+
+if [[ -z "$PREBUILT_SRC" ]]; then
+    if ! have go; then
+        warn "no prebuilt for arch and go not found — lazily installing golang-go."
+        $SUDO apt-get update -qq >/dev/null 2>&1 || true
+        $SUDO apt-get install -y golang-go >/dev/null 2>&1 \
+            || warn "golang-go install failed — system monitor will not be built."
+    fi
+    if have go; then
+        ( cd "$PROJECT_DIR/cmd/tgbot-monitor" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$PROJECT_DIR/build/tgbot-monitor" . ) \
+            || { warn "'go build' failed — system monitor will not be built."; \
+                 warn "Check the build output above."; }
+    fi
+fi
+if [[ -x "$PROJECT_DIR/build/tgbot-monitor" ]]; then
+    log "System monitor ready: $("$PROJECT_DIR/build/tgbot-monitor" --version 2>/dev/null || echo 'binary present')"
+    note "gobin:$PROJECT_DIR/build/tgbot-monitor"
 fi
 
 # ---------------------------------------------------------------------------
