@@ -332,8 +332,10 @@ Two streams, both useful:
 
 - **Service log** (stdout/stderr): `sudo journalctl -u tgbot -f`
 - **Bot's own log** (timestamped, rotated at 5 MB × 3): `tail -f logs/bot.log`
-- Optional **Telegram log channel**: set `LOG_CHANNEL_ID` in `.env` (create a
-  private channel, add the bot as admin). All of the above mirror there too.
+- **Telegram log channel** (required): set `LOG_CHANNEL_ID` in `.env` (create a
+  private channel, add the bot as admin — the bot refuses to start without it).
+  All of the above mirror there too, and the standalone system monitor posts
+  its `#system` reports and 80% warnings to the same channel.
 
 ---
 

@@ -20,7 +20,7 @@ is the target — if your provider offers it, pick it.
 6. [Run the installer](#6-run-the-installer)
 7. [Fill in your `.env` file](#7-fill-in-your-env-file)
 8. [Optional: 4 GB uploads with a Premium session](#8-optional-4-gb-uploads-with-a-premium-session)
-9. [Optional: a private log channel](#9-optional-a-private-log-channel)
+9. [A private log channel (REQUIRED)](#9-a-private-log-channel-required)
 10. [Get YouTube / Instagram / TikTok cookies](#10-get-youtube--instagram--tiktok-cookies)
 11. [Start the bot](#11-start-the-bot)
 12. [Use the bot](#12-use-the-bot)
@@ -89,7 +89,7 @@ These come from Telegram's developer site, not from an app.
 > ⚠️ Use **your own** API ID/Hash, never one copied from a tutorial or someone
 > else — shared keys get rate-limited or banned by Telegram.
 
-### 2d. (Optional) Log channel ID — see [section 9](#9-optional-a-private-log-channel).
+### 2d. (Required) Log channel ID — see [section 9](#9-a-private-log-channel-required).
 
 ---
 
@@ -210,11 +210,11 @@ SYSTEM_CREATOR_ID=987654321                  ← your numeric user ID
 
 **Save and exit nano:** press `Ctrl+O`, then `Enter`, then `Ctrl+X`.
 
-These four are the only **required** values. Below them are optional settings.
-Read the comments; leave anything you don't understand at its default. The two
-most common extras:
+These five are the only **required** values (the fifth, `LOG_CHANNEL_ID`, is set
+up in [section 9](#9-a-private-log-channel-required)). Below them are optional
+settings. Read the comments; leave anything you don't understand at its default.
+The most common extra:
 
-- **`LOG_CHANNEL_ID`** — see [section 9](#9-optional-a-private-log-channel).
 - **`DOMAIN`** — only matters if you use the streaming-link feature
   ([section 14](#14-if-you-want-streaming-links-open-port-8080)). Set it to
   `http://YOUR_VPS_IP:8080` (replace with your real IP) for now.
@@ -257,10 +257,13 @@ If you don't have Premium or don't care about 4 GB files, **leave
 
 ---
 
-## 9. Optional: a private log channel
+## 9. A private log channel (REQUIRED)
 
-The bot can stream its own logs to a private Telegram channel so you can watch it
-from your phone. Very handy. To set it up:
+The bot streams its own logs to a private Telegram channel so you can watch it
+from your phone. It is also where the standalone system monitor posts its
+`#system` reports and 80% resource warnings. **The bot refuses to start without
+it** (`LOG_CHANNEL_ID` must be a non-zero channel ID) — it is no longer
+optional. To set it up:
 
 1. In Telegram, create a **new private channel** (not a group).
 2. Open the channel → **Manage Channel → Administrators → Add Administrator** →
@@ -273,8 +276,8 @@ from your phone. Very handy. To set it up:
    LOG_CHANNEL_ID=-1001234567890
    ```
 
-Skip this if you don't want it — logs are also written to `logs/bot.log` on the
-VPS regardless.
+Without it the bot exits immediately with `FATAL: LOG_CHANNEL_ID is required`.
+Logs are also written to `logs/bot.log` on the VPS regardless.
 
 ---
 
@@ -422,6 +425,19 @@ the first run only primes the cursor (backlog is skipped). Full details:
 | Stop | `sudo systemctl stop tgbot` |
 | Start again | `sudo systemctl start tgbot` |
 | Disable autostart on boot | `sudo systemctl disable tgbot` |
+
+**Standalone system monitor** (optional, recommended): the bot also installs a
+`tgbot-monitor` systemd unit that posts `#system` reports and 80% CPU/RAM/disk
+warnings to your log channel **even when the bot is down**. Enable it once
+(installed but not auto-enabled by design):
+
+```
+sudo systemctl enable --now tgbot-monitor
+sudo journalctl -u tgbot-monitor -f     # its live log
+```
+
+If you skip this, the bot still spawns a detached monitor on startup — the
+systemd unit just makes it survive reboots unconditionally.
 
 **Alternative without systemd — run in tmux** (handy for debugging; the bot dies
 when the VPS reboots unless you re-launch):

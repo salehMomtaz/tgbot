@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-08-03.
+code or the git log alone. Last updated: 2026-08-04.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -42,3 +42,10 @@ code or the git log alone. Last updated: 2026-08-03.
   poller got the account flagged; jittered ≥several-minute cadence,
   activity-watermark zero-idle-cost polling, stable session/device, optional
   single residential proxy, and 3–5 h checkpoint freezes.
+- [System monitor](tgbot-system-monitor.md) — a /proc-only, zero-dep standalone
+  monitor that keeps sending `#system` reports + 80% warnings even when the bot
+  is down; runs as `tgbot-monitor.service` (systemd) or a detached bot spawn;
+  `is_running()` dedupes via pidfile + /proc scan.
+- [Go feasibility](go-feasibility.md) — analysis of Go as a complementary
+  language: full rewrite rejected (yt-dlp is irreplaceable); the standalone
+  system monitor is the one recommended Go sidecar (memory/fragility win).

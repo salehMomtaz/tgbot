@@ -38,6 +38,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import datetime
 import threading
 import html
 import shutil
@@ -349,8 +350,11 @@ def format_report(samples: list[Sample], current: Sample) -> str:
     avg_mem = _avg(samples, lambda s: s.mem_pct)
     avg_swap = _avg(samples, lambda s: s.swap_pct)
 
+    now_str = datetime.datetime.fromtimestamp(current.ts).strftime("%Y-%m-%d %H:%M:%S")
+
     lines = [
         "📊 <b>SYSTEM REPORT</b>",
+        f"<b>VPS time:</b> <code>{now_str}</code>",
         f"Window: last <b>{window_min:.0f} min</b> ({len(samples)} samples @ {POLL_SECONDS}s) · Uptime {_uptime_str(current.uptime)}",
         "",
         f"<b>CPU</b> now {current.cpu_pct:.1f}% · avg {avg_cpu:.1f}%",
@@ -385,8 +389,11 @@ def format_warning(samples: list[Sample], current: Sample) -> str:
     if not hot:
         return ""
 
+    now_str = datetime.datetime.fromtimestamp(current.ts).strftime("%Y-%m-%d %H:%M:%S")
+
     lines = [
         "🚨 <b>HIGH SYSTEM USAGE</b>",
+        f"<b>VPS time:</b> <code>{now_str}</code>",
         f"Threshold: {WARN_PCT}%. Currently: <b>{', '.join(hot)}</b>",
         f"Load: {current.load1:.2f} / {current.load5:.2f} / {current.load15:.2f}",
         "",

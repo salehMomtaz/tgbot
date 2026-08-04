@@ -33,7 +33,8 @@ have to rediscover them.
 | Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
-| Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` |
+| Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` |
+| Change system monitoring / health reports | `utils/system_monitor.py` (+ `deploy/tgbot-monitor.service`) |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) |
 
 ## Critical invariants (do not break these)
@@ -209,14 +210,26 @@ have to rediscover them.
     watermarks). The worker starts in `main.main_engine()` after the FastAPI
     server; a misconfiguration must never block the bot.
 
-14. **Interactive responses quote the user's link message.** The format
-    keyboard, playlist menus, skip warnings and **every uploaded file part**
-    sent on behalf of a link quote-reply to that link's message
-    (`origin_message_id` is captured into `DOWNLOAD_CACHE` and threaded into
-    `process_split_and_upload(reply_to_message_id=...)`). A deleted origin is
-    tolerated: `send_reply_safe` retries once without the quote. Direct-forward
-    relays pass `None` (no origin message exists). Keep new user-facing sends
-    on the same rule.
+ 14. **Interactive responses quote the user's link message.** The format
+     keyboard, playlist menus, skip warnings and **every uploaded file part**
+     sent on behalf of a link quote-reply to that link's message
+     (`origin_message_id` is captured into `DOWNLOAD_CACHE` and threaded into
+     `process_split_and_upload(reply_to_message_id=...)`). A deleted origin is
+     tolerated: `send_reply_safe` retries once without the quote. Direct-forward
+     relays pass `None` (no origin message exists). Keep new user-facing sends
+     on the same rule.
+
+ 15. **System monitor runs as its own process, zero deps.** The health monitor
+     (`utils/system_monitor.py`) is `/proc`-only (no psutil/netdata/glances),
+     talks to Telegram via raw Bot API `requests.post` (NOT pyrogram), and is
+     meant to outlive the bot — so it keeps sending `#system` reports and 80%
+     warnings (CPU/RAM/disk `SYSMON_WARN_PCT`) even when `tgbot` is down. It
+     runs as `deploy/tgbot-monitor.service` (systemd template, installed but
+     not auto-enabled) or a detached bot spawn; `is_running()` dedupes via
+     pidfile + a `/proc` python-cmdline scan so the two never stack. Both the
+     report and the warning carry the VPS local date-time. The log channel is
+     MANDATORY for both the bot and the monitor (`LOG_CHANNEL_ID`, `main.py`
+     refuses to start without it). Full design: `docs/memory/tgbot-system-monitor.md`.
 
 
 ## Running / testing
