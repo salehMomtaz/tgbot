@@ -22,12 +22,14 @@ required). Runs as a `systemd` service that survives reboots.
   mints proof-of-origin tokens so YouTube extractions keep working. Cookies + PO
   token, no silent fallback — and a one-click **diagnose** in the Admin Console.
 - **🍪 Protected cookie jars.** Each download gets a disposable snapshot; the live
-  YouTube jar is locked read-only and backed up. Test / Save Backup / Restore
-  Backup from the console. No more yt-dlp corruption.
+  jars are locked read-only and backed up, with session-rotation **write-back**
+  on every successful run (so they don't go stale). Test / Save Backup / Restore
+  Backup / per-site jars from the console.
 - **🛡️ Granular security gate.** Three tiers: System Creator (you), dynamically
   whitelisted users, and everyone else (auto-ignored). Intruders are blacklisted.
 - **🧩 Morphing Admin Console.** An inline-button console to manage users, cookie
-  jars, the PO-token provider, document mode, and the transfer queue.
+  jars, the PO-token provider, document mode, direct-forward pairing, and the
+  transfer queue.
 - **🎚️ Two-column format selector.** Paste a link → video formats on the left,
   audio on the right, sorted by quality, labeled with estimated file sizes.
 - **🎞️ Metadata & thumbnails.** `ffmpeg` square-crops thumbnails (Telegram
@@ -35,12 +37,18 @@ required). Runs as a `systemd` service that survives reboots.
 - **⬆️ Big-file uploads.** On-demand keyframe splitting keeps every part
   independently playable; the Bot API handles 2 GB, a Premium userbot lifts it to
   4 GB. Only one extra segment ever sits on disk.
+- **📨 Direct-forward DM relay.** DM a video, reel, story, tweet share, or link to
+  the bot's own Instagram/X accounts and it relays into a Telegram chat — driven
+  by the platform's private APIs, no third-party services.
 - **🔄 Auto-updating engine.** A background loop upgrades `yt-dlp` to its nightly
   build every 6 hours (preserving the `[default]` extras).
 - **🔗 Zero-disk streaming.** Forward a Telegram file → get an HTTP stream link.
   Files pipe from Telegram to your browser on the fly via a FastAPI bridge.
 - **🩺 Site-aware errors.** Opaque yt-dlp exceptions become clear messages:
   sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
+- **🖥️ Standalone system monitor.** A tiny static Go binary (`cmd/tgbot-monitor/`)
+  posts `#system` reports and 80% CPU/RAM/disk warnings to your log channel —
+  even when the bot itself is down.
 
 ---
 
@@ -52,8 +60,10 @@ required). Runs as a `systemd` service that survives reboots.
    - `API_ID` + `API_HASH` from [my.telegram.org](https://my.telegram.org).
    - `BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
    - Your numeric Telegram user ID (message [@userinfobot](https://t.me/userinfobot)).
+   - A private log channel ID (`LOG_CHANNEL_ID`) — **required**: the bot refuses
+     to start without it.
 3. **That's it.** `install.sh` installs everything else (git, python, ffmpeg,
-   tmux, Deno, the PO-token provider, swap).
+   tmux, Deno, the PO-token provider, Go + the system-monitor binary, swap).
 
 ---
 
@@ -64,17 +74,21 @@ required). Runs as a `systemd` service that survives reboots.
 git clone https://github.com/salehMomtaz/tgbot.git
 cd tgbot
 
-# 2. Provision the server (apt, Deno, venv, PO-token provider, swap, systemd unit)
+# 2. Provision the server (apt, Deno, venv, PO-token provider, Go monitor, swap, systemd units)
 ./install.sh
 
 # 3. Edit .env with your real tokens
 nano .env
-#    → fill in API_ID, API_HASH, BOT_TOKEN, SYSTEM_CREATOR_ID
+#    → fill in API_ID, API_HASH, BOT_TOKEN, SYSTEM_CREATOR_ID, LOG_CHANNEL_ID
 
 # 4. Start as a managed service (survives reboot, auto-restarts on crash)
 sudo systemctl enable --now tgbot
 
-# 5. Watch it come up
+# 5. (Recommended) start the standalone system monitor too — it keeps sending
+#    #system reports + 80% warnings even when the bot is down
+sudo systemctl enable --now tgbot-monitor
+
+# 6. Watch it come up
 sudo journalctl -u tgbot -f
 ```
 
@@ -82,8 +96,8 @@ Then open Telegram, message your bot, send `/start` (or `console`), open the
 **🛠 Admin System Console**, and upload your YouTube cookies
 (**Cookie Jars → YouTube → Replace**). See the
 [VPS setup guide](docs/UBUNTU_VPS_SETUP.md) for the fully-explained version,
-including how to generate a Premium session, set up a log channel, and get
-cookies.
+including how to generate a Premium session, set up the required log channel,
+and get cookies.
 
 ---
 
@@ -97,8 +111,9 @@ inline-button console:
 | 👥 List / ➕ Add / ➖ Remove Users | Manage the whitelist of people who can use the bot. |
 | 🚫 Blacklist Logs | See (and unban) auto-blocked intruders. |
 | 📄 Doc Mode | Toggle sending media as plain documents (no re-encode). |
-| 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. |
+| 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. Add jars for any other site (per-site). |
 | 🔐 PO Token | Start / stop / restart / diagnose the PO-token provider; live status badge. |
+| 📨 Direct-Forward | Pair / unpair the bot's Instagram account for the DM relay. |
 | 💥 Abort Transfer | Cancel everything in the queue and purge the cache. |
 
 ---
@@ -238,7 +253,9 @@ crawlers, or not?** The two branches share almost nothing.
 > exactly the link you pasted. For a genuine direct file (`…/clip.mp4`,
 > `…/archive.zip`, `…/report.pdf`) that's correct and fast. For a media *page*
 > URL on a non-listed host you'll get the HTML page, not the media. You can also
-> append ` | custom-name.ext` to any link to rename the result.
+> append ` | custom-name.ext` to any link to rename the result. (The admin
+> **Cookie Jars** menu can add per-site jars for extra hosts, so the social
+> domain list is extensible without code changes.)
 
 ```mermaid
 flowchart TD
@@ -317,25 +334,53 @@ install a "Get cookies.txt" browser extension, log in to the site, export, and
 **Replace** the jar in the console (paste the text, *or* send a `.txt` file).
 
 The bot protects your jars:
-- The live `ytcookies.txt` is **read-only** so yt-dlp can't corrupt it.
+- Live jars live under `cookies/` (`cookies/youtube/`, `cookies/instagram/`, …),
+  and are **read-only at rest** so yt-dlp can't corrupt them.
 - Each download uses a **snapshot copy** that's auto-purged later.
-- **Save Backup** freezes the current jar to `ytcookies.backup`; **Restore Backup**
-  brings it back. A trashed/empty live jar auto-restores from the backup on boot.
+- On a successful run, rotated session cookies are **merged back** into the live
+  jar (atomic, never deletes keys) — this is what keeps Instagram/Google
+  sessions alive for months instead of dying in days.
+- **Save Backup** freezes the current jar; **Restore Backup** brings it back. A
+  trashed/empty live jar auto-restores from the backup on boot.
 - **Test** runs a real extraction against a public video and tells you exactly how
-  many formats YouTube returned (or if the jar is bot-flagged).
+  many formats the site returned (or if the jar is bot-flagged).
+- **Per-site jars:** the Cookie Jars menu can add a jar for any host
+  (`cookies/ytdlp/<site>.txt`), which the downloader picks up by URL domain.
+
+---
+
+## 📨 Direct-Forward (DM relay)
+
+You can DM media to the bot's **own Instagram and X accounts** and have it
+delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
+
+- Send photos, videos, reels, story shares, tweet shares, or plain links from
+  your personal account (whitelist or pairing handshake) to the bot's account.
+- The bot relays them into your Telegram chat; links go through the normal
+  yt-dlp pipeline (with cookie jars), enqueued behind interactive downloads.
+- Instagram uses `instagrapi` and X uses `twikit` — the platforms' own private
+  APIs, no third-party services. The session is persisted so deleting the wrong
+  file is the #1 way to trigger a checkpoint challenge.
+- Configure via `.env` (`DIRECT_FORWARD_*`, see
+  [`docs/DIRECT_FORWARD_SETUP.md`](docs/DIRECT_FORWARD_SETUP.md)); unconfigured,
+  the feature self-disables. Pair / unpair the Instagram account from the Admin
+  Console → 📨 Direct-Forward.
 
 ---
 
 ## 📜 Logs
 
-Two streams, both useful:
+Three streams, all useful:
 
 - **Service log** (stdout/stderr): `sudo journalctl -u tgbot -f`
 - **Bot's own log** (timestamped, rotated at 5 MB × 3): `tail -f logs/bot.log`
 - **Telegram log channel** (required): set `LOG_CHANNEL_ID` in `.env` (create a
   private channel, add the bot as admin — the bot refuses to start without it).
-  All of the above mirror there too, and the standalone system monitor posts
-  its `#system` reports and 80% warnings to the same channel.
+  All of the above mirror there too.
+- **System monitor**: the standalone Go binary (`tgbot-monitor`) posts a
+  `#system` report every 15 min and 80% CPU/RAM/disk warnings to the same
+  channel — even when the bot is down. Its own log:
+  `sudo journalctl -u tgbot-monitor -f`.
 
 ---
 
@@ -392,3 +437,7 @@ reachable from the internet.
 - **Beginner VPS guide:** [`docs/UBUNTU_VPS_SETUP.md`](docs/UBUNTU_VPS_SETUP.md)
 - **Architecture deep-dive:** [`blueprint.md`](blueprint.md)
 - **Contributor / agent notes:** [`AGENTS.md`](AGENTS.md)
+- **Direct-forward (DM relay) setup:** [`docs/DIRECT_FORWARD_SETUP.md`](docs/DIRECT_FORWARD_SETUP.md)
+- **Cookie strategy:** [`docs/cookie-strategy.md`](docs/cookie-strategy.md)
+- **Go feasibility (why the monitor is Go):** [`docs/go-feasibility.md`](docs/go-feasibility.md)
+- **Agent memory notes:** [`docs/memory/`](docs/memory/)

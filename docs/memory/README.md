@@ -42,10 +42,12 @@ code or the git log alone. Last updated: 2026-08-04.
   poller got the account flagged; jittered ≥several-minute cadence,
   activity-watermark zero-idle-cost polling, stable session/device, optional
   single residential proxy, and 3–5 h checkpoint freezes.
-- [System monitor](tgbot-system-monitor.md) — a /proc-only, zero-dep standalone
-  monitor that keeps sending `#system` reports + 80% warnings even when the bot
-  is down; runs as `tgbot-monitor.service` (systemd) or a detached bot spawn;
-  `is_running()` dedupes via pidfile + /proc scan.
+- [System monitor](tgbot-system-monitor.md) — the health monitor is now a
+  static **Go binary** (`cmd/tgbot-monitor/` → `build/tgbot-monitor`, the
+  project's one Go component); a /proc-only, zero-dep process that keeps
+  sending `#system` reports + 80% warnings even when the bot is down; runs as
+  `tgbot-monitor.service` (systemd) or a detached bot spawn; dedup via
+  pidfile + /proc scan shared between Go and Python.
 - [Go feasibility](go-feasibility.md) — analysis of Go as a complementary
   language: full rewrite rejected (yt-dlp is irreplaceable); the standalone
-  system monitor is the one recommended Go sidecar (memory/fragility win).
+  system monitor is the one recommended Go sidecar — **implemented 2026-08-04**.

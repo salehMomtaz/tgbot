@@ -6,6 +6,13 @@
 Go as a *complementary* language — a separate process next to the Python bot —
 NOT a wholesale rewrite.
 
+> **UPDATE (2026-08-04, after this report was approved):** recommendation §3.1
+> was implemented. The system monitor is now a static Go binary at
+> `cmd/tgbot-monitor/` → `build/tgbot-monitor`; `utils/system_monitor.py` is a
+> thin spawner. Output stays byte-identical to the old Python version. See
+> `docs/memory/tgbot-system-monitor.md`. Everything in §3.2–3.5 remains "not
+> recommended" as of this writing.
+
 ---
 
 ## 1. TL;DR

@@ -4,21 +4,26 @@
 # and substitutes the real values for __USER__, __GROUP__, and __PROJECT_DIR__
 # based on the user that ran install.sh. You do NOT need to edit it by hand.
 #
+# The monitor is a STATIC GO BINARY built by install.sh into
+# __PROJECT_DIR__/build/tgbot-monitor (source: cmd/tgbot-monitor/) — see
+# docs/go-feasibility.md for the port rationale. It reads /proc and posts to
+# Telegram via the raw Bot HTTP API, so it needs no venv, no interpreter, and
+# no dependency on pyrogram or the bot's event loop.
+#
 # WHY A SEPARATE UNIT (not a task inside tgbot.service):
 #   The monitor reports system health to the log channel even when the bot is
 #   down. If it lived inside the bot process, a bot crash would take the
 #   monitor down with it — the exact failure mode we're trying to observe.
-#   A separate unit keeps it alive independently of the bot. It talks to
-#   Telegram via the raw Bot HTTP API (like utils.logger), so it has no
-#   dependency on pyrogram or on the bot's event loop.
+#   A separate unit keeps it alive independently of the bot.
 #
 #   main.py also tries to spawn a detached monitor on bot startup
-#   (spawn_detached_monitor, guarded by a pidfile), so even a tmux install
-#   gets a monitor. systemd simply guarantees it survives reboot too.
+#   (utils/system_monitor.py::spawn_detached_monitor, deduped against this
+#   unit via the pidfile the binary writes), so even a tmux install gets a
+#   monitor. systemd simply guarantees it survives reboot too.
 #
-# Resources: the monitor is /proc-parsing only — a few MB RSS and a fraction
-# of a percent of a core at 15s sampling. MemoryMax=256M is generous headroom,
-# not a real working-set cap.
+# Resources: the monitor is a few MB RSS and a fraction of a percent of a core
+# at 15s sampling. MemoryMax=256M is generous headroom, not a real working-set
+# cap (and never use `ulimit -v` — see AGENTS.md invariant #1).
 #
 # HOW TO INSTALL + ENABLE (done for you by ./install.sh):
 #   sudo systemctl enable --now tgbot-monitor
@@ -36,7 +41,7 @@ Type=simple
 User=__USER__
 Group=__GROUP__
 WorkingDirectory=__PROJECT_DIR__
-ExecStart=__PROJECT_DIR__/venv/bin/python -m utils.system_monitor
+ExecStart=__PROJECT_DIR__/build/tgbot-monitor
 
 # The monitor must keep running independently of the bot.
 Restart=always
@@ -45,9 +50,8 @@ RestartSec=10
 # A few MB working set; this is headroom, not a tight cap.
 MemoryMax=256M
 
-# Logs go to journald (journalctl -u tgbot-monitor) and, because the monitor
-# is started with stdout/stderr attached here, nothing else is needed. The
-# monitor additionally writes its own timestamped log via the detach path.
+# Logs go to journald (journalctl -u tgbot-monitor). The binary prints its
+# startup/sample lines to stdout, which lands here.
 StandardOutput=journal
 StandardError=journal
 

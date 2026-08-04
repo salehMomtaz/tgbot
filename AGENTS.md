@@ -34,7 +34,7 @@ have to rediscover them.
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` |
-| Change system monitoring / health reports | `utils/system_monitor.py` (+ `deploy/tgbot-monitor.service`) |
+| Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) |
 
 ## Critical invariants (do not break these)
@@ -219,22 +219,29 @@ have to rediscover them.
      relays pass `None` (no origin message exists). Keep new user-facing sends
      on the same rule.
 
- 15. **System monitor runs as its own process, zero deps.** The health monitor
-     (`utils/system_monitor.py`) is `/proc`-only (no psutil/netdata/glances),
-     talks to Telegram via raw Bot API `requests.post` (NOT pyrogram), and is
-     meant to outlive the bot — so it keeps sending `#system` reports and 80%
-     warnings (CPU/RAM/disk `SYSMON_WARN_PCT`) even when `tgbot` is down. It
-     runs as `deploy/tgbot-monitor.service` (systemd template, installed but
-     not auto-enabled) or a detached bot spawn; `is_running()` dedupes via
-     pidfile + a `/proc` python-cmdline scan so the two never stack. Both the
-     report and the warning carry the VPS local date-time. The log channel is
+ 15. **System monitor is a static Go binary, independent of the bot.** The
+     health monitor lives in `cmd/tgbot-monitor/` (Go, stdlib-only — no
+     psutil/netdata/glances) and is built by install.sh into
+     `build/tgbot-monitor`; `utils/system_monitor.py` is only a thin spawner
+     (`spawn_detached_monitor` / `is_running`) so main.py can launch it. It
+     reads `/proc` and posts to Telegram via the raw Bot HTTP API (NOT
+     pyrogram), and is meant to outlive the bot — so it keeps sending
+     `#system` reports and 80% warnings (CPU/RAM/disk `SYSMON_WARN_PCT`) even
+     when `tgbot` is down. It runs as `deploy/tgbot-monitor.service` (systemd
+     template, `ExecStart` = the Go binary, installed but not auto-enabled) or
+     a detached bot spawn. The binary writes `system_monitor.pid` on start and
+     removes it on exit; the Python spawner's `is_running()` dedupes via that
+     pidfile + a `/proc` cmdline scan so the two never stack. Both the report
+     and the warning carry the VPS local date-time. The log channel is
      MANDATORY for both the bot and the monitor (`LOG_CHANNEL_ID`, `main.py`
-     refuses to start without it). Full design: `docs/memory/tgbot-system-monitor.md`.
+     refuses to start without it). Go port rationale:
+     `docs/go-feasibility.md`; full design: `docs/memory/tgbot-system-monitor.md`.
+     Tests: `cd cmd/tgbot-monitor && go test ./...`.
 
 
 ## Running / testing
 
-There's no test suite. Verify changes with:
+There's no Python test suite. Verify changes with:
 
 ```bash
 # Python syntax for every module
@@ -242,6 +249,9 @@ python3 -m py_compile $(git ls-files '*.py')
 
 # Bash syntax for the scripts
 bash -n install.sh run.sh uninstall.sh
+
+# Go monitor unit tests (the project's one test suite)
+cd cmd/tgbot-monitor && go test ./...
 
 # Local smoke (needs a valid .env) — NOT on a bot that's already polling Telegram
 source venv/bin/activate

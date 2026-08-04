@@ -24,10 +24,14 @@ __pycache__/
 *.pyc
 venv/
 
+# Go build output — produced by install.sh into build/tgbot-monitor
+build/
+
 # Runtime data
 cache/
 logs/
 *.log
+system_monitor.pid
 
 # PO-token provider — cloned by install.sh (~200 MB, not part of this repo)
 bgutil-provider/

@@ -15,6 +15,10 @@
 #   6. A 2 GB swap file — created if none exists, or grown in place if an
 #      existing one is smaller (e.g. a VPS that shipped with 1 GB). This gives
 #      a 1 GB VPS headroom to run Deno + canvas + yt-dlp + ffmpeg without OOM.
+#   7. The Go toolchain (apt golang-go) + a build of the standalone system
+#      monitor (cmd/tgbot-monitor) into build/tgbot-monitor. The monitor is the
+#      one component written in Go (see docs/go-feasibility.md); everything
+#      else is Python.
 #
 # It is safe to re-run: every step checks for its target first and skips when
 # already satisfied. A record of what it changed is written to
@@ -72,7 +76,9 @@ dpkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "inst
 # ---------------------------------------------------------------------------
 # 1+2. apt packages (system + canvas build libs)
 # ---------------------------------------------------------------------------
-SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates)
+# golang-go provides the toolchain for building the standalone system monitor
+# (cmd/tgbot-monitor → build/tgbot-monitor).
+SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates golang-go)
 CANVAS_PKGS=(build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev)
 
 missing=()
@@ -183,6 +189,27 @@ log "(First run compiles native libs and can take a few minutes on a small VPS.)
          ( cd bgutil-provider/server && deno install --allow-scripts ); }
 
 # ---------------------------------------------------------------------------
+# 5b. Build the standalone system monitor (Go) → build/tgbot-monitor
+# ---------------------------------------------------------------------------
+# The monitor is the project's one Go component (docs/go-feasibility.md). It is
+# a static stdlib-only binary; `go build` here bakes the current source into a
+# self-contained executable the systemd unit runs directly.
+log "Building system monitor (cmd/tgbot-monitor) → build/tgbot-monitor ..."
+if ! have go; then
+    warn "go not found after apt step — system monitor will not be built."
+    warn "The bot still runs; you lose the #system reports/80% warnings."
+else
+    mkdir -p build
+    ( cd "$PROJECT_DIR/cmd/tgbot-monitor" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$PROJECT_DIR/build/tgbot-monitor" . ) \
+        || { warn "'go build' failed — system monitor will not be built."; \
+             warn "Check the build output above."; }
+    if [[ -x "$PROJECT_DIR/build/tgbot-monitor" ]]; then
+        log "System monitor built: $("$PROJECT_DIR/build/tgbot-monitor" --version 2>/dev/null || echo 'binary present')"
+        note "gobin:$PROJECT_DIR/build/tgbot-monitor"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Swap — ensure at least 2 GB on a 1 GB VPS (headroom for heavy downloads)
 # ---------------------------------------------------------------------------
 SWAPFILE="/swapfile"
@@ -262,9 +289,10 @@ if [[ -f "$PROJECT_DIR/deploy/tgbot.service" ]]; then
 fi
 
 # 6c. Render + install the standalone system-monitor unit (no MemoryMax
-# placeholder — the monitor is tiny). Runs independently of the bot so system
-# reports keep flowing even when tgbot is down. Like tgbot.service, it is
-# installed but NOT auto-enabled; enable it with:
+# placeholder — the monitor is tiny). Runs the Go binary built in 5b,
+# independently of the bot, so system reports keep flowing even when tgbot is
+# down. Like tgbot.service, it is installed but NOT auto-enabled; enable it
+# with:
 #     sudo systemctl enable --now tgbot-monitor
 if [[ -f "$PROJECT_DIR/deploy/tgbot-monitor.service" ]]; then
     log "Rendering system-monitor unit → /etc/systemd/system/tgbot-monitor.service"
@@ -298,6 +326,7 @@ cat >&2 <<EOF
 [install]   • Deno                                : $(deno --version | head -n1)
 [install]   • Python venv + requirements          : ok
 [install]   • bgutil provider (ref $BGUTIL_REF)   : ok
+[install]   • Go monitor binary                   : $( [[ -x "$PROJECT_DIR/build/tgbot-monitor" ]] && echo ok || echo MISSING )
 [install]   • Swap                                : $(swapon --show --noheadings 2>/dev/null | awk '{print $1}' | paste -sd, - || echo n/a)
 [install]   • systemd unit                        : installed (not started)
 [install]   • system-monitor unit                 : installed (not started)
