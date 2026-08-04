@@ -68,27 +68,6 @@ func topRows(rows []procRow, kind string, topN int) []string {
 	return lines
 }
 
-// topRowsRich emits the same process rows as <ol><li> items for rich HTML.
-// The plain topRows keeps the manual "N." numbering for the sendMessage
-// fallback; rich HTML <ol> numbers the list itself, so the prefix is dropped.
-
-func topRowsRich(rows []procRow, kind string, topN int) []string {
-	items := make([]string, 0, len(rows))
-	for i, r := range rows {
-		if i >= topN {
-			break
-		}
-		if kind == "cpu" {
-			items = append(items, fmt.Sprintf("<li><code>%s</code> (pid %d) — CPU <b>%.1f%%</b> · RSS %s</li>",
-				esc(r.name), r.pid, r.cpuPct, fmtRSS(r.rss)))
-		} else {
-			items = append(items, fmt.Sprintf("<li><code>%s</code> (pid %d) — RSS <b>%s</b> · CPU %.1f%%</li>",
-				esc(r.name), r.pid, fmtRSS(r.rss), r.cpuPct))
-		}
-	}
-	return items
-}
-
 // topCount caps the number of displayed rows to cfg.topN.
 
 func topCount(rows []procRow, topN int) int {
@@ -192,6 +171,32 @@ func metricTableRow(name, now, avg string) string {
 	return fmt.Sprintf("<tr><td><b>%s</b></td><td>%s</td><td>%s</td></tr>", name, now, avg)
 }
 
+// topTable renders the top-N process rows as a bordered table. Columns differ
+// by kind: cpu → #, Process, PID, CPU, RSS; ram → #, Process, PID, RSS, CPU.
+func topTable(rows []procRow, kind string, topN int) string {
+	var b strings.Builder
+	b.WriteString("<table bordered>\n")
+	if kind == "cpu" {
+		b.WriteString("<tr><th align=\"right\">#</th><th>Process</th><th align=\"right\">PID</th><th align=\"right\">CPU</th><th align=\"right\">RSS</th></tr>\n")
+	} else {
+		b.WriteString("<tr><th align=\"right\">#</th><th>Process</th><th align=\"right\">PID</th><th align=\"right\">RSS</th><th align=\"right\">CPU</th></tr>\n")
+	}
+	for i, r := range rows {
+		if i >= topN {
+			break
+		}
+		if kind == "cpu" {
+			b.WriteString(fmt.Sprintf("<tr><td align=\"right\">%d</td><td><code>%s</code></td><td align=\"right\">%d</td><td align=\"right\"><b>%.1f%%</b></td><td align=\"right\">%s</td></tr>\n",
+				i+1, esc(r.name), r.pid, r.cpuPct, fmtRSS(r.rss)))
+		} else {
+			b.WriteString(fmt.Sprintf("<tr><td align=\"right\">%d</td><td><code>%s</code></td><td align=\"right\">%d</td><td align=\"right\"><b>%s</b></td><td align=\"right\">%.1f%%</td></tr>\n",
+				i+1, esc(r.name), r.pid, fmtRSS(r.rss), r.cpuPct))
+		}
+	}
+	b.WriteString("</table>\n")
+	return b.String()
+}
+
 func formatReportRich(cfg config, samples []Sample, current Sample) string {
 	windowMin := float64(len(samples)*cfg.pollSeconds) / 60.0
 	avgCPU := avg(samples, func(s Sample) float64 { return s.cpuPct })
@@ -206,7 +211,7 @@ func formatReportRich(cfg config, samples []Sample, current Sample) string {
 	b.WriteString(fmt.Sprintf("<p>Window: last <b>%.0f min</b> (%d samples @ %ds) · Uptime %s</p>\n",
 		windowMin, len(samples), cfg.pollSeconds, uptimeStr(current.uptime)))
 
-	b.WriteString("<table><tr><th>Metric</th><th>Now</th><th>Avg</th></tr>\n")
+	b.WriteString("<table bordered><tr><th>Metric</th><th>Now</th><th>Avg</th></tr>\n")
 	b.WriteString(metricTableRow("CPU", fmt.Sprintf("%.1f%%", current.cpuPct), fmt.Sprintf("%.1f%%", avgCPU)))
 	b.WriteString(fmt.Sprintf("<tr><td><b>Load</b></td><td colspan=\"2\">1m %.2f / 5m %.2f / 15m %.2f</td></tr>\n",
 		current.load1, current.load5, current.load15))
@@ -227,15 +232,11 @@ func formatReportRich(cfg config, samples []Sample, current Sample) string {
 
 	if len(current.cpuTop) > 0 {
 		b.WriteString(fmt.Sprintf("<h4>🏆 Top %d by CPU (this window)</h4>\n", topCount(current.cpuTop, cfg.topN)))
-		b.WriteString("<ol>\n")
-		b.WriteString(strings.Join(topRowsRich(current.cpuTop, "cpu", cfg.topN), "\n") + "\n")
-		b.WriteString("</ol>\n")
+		b.WriteString(topTable(current.cpuTop, "cpu", cfg.topN))
 	}
 	if len(current.ramTop) > 0 {
 		b.WriteString(fmt.Sprintf("<h4>🧠 Top %d by RAM (now)</h4>\n", topCount(current.ramTop, cfg.topN)))
-		b.WriteString("<ol>\n")
-		b.WriteString(strings.Join(topRowsRich(current.ramTop, "ram", cfg.topN), "\n") + "\n")
-		b.WriteString("</ol>\n")
+		b.WriteString(topTable(current.ramTop, "ram", cfg.topN))
 	}
 
 	b.WriteString("<footer>#system</footer>\n")
@@ -264,7 +265,7 @@ func formatWarningRich(cfg config, samples []Sample, current Sample) string {
 	var b strings.Builder
 	b.WriteString("<h3>🚨 HIGH SYSTEM USAGE</h3>\n")
 	b.WriteString(fmt.Sprintf("<p><b>VPS time:</b> <code>%s</code></p>\n", nowStr))
-	b.WriteString("<table><tr><th>Metric</th><th>Value</th></tr>\n")
+	b.WriteString("<table bordered><tr><th>Metric</th><th>Value</th></tr>\n")
 	b.WriteString(fmt.Sprintf("<tr><td>Threshold</td><td>%d%%</td></tr>\n", cfg.warnPct))
 	b.WriteString(fmt.Sprintf("<tr><td>Currently</td><td><b>%s</b></td></tr>\n", strings.Join(hot, ", ")))
 	b.WriteString(fmt.Sprintf("<tr><td>Load</td><td>%.2f / %.2f / %.2f</td></tr>\n", current.load1, current.load5, current.load15))

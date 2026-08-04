@@ -242,13 +242,16 @@ have to rediscover them.
      `system_monitor.pid` on start and removes it on exit; the Python spawner's
      `is_running()` dedupes via that pidfile + a `/proc` cmdline scan so the
      two never stack. Reports/warnings are sent as **rich messages**
-     (`sendRichMessage`, rich HTML with a metrics table + `<ol>` top lists)
+     (`sendRichMessage`, rich HTML with a bordered metrics `<table bordered>`
+     and the top-N lists rendered as `<table bordered>` rows, not `<ol>` lists)
      with an automatic `sendMessage` fallback — the plain fallback text is
      byte-compatible with the pre-rich format, so the channel renders
-     identically on any Bot API version. Both the report and the warning carry
-     the VPS local date-time. The log channel is MANDATORY for both the bot and
-     the monitor (`LOG_CHANNEL_ID`, `main.py` refuses to start without it). Go
-     port rationale: `docs/go-feasibility.md`; full design:
+     identically on any Bot API version. Rich tables need the `bordered`
+     attribute or Telegram renders them borderless (plain HTML has no tables at
+     all). Both the report and the warning carry the VPS local date-time. The
+     log channel is MANDATORY for both the bot and the monitor
+     (`LOG_CHANNEL_ID`, `main.py` refuses to start without it). Go port
+     rationale: `docs/go-feasibility.md`; full design:
      `docs/memory/tgbot-system-monitor.md`. Tests:
      `cd cmd/tgbot-monitor && go test ./...`.
 
@@ -323,6 +326,25 @@ Root logger gets two handlers (`main.py::setup_system_logger`): the
 (`logs/bot.log`, 5 MB × 3). Both only attach when `LOG_CHANNEL_ID != 0`; the file
 mirror is added regardless inside `ensure_local_log_handler`. New code should use
 `logging.getLogger(__name__)` / `await log_event(...)`, not `print`.
+
+The `TelegramChannelHandler` sends log lines to the channel as **rich messages**
+(`sendRichMessage`, `rich_message: {"html": ...}`) with a `sendMessage` fallback
+that posts the identical HTML (kept byte-compatible with the pre-rich format), so
+log rendering is identical on any Bot API version.
+
+### Why the bot's logger is NOT written in Go (unlike the system monitor)
+
+The Go monitor exists because it must **outlive the bot** (report even when the
+bot is dead). The logger has the opposite requirement: it lives *inside* the bot
+process by design, and should die with it. The logger is a Python `logging`
+handler (`utils/logger.py::TelegramChannelHandler`) invoked by the root logger
+inside `main.py` — making it Go would mean a sidecar process, an IPC pipe, and a
+reconnect protocol just to replicate a 5-line fire-and-forget `requests.post`.
+There is no CPU/RAM/robustness win (the monitor's rationale) because the logger
+does one tiny HTTP POST per line, is already non-blocking (daemon thread), and
+must in any case be Python to hook `logging`. So: the *sender* stays Python, but
+it uses the same raw Bot HTTP API + rich-message endpoint the Go monitor uses.
+Don't port it to Go.
 
 ## Gotchas
 

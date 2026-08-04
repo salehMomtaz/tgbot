@@ -63,9 +63,17 @@ test suite (`go test`).
    new pid is 0%. `procPrev` is a package global — reset it if you add a way to
    restart the scan.
 
-8. **Never blocks the sampler.** Each send is fire-and-forget in a goroutine
-   with an 8 s timeout (`sendTelegram`), and a bad sample is skipped — the loop
-   sleeps `POLL_SECONDS` and continues.
+8. **Never blocks the sampler; rich message with plain fallback.** Each send is
+   fire-and-forget in a goroutine with an 8 s timeout (`sendTelegram`), and a
+   bad sample is skipped — the loop sleeps `POLL_SECONDS` and continues. Sends
+   go out via **`sendRichMessage`** with `rich_message: {"html": ...}` (bordered
+   `<table bordered>` for the metrics and the top-N process lists, headings
+   `<h3>`/`<h4>`, `<footer>#system</footer>`); if the rich endpoint rejects the
+   payload the same goroutine retries with `sendMessage` + the plain HTML, so
+   the channel works on any Bot API version. The plain formatter
+   (`formatReport`/`formatWarning`) stays byte-compatible with the pre-rich
+   output — only the rich variants (`formatReportRich`/`formatWarningRich`) use
+   tables. Do NOT change the plain fallback.
 
 9. **Dedup: pidfile + /proc scan, understood by BOTH languages.** The Go binary
    writes project-root `system_monitor.pid` on start and removes it on exit.
@@ -99,9 +107,13 @@ test suite (`go test`).
   rebuild BOTH prebuilts (`GOOS=linux GOARCH=amd64|arm64 CGO_ENABLED=0 go
   build -trimpath -ldflags="-s -w"`) or fresh installs ship the stale binary.
 - Reports/warnings go out as **rich messages** (`sendRichMessage`, `rich_message:
-  {"html": ...}`) with a metrics `<table>` and `<ol>` top lists; the goroutine
-  falls back to `sendMessage` with the plain HTML if the rich endpoint is
-  rejected, so the channel works on any Bot API version.
+  {"html": ...}`) with bordered `<table bordered>` metrics and top-N process
+  tables; the goroutine falls back to `sendMessage` with the plain HTML if the
+  rich endpoint is rejected, so the channel works on any Bot API version.
+- Rich-message gotchas (from `telegram-bot-api.md` / the rich-formatting guide):
+  tables need the `bordered` attribute or Telegram renders them borderless;
+  table cells only support **inline** formatting (no `<p>`, `<ol>`, `<pre>` in a
+  cell); `#system` uses `<footer>` so it sits at the bottom of the card.
 - Build manually: `cd cmd/tgbot-monitor && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../build/tgbot-monitor .`
 - Tests: `cd cmd/tgbot-monitor && go test ./...` (this is the project's one
   test suite — the Python side still has none).
