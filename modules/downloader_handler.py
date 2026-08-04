@@ -425,7 +425,8 @@ def register_downloader_handlers(app: Client):
                 result = await loop.run_in_executor(
                     None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress,
                     None, (target_fmt.get("height") if action == "v" and target_fmt else None),
-                    cache_data.get("best_audio_format_id") if action == "v" else None
+                    cache_data.get("best_audio_format_id") if action == "v" else None,
+                    bool(target_fmt.get("muxed")) if action == "v" and target_fmt else False
                 )
 
                 file_path = result['file_path']

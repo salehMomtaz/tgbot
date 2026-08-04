@@ -694,7 +694,7 @@ def extract_formats(url: str) -> dict:
         )
         probe_worthy = (not exact) and (duration_seconds <= 0 or not has_stream_meta)
 
-        if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
+        if fmt.get('vcodec') == 'none' and fmt.get('acodec') not in (None, 'none'):
             abr = fmt.get('abr') or 0
             audio_options.append({
                 'format_id': fmt['format_id'],
@@ -710,14 +710,30 @@ def extract_formats(url: str) -> dict:
         elif fmt.get('vcodec') != 'none':
             resolution = fmt.get('height')
             if resolution:
-                # NOTE: `size` here is the VIDEO-ONLY stream size. The merged size
-                # (video + best audio) is finalized below, after we know best audio.
+                # MUXED detection: a format that already carries its own audio
+                # (acodec is a real codec like 'aac', or is None/unknown as on
+                # Twitter's progressive `http-*` streams). The current stream is
+                # the FINAL file — no `+bestaudio` merge, so no audio is added
+                # to its size. Only acodec == 'none' is a truly video-only DASH
+                # stream that gets merged with best_audio below.
+                muxed = (fmt.get('acodec') or '') != 'none'
+
+                # NOTE: for video-only streams `size` is the VIDEO-ONLY size; the
+                # merged size (video + best audio) is finalized below. For muxed
+                # streams the size IS the final file, and since those streams'
+                # metadata (Twitter's tbr/filesize_approx is ~2.3x the real file)
+                # is unreliable, a muxed stream whose size is not a real
+                # content-length gets an exact CDN probe.
+                probe_worthy = (not exact) and (
+                    muxed or (duration_seconds <= 0 or not has_stream_meta)
+                )
                 video_options.append({
                     'format_id': fmt['format_id'],
                     'quality': f"{resolution}p",
                     'bytes': size,
                     'height': resolution,
                     'exact': exact,
+                    'muxed': muxed,
                     'probe': probe_worthy,
                     'probe_url': fmt.get('url') if probe_worthy else None,
                     'probe_headers': fmt.get('http_headers') if probe_worthy else None,
@@ -763,10 +779,16 @@ def extract_formats(url: str) -> dict:
     best_audio_bytes = best_audio['bytes'] if best_audio else 0
     best_audio_exact = best_audio['exact'] if best_audio else False
     for v in unique_videos:
-        v['bytes'] = v['bytes'] + best_audio_bytes
-        # When there is no separate audio stream (muxed downloads like TikTok),
-        # nothing gets merged in — the video's own exactness decides the prefix.
-        exact_total = v['exact'] and (best_audio_exact if best_audio else True)
+        # Muxed streams (Twitter http-*, TikTok, most short-form sites) already
+        # contain audio — their size IS the final file. Only video-only DASH
+        # streams (YouTube, IG DASH) get the best-audio track merged in.
+        if not v.get('muxed'):
+            v['bytes'] = v['bytes'] + best_audio_bytes
+            # When there is no separate audio stream (muxed downloads like TikTok),
+            # nothing gets merged in — the video's own exactness decides the prefix.
+            exact_total = v['exact'] and (best_audio_exact if best_audio else True)
+        else:
+            exact_total = v['exact']
         prefix = "" if exact_total else "~"
         warn_flag = " ⚠️" if v['bytes'] > (2000 * 1024 * 1024) else ""
         v['size_str'] = f"{prefix}{format_size_short(v['bytes'])}{warn_flag}"
@@ -979,7 +1001,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 
-def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None) -> dict:
+def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None, muxed: bool = False) -> dict:
     """Download a single media item.
 
     Two mutually exclusive selection modes:
@@ -998,6 +1020,11 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     
     ``best_audio_format_id`` is the pre-calculated ID of the best audio stream
     to force merging with ``format_id``.
+
+    ``muxed`` marks a format that already carries its own audio (Twitter
+    progressive ``http-*``, TikTok, etc.). It is downloaded as-is — no
+    ``+bestaudio`` merge, which would double the audio track or make yt-dlp
+    refuse the selector.
     """
     url = normalize_url(url)
     task_dir = f"cache/{cache_id}"
@@ -1062,9 +1089,14 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             fallback = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best"
         else:
             fallback = "bestvideo+bestaudio/best"
-        
-        audio_part = f"+{best_audio_format_id}" if best_audio_format_id else "+bestaudio"
-        ydl_opts['format'] = f"{format_id}{audio_part}/{fallback}"
+
+        if muxed:
+            # The stream already contains its own audio — request it as-is and
+            # never append +bestaudio (double audio / selector refusal).
+            ydl_opts['format'] = f"{format_id}/{fallback}"
+        else:
+            audio_part = f"+{best_audio_format_id}" if best_audio_format_id else "+bestaudio"
+            ydl_opts['format'] = f"{format_id}{audio_part}/{fallback}"
         ydl_opts['merge_output_format'] = 'mp4'
     else:
         # Audio: download the selected audio format as-is; avoid re-encoding to 320kbps
