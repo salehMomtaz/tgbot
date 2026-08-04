@@ -59,6 +59,11 @@ else
     REAL_GROUP="$(id -gn)"
 fi
 
+# Ensure the entrypoint scripts carry the executable bit. git may have checked
+# them out as 0644 (or a pull may have reset it), and systemd's ExecStart calls
+# run.sh directly — a missing exec bit surfaces as status=203/EXEC crash loops.
+chmod +x run.sh install.sh uninstall.sh 2>/dev/null || true
+
 mkdir -p tools
 : > "$MANIFEST"
 {
