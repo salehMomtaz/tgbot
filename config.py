@@ -164,3 +164,23 @@ X_DIRECT_USERNAME = os.getenv("X_DIRECT_USERNAME", "")            # bot account 
 X_DIRECT_PASSWORD = os.getenv("X_DIRECT_PASSWORD", "")
 X_DIRECT_EMAIL = os.getenv("X_DIRECT_EMAIL", "")                  # sometimes required by X login
 X_DIRECT_FROM_USER_ID = os.getenv("X_DIRECT_FROM_USER_ID", "")    # YOUR numeric X user id (whose DMs to accept)
+
+# =========================================================================
+# System monitor (utils/system_monitor.py) — a lightweight, bot-independent
+# watcher that reports CPU/RAM/swap/disk + top processes to the log channel
+# and warns when usage exceeds a threshold.
+# =========================================================================
+# Sample cadence in seconds.
+SYSMON_POLL_SECONDS = get_env_int("SYSMON_POLL_SECONDS", 15)
+# Send a full "#system" report every N samples (15s * 60 = 15 min).
+SYSMON_REPORT_INTERVAL = get_env_int("SYSMON_REPORT_INTERVAL", 60)
+# Warning threshold (percent) for CPU / RAM / disk.
+SYSMON_WARN_PCT = get_env_int("SYSMON_WARN_PCT", 80)
+# While any metric is above the threshold, repeat the warning every N seconds.
+SYSMON_WARN_SECONDS = get_env_int("SYSMON_WARN_SECONDS", 60)
+# Top-N processes by CPU and by RAM in each report.
+SYSMON_TOP_N = get_env_int("SYSMON_TOP_N", 20)
+# Number of samples kept for time-frame averages (15s * 240 = 1 hour).
+SYSMON_HISTORY_SAMPLES = get_env_int("SYSMON_HISTORY_SAMPLES", 240)
+# Comma-separated list of paths whose filesystems are reported.
+SYSMON_DISK_PATHS = os.getenv("SYSMON_DISK_PATHS", ".")

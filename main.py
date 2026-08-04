@@ -297,6 +297,15 @@ patch_pyrogram_send_methods()
 async def main_engine():
     print("Initializing services...")
 
+    # 0. The log channel is MANDATORY: the bot pipes all logs there and the
+    # system monitor reports there too. Refuse to run without it rather than
+    # silently degrading to a silent box.
+    if config.LOG_CHANNEL_ID == 0:
+        print("FATAL: LOG_CHANNEL_ID is required. Set it in .env (a private "
+              "Telegram channel with the bot as admin) — the bot will not start "
+              "without a log channel.")
+        return
+
     # 1. Start the global system logger to pipe all container logs to your channel
     setup_system_logger()
 
@@ -443,6 +452,17 @@ async def main_engine():
             tasks.append(df_task)
     except Exception as e:
         logging.warning(f"[DirectForward] Could not start: {e}")
+
+    # 9b. Launch the standalone system monitor as a DETACHED subprocess so it
+    # survives this bot's own crash/restart (it talks to the log channel via the
+    # raw Bot API, exactly like the logger does). If it is already running (e.g.
+    # started by tgbot-monitor.service), this is a harmless no-op.
+    try:
+        from utils.system_monitor import spawn_detached_monitor
+        if spawn_detached_monitor():
+            logging.info("[SysMon] System monitor launched as a detached process.")
+    except Exception as e:
+        logging.warning(f"[SysMon] Could not launch system monitor: {e}")
 
     try:
         await asyncio.gather(*tasks)
