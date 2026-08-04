@@ -59,12 +59,19 @@ IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
 
 Session persistence: after the first successful login the client dumps its
 session to `direct_ig_session.json` (git-ignored, `chmod 600`) and resumes it
-on every restart, so Instagram challenges you at most once.
+on every restart (validated via `account_info()`, so no password is required),
+so Instagram challenges you at most once.
+
+The IG worker **never exits on a login failure**. If the session/jar is dead it
+retries on the poll cadence with a fresh client per attempt — so uploading a
+fresh `igcookies.txt` mid-run (Admin → Cookies → Replace) is picked up
+automatically, **no bot restart needed**. The earlier "login failed" errors in
+the logs that required a restart are fixed by this.
 
 If Instagram challenges the bot (CheckpointRequired), the worker freezes for
-~3–5 hours and logs a loud, actionable line. The **durable fix** is to open the
-official Instagram app on the bot account and pass the checkpoint there, then
-restart the bot (retry storms only deepen the flag).
+~3–5 hours and logs a loud, actionable line (retry storms only deepen the flag).
+The **durable fix** is to open the official Instagram app on the bot account
+and pass the checkpoint there, then restart the bot.
 
 ## Avoiding checkpoints ("We suspect automated behavior")
 
@@ -124,8 +131,8 @@ keeps its own cookie jar.
 | You send…                      | Bot does… |
 |---|---|
 | Photo/video attachment         | downloads the attachment, sends it as Telegram photo/video |
-| Share a post / reel / clip     | resolves the shortcode → yt-dlp pipeline (with your IG cookies) |
-| Share a story                  | builds the story URL → yt-dlp pipeline (needs IG cookies) |
+| Share a photo post / album / story | **Instagram-native delivery** through the DM session's CDN (yt-dlp's extractor reliably breaks on these). A carousel with an empty/invalid CDN resource is degraded to its healthy items instead of failing the whole send |
+| Share a reel / clip            | resolves the shortcode → yt-dlp pipeline (with your IG cookies) |
 | Paste any link                 | routes through the standard download pipeline (all sites) |
 | Share a tweet (X)              | builds the status URL → yt-dlp pipeline (with your X cookies) |
 

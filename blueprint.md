@@ -248,7 +248,7 @@ misread the requirement.)
 3. **Configure `.env`:**
    ```
    DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
-   DIRECT_FORWARD_POLL_SECONDS=120
+   DIRECT_FORWARD_POLL_SECONDS=300   # ≥300 recommended; jittered ±40%
    IG_DIRECT_ENABLED=true
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle   # only your DMs are relayed
    X_DIRECT_ENABLED=true
@@ -269,7 +269,12 @@ photo/video), post/reel/clip shares, story shares, tweet shares, and plain
 links in any DM text (routed through the standard yt-dlp pipeline with cookie
 jars, so login-walled content works). Only your whitelisted account's DMs are
 processed. The first run primes the cursor and skips backlog; state lives in
-`direct_forward_state.json`. Full guide: `docs/DIRECT_FORWARD_SETUP.md`.
+`direct_forward_state.json`. The IG worker never exits on a login failure — it
+retries each poll, so a mid-run `igcookies.txt` replace is picked up without a
+bot restart (only real checkpoint challenges freeze it for 3–5 h). Post/reel
+shares are delivered via the Instagram-native path; a carousel containing an
+empty/invalid CDN resource is degraded to its healthy items instead of failing
+the whole send. Full guide: `docs/DIRECT_FORWARD_SETUP.md`.
 
 **How to disable:** Set `DIRECT_FORWARD_CHAT_ID=0` or all `*_DIRECT_ENABLED`
 to `false` in `.env`, then restart.
