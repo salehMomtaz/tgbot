@@ -406,14 +406,46 @@ def _pidfile() -> str:
 
 
 def is_running() -> bool:
-    """True if a system monitor instance is alive (checked via its pidfile)."""
+    """True if a system monitor instance is alive.
+
+    Checks both the pidfile AND a direct scan of /proc for a live
+    ``utils.system_monitor`` process. The pidfile alone is unreliable: the
+    monitor may have been started by systemd (tgbot-monitor.service) which
+    writes no pidfile, and a stale pidfile can point at a recycled pid.
+    """
+    pidfile = _pidfile()
+    if os.path.exists(pidfile):
+        try:
+            with open(pidfile, "r", encoding="utf-8") as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)  # signal 0 = existence probe, no signal sent
+            return True
+        except (OSError, ValueError, IOError):
+            pass
+
+    # Direct /proc scan: any *python* process whose cmdline names the monitor
+    # module. Requiring a python interpreter in argv[0] avoids false positives
+    # from shells/debuggers whose command string merely mentions the module.
+    marker = "utils.system_monitor"
     try:
-        with open(_pidfile(), "r", encoding="utf-8") as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)  # signal 0 = existence probe, no signal sent
-        return True
-    except (OSError, ValueError, IOError):
-        return False
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(os.path.join(entry.path, "cmdline"), "rb") as f:
+                    raw = f.read()
+                cmd = raw.replace(b"\x00", b" ")
+                if marker.encode() not in cmd:
+                    continue
+                argv0 = raw.split(b"\x00")[0]
+                name = os.path.basename(argv0)
+                if name.startswith(b"python"):
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
 
 
 def spawn_detached_monitor() -> bool:
