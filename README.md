@@ -32,6 +32,9 @@ required). Runs as a `systemd` service that survives reboots.
   transfer queue.
 - **🎚️ Two-column format selector.** Paste a link → video formats on the left,
   audio on the right, sorted by quality, labeled with estimated file sizes.
+- **✨ Streaming status drafts.** While a link is being analyzed, the bot
+  streams an animated "thinking…" preview (Bot API 10.1+ `sendRichMessageDraft`)
+  that morphs into the real menu — with a graceful fallback for older clients.
 - **🎞️ Metadata & thumbnails.** `ffmpeg` square-crops thumbnails (Telegram
   requirement) and embeds duration / resolution / title so media plays natively.
 - **⬆️ Big-file uploads.** On-demand keyframe splitting keeps every part

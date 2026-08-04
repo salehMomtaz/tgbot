@@ -20,6 +20,7 @@ from utils.downloader import (
     PLAYLIST_TIERS,
 )
 from utils.uploader_handler import process_split_and_upload, send_reply_safe
+from utils.rich_stream import RichStream
 
 
 def is_link(text: str) -> bool:
@@ -86,16 +87,19 @@ def build_format_keyboard(cache_id: str, videos: list, audios: list) -> InlineKe
     return InlineKeyboardMarkup(keyboard_rows)
 
 
-async def show_format_selection(message: Message, status_msg: Message, url: str, custom_filename, user_id: int, origin_message_id: int | None = None):
+async def show_format_selection(message: Message, status: RichStream, url: str, custom_filename, user_id: int, origin_message_id: int | None = None):
     """Extract formats for a single media URL and post the selection keyboard.
 
     *origin_message_id* is the user's original link message. The keyboard (and
-    later the uploaded file) quote-replies to it, even when we got here via a
+    later the uploaded file) quote-reply to it, even when we got here via a
     callback chain (playlist decision menu → explorer → a video) where the
     local *message* is one of the bot's own menus.
+
+    *status* is a RichStream streaming the analysis progress; it is closed (and
+    any fallback status message removed) before the keyboard is posted.
     """
     reply_to_id = origin_message_id or message.id
-    await status_msg.edit_text("🔍 Fetching format attributes...")
+    await status.update("🔍 Fetching format attributes...")
     try:
         # extract_formats is a blocking yt-dlp call — run it off the event loop
         # so concurrent fetches (and any running download) keep making progress.
@@ -117,7 +121,7 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
         keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"])
 
         await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
-        await status_msg.delete()
+        await status.close()
         await send_reply_safe(
             message._client.send_message,
             reply_to_id,
@@ -130,7 +134,13 @@ async def show_format_selection(message: Message, status_msg: Message, url: str,
             reply_markup=keyboard,
         )
     except Exception as e:
-        await status_msg.edit_text(f"❌ Extraction failed.\nError: `{str(e)}`")
+        await status.close()
+        await send_reply_safe(
+            message._client.send_message,
+            reply_to_id,
+            chat_id=message.chat.id,
+            text=f"❌ Extraction failed.\nError: `{str(e)}`",
+        )
         await log_event(f"❌ **Extraction Error:** Failed to parse `{url}`. Details: `{str(e)}`")
 
 
@@ -231,17 +241,23 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
     *pure* is True for ``/playlist?list=`` URLs (no single-video shortcut), False
     for ``watch?v=&list=`` URLs (a 'just this video' button is offered too).
     """
-    status_msg = await send_reply_safe(
-        message._client.send_message, message.id,
-        chat_id=message.chat.id, text="📋 Reading playlist...",
+    status = RichStream(
+        message.chat.id, message._client.send_message,
+        reply_to_message_id=message.id,
     )
+    await status.update(thinking="Reading playlist…")
 
     async def meta_job():
         try:
             loop = asyncio.get_event_loop()
             meta = await loop.run_in_executor(None, extract_playlist_meta, url)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Could not read playlist.\nError: `{str(e)}`")
+            await status.close()
+            await send_reply_safe(
+                message._client.send_message, message.id,
+                chat_id=message.chat.id,
+                text=f"❌ Could not read playlist.\nError: `{str(e)}`",
+            )
             await log_event(f"❌ **Playlist read error:** `{url}`. Details: `{str(e)}`")
             return
 
@@ -260,7 +276,7 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
         }
 
         keyboard = build_playlist_decision_keyboard(cache_id, include_single=not pure)
-        await status_msg.delete()
+        await status.close()
         await send_reply_safe(
             message._client.send_message, message.id,
             chat_id=message.chat.id,
@@ -310,16 +326,17 @@ def register_downloader_handlers(app: Client):
                 return
 
             # --- Single-video flow ---
-            status_msg = await send_reply_safe(
-                message._client.send_message, message.id,
-                chat_id=message.chat.id, text="📥 Received. Analyzing link formats...",
+            status = RichStream(
+                message.chat.id, message._client.send_message,
+                reply_to_message_id=message.id,
             )
+            await status.update(thinking="Analyzing link formats…")
 
             # Fetch formats immediately & concurrently — NOT queued. Only the
             # actual download (queued when the user taps a format button) is
             # serialized, so the user can pick formats for many links while
             # earlier downloads run.
-            _spawn_fetch(show_format_selection(message, status_msg, url, custom_filename, user_id))
+            _spawn_fetch(show_format_selection(message, status, url, custom_filename, user_id))
         else:
             status_msg = await send_reply_safe(
                 message._client.send_message, message.id,
@@ -511,14 +528,14 @@ def register_downloader_handlers(app: Client):
             origin_id = cache_data.get("origin_message_id")
             DOWNLOAD_CACHE.pop(cache_id, None)
             await callback_query.message.delete()
-            status_msg = await send_reply_safe(
-                callback_query._client.send_message, origin_id,
-                chat_id=callback_query.message.chat.id,
-                text="🔍 Fetching format attributes...",
+            status = RichStream(
+                callback_query.message.chat.id, callback_query._client.send_message,
+                reply_to_message_id=origin_id,
             )
+            await status.update("🔍 Fetching format attributes...")
 
             _spawn_fetch(show_format_selection(
-                callback_query.message, status_msg, url, custom_filename, user_id,
+                callback_query.message, status, url, custom_filename, user_id,
                 origin_message_id=origin_id,
             ))
             return
@@ -714,14 +731,14 @@ def register_downloader_handlers(app: Client):
         entry = entries[idx]
         origin_id = cache_data.get("origin_message_id")
         await callback_query.answer()
-        status_msg = await send_reply_safe(
-            callback_query._client.send_message, origin_id,
-            chat_id=callback_query.message.chat.id,
-            text=f"🔍 Fetching formats for `{entry['title']}`...",
+        status = RichStream(
+            callback_query.message.chat.id, callback_query._client.send_message,
+            reply_to_message_id=origin_id,
         )
+        await status.update(f"🔍 Fetching formats for `{entry['title']}`...")
 
         _spawn_fetch(show_format_selection(
-            callback_query.message, status_msg, entry["url"],
+            callback_query.message, status, entry["url"],
             cache_data.get("custom_filename"), user_id,
             origin_message_id=origin_id,
         ))

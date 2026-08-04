@@ -238,6 +238,26 @@ have to rediscover them.
      `docs/go-feasibility.md`; full design: `docs/memory/tgbot-system-monitor.md`.
      Tests: `cd cmd/tgbot-monitor && go test ./...`.
 
+16. **User-facing "analyzing" status messages stream via `sendRichMessageDraft`.**
+    `utils/rich_stream.py::RichStream` (Bot API 10.1+ streaming drafts) replaces
+    the old throwaway "Analyzing link formats… / Reading playlist…" status
+    messages in `modules/downloader_handler.py`. Rules:
+    - The draft is a 30 s ephemeral, animated preview in a **private chat**;
+      the caller MUST follow up with the real message (format keyboard, playlist
+      menu, or error) via `status.close()` + `send_reply_safe`. Never leave a
+      user hanging on a draft.
+    - Streaming is **best-effort**: if `sendRichMessageDraft` is rejected the
+      stream silently falls back to a plain quoted status message that gets
+      `edit_text`-ed — the bot must keep working on any Bot API version.
+    - Progress bars, uploads and download statuses stay on **real pyrogram
+      messages** (they need `edit_text` by message id; a draft has no id and
+      expires in 30 s). Do not widen streaming to long-running jobs.
+    - Only the downloader's private-chat flows use it; the Go monitor's
+      `#system` reports and the log channel keep plain formatting.
+    - Ephemeral Messages (`receiver_user_id`, `callback_query_id`, Bot API
+      10.2) are a **group-chat** feature; this bot is private-only, so they are
+      intentionally not used. Don't add them for private chats.
+
 
 ## Running / testing
 
