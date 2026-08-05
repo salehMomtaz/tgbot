@@ -45,6 +45,48 @@ USER_STATES = {}
 # In-memory registry to track and delete active ForceReply prompts on cancel or success
 ACTIVE_PROMPTS = {}
 
+# ---------------------------------------------------------------------------
+# In-chat Premium session-string generation state.
+# PREMIUM_GEN[user_id] = {
+#     "client": temp in-memory Client, "phone": str, "phone_code_hash": str,
+#     "result": str|None, "expires_at": float
+# }
+# ---------------------------------------------------------------------------
+PREMIUM_GEN = {}
+_PREMIUM_GEN_TTL = 15 * 60  # auto-abort a dangling generation after 15 min
+
+# Reusable "Abort" button shown on every step of the session-generation flow so
+# the admin can stop at any point and the temp client is never left dangling.
+_gen_abort_markup = InlineKeyboardMarkup([[
+    InlineKeyboardButton("❌ Abort Session Generation", callback_data="admin_premium_gen_abort")
+]])
+
+
+async def sweep_stale_generations(client=None):
+    """Disconnect any premium-session generation that exceeded its TTL.
+
+    Background safety net (driven by utils.keyboard_expiry.expiry_loop): a temp
+    login client must never dangle just because the admin walked away mid-flow.
+    """
+    import time as _t
+    now = _t.monotonic()
+    for user_id, gen in list(PREMIUM_GEN.items()):
+        if gen.get("expires_at", 0) < now:
+            if gen.get("client"):
+                try:
+                    from utils.premium_session import discard_client
+                    await discard_client(gen["client"])
+                except Exception:
+                    pass
+            PREMIUM_GEN.pop(user_id, None)
+            USER_STATES.pop(user_id, None)
+            prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
+            if prompt_id and client:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+
 
 def _pot_running() -> bool:
     """True if the PO-token provider manager exists and reports healthy."""
@@ -80,6 +122,8 @@ def get_premium_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Premium", callback_data="admin_premium_add"),
          InlineKeyboardButton("➖ Remove Premium", callback_data="admin_premium_remove")],
+        [InlineKeyboardButton("🔑 Generate Session", callback_data="admin_premium_gen"),
+         InlineKeyboardButton("🧹 Cleanup Stale Gen", callback_data="admin_premium_gen_abort")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_premium_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
@@ -139,6 +183,186 @@ def register_admin_handlers(app: Client):
                 await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # In-chat Premium session-string generation flow.
+    # State names: waiting_for_premium_phone / _code / _password
+    # ------------------------------------------------------------------
+    async def _premium_gen_cleanup(user_id: int):
+        """Disconnect the temp login client and clear all gen flow state."""
+        gen = PREMIUM_GEN.pop(user_id, None)
+        if gen and gen.get("client"):
+            await discard_client_quiet(gen["client"])
+        USER_STATES.pop(user_id, None)
+        await purge_active_prompt(user_id, client)
+
+    async def discard_client_quiet(tmp_client):
+        try:
+            await tmp_client.disconnect()
+        except Exception:
+            pass
+
+    async def _handle_premium_gen_input(client: Client, message: Message,
+                                        user_id: int, state: str, text: str, prompt_id):
+        """Process one text step of the in-chat premium session generation."""
+        from utils import premium_session
+        import time as _time
+
+        # If a temp login is mid-flight it carries an expiry; a stale flow that
+        # somehow survived (no callback, no /start) is auto-aborted here.
+        gen = PREMIUM_GEN.get(user_id)
+        if gen and gen.get("expires_at", 0) < _time.monotonic():
+            await _premium_gen_cleanup(user_id)
+            await message.reply_text(
+                "⏱️ Session generation timed out — please start again from the 👑 Premium menu.",
+                reply_markup=back_markup
+            )
+            return
+
+        if prompt_id:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+            except Exception:
+                pass
+
+        if state == "waiting_for_premium_phone":
+            phone = text.strip().replace(" ", "")
+            if not (phone.startswith("+") and phone[1:].isdigit() and 8 <= len(phone[1:]) <= 15):
+                await message.reply_text(
+                    "❌ Please send a valid international phone number **with country code**, "
+                    "e.g. `+15551234567`.\n\n"
+                    "_(You can still tap Abort to cancel.)_",
+                    reply_markup=_gen_abort_markup
+                )
+                return
+            tmp = None
+            try:
+                tmp = await premium_session.create_login_client()
+                await premium_session.request_code(tmp)
+                phone_code_hash = await premium_session.send_login_code(tmp, phone)
+            except Exception as e:
+                # tmp may not be stored in PREMIUM_GEN yet — disconnect it directly.
+                if tmp is not None:
+                    try:
+                        await premium_session.discard_client(tmp)
+                    except Exception:
+                        pass
+                await _premium_gen_cleanup(user_id)
+                await message.reply_text(
+                    f"❌ Could not request a login code:\n`{e}`\n\n"
+                    "Tap **🔑 Generate Session** in the 👑 Premium menu to retry.",
+                    reply_markup=back_markup
+                )
+                return
+            PREMIUM_GEN[user_id] = {
+                "client": tmp,
+                "phone": phone,
+                "phone_code_hash": phone_code_hash,
+                "result": None,
+                "expires_at": _time.monotonic() + _PREMIUM_GEN_TTL,
+            }
+            USER_STATES[user_id] = "waiting_for_premium_code"
+            await message.reply_text(
+                "🔑 **Step 2/3 — Enter the login code**\n\n"
+                f"Code sent to `{phone}`. Type the confirmation code you received "
+                "(SMS or the Telegram app).\n\n"
+                "_(Tap Abort at any time to cancel.)_",
+                reply_markup=_gen_abort_markup
+            )
+            return
+
+        if state == "waiting_for_premium_code":
+            gen = PREMIUM_GEN.get(user_id)
+            if not gen:
+                await message.reply_text("⚠️ Session generation expired. Start again from the 👑 Premium menu.", reply_markup=back_markup)
+                return
+            code = text.strip()
+            try:
+                outcome = await premium_session.verify_code(
+                    gen["client"], gen["phone"], gen["phone_code_hash"], code
+                )
+            except Exception as e:
+                await message.reply_text(
+                    f"❌ Invalid code: `{e}`.\n\n"
+                    "Send the code again, or tap **Abort** to cancel.",
+                    reply_markup=_gen_abort_markup
+                )
+                return
+            if outcome == "2fa":
+                USER_STATES[user_id] = "waiting_for_premium_password"
+                await message.reply_text(
+                    "🔑 **Step 3/3 — Two-factor password**\n\n"
+                    "This account has two-step verification enabled. Type your **2FA password** "
+                    "to finish logging in.\n\n"
+                    "_(Tap Abort at any time to cancel.)_",
+                    reply_markup=_gen_abort_markup
+                )
+                return
+            await _finish_premium_gen(client, message, user_id)
+            return
+
+        if state == "waiting_for_premium_password":
+            gen = PREMIUM_GEN.get(user_id)
+            if not gen:
+                await message.reply_text("⚠️ Session generation expired. Start again from the 👑 Premium menu.", reply_markup=back_markup)
+                return
+            password = text.strip()
+            try:
+                await premium_session.verify_password(gen["client"], password)
+            except Exception as e:
+                await message.reply_text(
+                    f"❌ Wrong 2FA password: `{e}`.\n\n"
+                    "Send it again, or tap **Abort** to cancel.",
+                    reply_markup=_gen_abort_markup
+                )
+                return
+            await _finish_premium_gen(client, message, user_id)
+            return
+
+    async def _finish_premium_gen(client: Client, message: Message, user_id: int):
+        """Export the session string, clean up the temp client, show the result."""
+        from utils import premium_session
+        gen = PREMIUM_GEN.get(user_id)
+        if not gen or not gen.get("client"):
+            await message.reply_text("⚠️ Session generation expired. Start again from the 👑 Premium menu.", reply_markup=back_markup)
+            return
+        tmp_client = gen["client"]
+        try:
+            session_string = await premium_session.export_session(tmp_client)
+        except Exception as e:
+            await _premium_gen_cleanup(user_id)
+            await message.reply_text(
+                f"❌ Could not export the session: `{e}`.\n\n"
+                "Tap **🔑 Generate Session** in the 👑 Premium menu to retry.",
+                reply_markup=back_markup
+            )
+            return
+        # Disconnect the temp client BEFORE dropping the handle so nothing dangles.
+        try:
+            await premium_session.discard_client(tmp_client)
+        except Exception:
+            pass
+        gen["result"] = session_string
+        gen["client"] = None
+        # Keep the result around for the Save/Discard callbacks, then auto-expire.
+        gen["expires_at"] = _time_monotonic() + 5 * 60
+        USER_STATES.pop(user_id, None)
+        await message.reply_text(
+            "🔑 **Session string generated!**\n\n"
+            "Copy it and save it somewhere safe, or tap **💾 Save to .env** to persist it "
+            "for the bot.\n\n"
+            f"```\n{session_string}\n```",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💾 Save to .env", callback_data="admin_premium_gen_save")],
+                [InlineKeyboardButton("❌ Discard", callback_data="admin_premium_gen_abort")],
+                [InlineKeyboardButton("◀️ Back to Premium Menu", callback_data="admin_premium_menu")],
+            ])
+        )
+        await log_event(f"👑 **Premium Session:** New session string generated by creator (`{user_id}`).")
+
+    def _time_monotonic():
+        import time as _t
+        return _t.monotonic()
 
     def _has_real_cookie_line(content: str) -> bool:
         """True if *content* contains at least one valid Netscape cookie line.
@@ -241,6 +465,12 @@ def register_admin_handlers(app: Client):
         if input_text.lower() in ["/start", "🛠 console", "hey", "console", "hi!"]:
             USER_STATES.pop(user_id, None)
             await purge_active_prompt(user_id, client)
+            # Clean up any in-flight premium session generation so the temp
+            # login client is never left dangling.
+            gen = PREMIUM_GEN.pop(user_id, None)
+            if gen and gen.get("client"):
+                from utils.premium_session import discard_client
+                await discard_client(gen["client"])
             return  # Propagates downstream to Group 1
 
         # We do NOT delete your typed message here anymore (it remains in your history)
@@ -283,6 +513,16 @@ def register_admin_handlers(app: Client):
                 "as a document.",
                 reply_markup=back_markup
             )
+            message.stop_propagation()
+            return
+
+        # 1c. Premium session-generation states (phone -> code -> 2FA password).
+        # These take free-form text, NOT a telegram ID, so they must be handled
+        # before the is_valid_telegram_id gate below. Each step's prompt carries
+        # an Abort button; the temp client is always cleaned up (disconnect) on
+        # completion, abort, /start escape, or TTL expiry.
+        if state in ("waiting_for_premium_phone", "waiting_for_premium_code", "waiting_for_premium_password"):
+            await _handle_premium_gen_input(client, message, user_id, state, input_text, prompt_id)
             message.stop_propagation()
             return
 
@@ -604,6 +844,7 @@ def register_admin_handlers(app: Client):
         elif data == "admin_main":
             USER_STATES.pop(user_id, None)  # Reset state on return
             ACTIVE_PROMPTS.pop(user_id, None)
+            await _premium_gen_cleanup(user_id)
 
             await callback_query.message.edit_text(
                 "🛠 **Admin System Console**\nChoose an administrative action below:",
@@ -639,10 +880,16 @@ def register_admin_handlers(app: Client):
             premium_users = db["premium_users"]
             premium_lines = "\n".join([f"• `{uid}`" for uid in premium_users]) if premium_users else "No Premium-enabled users yet."
 
+            # Sweep any stale in-chat generation so a dangling temp client is cleaned.
+            import time as _t
+            gen = PREMIUM_GEN.get(user_id)
+            if gen and gen.get("client") and gen.get("expires_at", 0) < _t.monotonic():
+                await _premium_gen_cleanup(user_id)
+
             if config.PREMIUM_STRING_SESSION:
                 status_note = "🟢 Premium userbot session is configured — 4 GB uploads are available to whitelisted users."
             else:
-                status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Generate one via `generate_session.py`."
+                status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Tap **🔑 Generate Session** to create one right here."
 
             await callback_query.message.edit_text(
                 f"👑 **Premium Uploads (4 GB)**\n\n{status_note}\n\n"
@@ -667,6 +914,59 @@ def register_admin_handlers(app: Client):
                 "👑 **Disable 4 GB Premium Uploads**\nPlease type the numerical ID of the user to remove from the Premium whitelist:",
                 reply_markup=back_markup
             )
+            await callback_query.answer()
+
+        elif data == "admin_premium_gen":
+            # Start (or restart) the in-chat session-string generation flow.
+            # Any previous stale generation is cleaned up first so nothing dangles.
+            await _premium_gen_cleanup(user_id)
+            USER_STATES[user_id] = "waiting_for_premium_phone"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
+            await callback_query.message.edit_text(
+                "🔑 **Generate a Premium String Session**\n\n"
+                "The bot API is hard-capped at 2 GB per upload; only a Premium *user* "
+                "account over MTProto can send 4 GB. This flow logs into that account "
+                "and exports a session string.\n\n"
+                "**Step 1/3** — Send the phone number of the Premium account in "
+                "international format (country code + number), e.g. `+15551234567`.\n\n"
+                "_(Tap **❌ Abort Session Generation** at any step to cancel; the temp "
+                "login client is always cleaned up.)_",
+                reply_markup=_gen_abort_markup
+            )
+            await callback_query.answer()
+
+        elif data == "admin_premium_gen_abort":
+            await _premium_gen_cleanup(user_id)
+            await callback_query.message.edit_text(
+                "🚫 Session generation aborted. Any temporary login client was disconnected.",
+                reply_markup=back_markup
+            )
+            await callback_query.answer("Aborted.", show_alert=False)
+
+        elif data == "admin_premium_gen_save":
+            import time as _t
+            gen = PREMIUM_GEN.get(user_id)
+            result = (gen or {}).get("result")
+            if not result:
+                await callback_query.answer("No pending session string to save.", show_alert=True)
+                return
+            try:
+                from utils.premium_session import save_session_string
+                save_session_string(result)
+            except Exception as e:
+                await callback_query.answer(f"❌ Failed to save: {e}", show_alert=True)
+                return
+            PREMIUM_GEN.pop(user_id, None)
+            await callback_query.message.edit_text(
+                "✅ **Session string saved!**\n\n"
+                "`PREMIUM_STRING_SESSION` has been written to `.env` and the console "
+                "now shows the session as configured.\n\n"
+                "**A bot restart is required for the Premium userbot to actually use it:**\n"
+                "`sudo systemctl restart tgbot`\n\n"
+                "After restart, whitelist the users who may upload 4 GB via **➕ Add Premium**.",
+                reply_markup=back_markup
+            )
+            await log_event("👑 **Premium Session:** New PREMIUM_STRING_SESSION saved to .env by creator. Bot restart required.")
             await callback_query.answer()
 
         # =========================================================================

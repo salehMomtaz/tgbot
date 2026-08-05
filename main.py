@@ -248,12 +248,20 @@ def patch_pyrogram_send_methods():
     orig_send_video = Client.send_video
     orig_send_document = Client.send_document
     orig_send_audio = Client.send_audio
+    orig_edit_message_text = Client.edit_message_text
 
     def get_target_chat(args, kwargs) -> str:
         return str(kwargs.get("chat_id") or (args[0] if args else ""))
 
     async def wrapped_send_message(self, *args, **kwargs):
         sent_msg = await orig_send_message(self, *args, **kwargs)
+        # Auto-expire inline keyboards so dead buttons don't pile up in history
+        try:
+            from utils import keyboard_expiry
+            if sent_msg and sent_msg.reply_markup and getattr(sent_msg.chat, "id", None):
+                keyboard_expiry.watch(sent_msg.chat.id, sent_msg.id)
+        except Exception:
+            pass
         target = get_target_chat(args, kwargs)
         # Prevent self-logging loop: do not log messages sent to the logging channel itself
         if target != str(config.LOG_CHANNEL_ID):
@@ -281,11 +289,22 @@ def patch_pyrogram_send_methods():
             logging.info(f"📤 **[SENT AUDIO]**\n{str(sent_msg)}")
         return sent_msg
 
+    async def wrapped_edit_message_text(self, *args, **kwargs):
+        edited = await orig_edit_message_text(self, *args, **kwargs)
+        try:
+            from utils import keyboard_expiry
+            if edited and edited.reply_markup and getattr(edited.chat, "id", None):
+                keyboard_expiry.watch(edited.chat.id, edited.id)
+        except Exception:
+            pass
+        return edited
+
     # Bind wrapped methods
     Client.send_message = wrapped_send_message
     Client.send_video = wrapped_send_video
     Client.send_document = wrapped_send_document
     Client.send_audio = wrapped_send_audio
+    Client.edit_message_text = wrapped_edit_message_text
 
 # Execute monkey patch
 patch_pyrogram_send_methods()
@@ -362,6 +381,12 @@ async def main_engine():
     async def incoming_callback_log_interceptor(client: Client, callback_query: CallbackQuery):
         """Intercepts and logs the raw JSON string of every inline glass button click."""
         logging.info(f"🖱 **[CALLBACK QUERY]**\n{str(callback_query)}")
+        try:
+            from utils import keyboard_expiry
+            if callback_query.message and callback_query.message.id and getattr(callback_query.message.chat, "id", None):
+                keyboard_expiry.touch(callback_query.message.chat.id, callback_query.message.id)
+        except Exception:
+            pass
         callback_query.continue_propagation()
 
     # 6. Start Standard Bot Client
@@ -441,6 +466,14 @@ async def main_engine():
     ]
     if pot_manager:
         tasks.append(pot_manager.health_check_loop())
+
+    # Inline-keyboard auto-expiry: strips dead buttons after an idle TTL so
+    # chat history doesn't accumulate leftover keyboards.
+    try:
+        from utils.keyboard_expiry import expiry_loop
+        tasks.append(expiry_loop(app))
+    except Exception as e:
+        logging.warning(f"[KeyboardExpiry] Could not start: {e}")
 
     # Direct-forward background task: relays media you DM to the bot's own
     # Instagram / X accounts into Telegram. No-op when DIRECT_FORWARD_CHAT_ID
