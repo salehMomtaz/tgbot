@@ -252,9 +252,14 @@ have to rediscover them.
      fresh install will silently ship the stale binary. `utils/system_monitor.py`
      is only a thin spawner (`spawn_detached_monitor` / `is_running`) so
      main.py can launch it. It reads `/proc` and posts to Telegram via the raw
-     Bot HTTP API (NOT pyrogram), and is meant to outlive the bot — so it keeps
-     sending `#system` reports and 80% warnings (CPU/RAM/disk `SYSMON_WARN_PCT`)
-     even when `tgbot` is down. It runs as `deploy/tgbot-monitor.service`
+      Bot HTTP API (NOT pyrogram), and is meant to outlive the bot — so it keeps
+      sending `#system` reports and 80% warnings (CPU/RAM/disk `SYSMON_WARN_PCT`)
+      even when `tgbot` is down. **Report cadence counts on a monotonic
+      `reportCount`, never on `len(samples)`** — the history buffer is trimmed
+      to `historySamples` (240), so `len(samples) % reportEvery == 0` pins at
+      the cap and the monitor goes permanently silent after the first 240
+      samples (fixed in `shouldReportReport`; keep it that way). It runs as
+      `deploy/tgbot-monitor.service`
      (systemd template, `ExecStart` = the Go binary, installed but not
      auto-enabled) or a detached bot spawn. The binary writes
      `system_monitor.pid` on start and removes it on exit; the Python spawner's

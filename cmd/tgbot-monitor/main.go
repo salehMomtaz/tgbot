@@ -128,7 +128,7 @@ func run(cfg config) int {
 	fmt.Printf("[system_monitor] channel=%d paths=%v\n", cfg.logChannelID, cfg.diskPaths)
 
 	samples := []Sample{}
-	lastReportIdx := -1
+	reportCount := 0
 	lastWarnTs := time.Unix(0, 0)
 	warnActive := false
 
@@ -147,6 +147,7 @@ func run(cfg config) int {
 			continue
 		}
 
+		reportCount++
 		samples = append(samples, s)
 		if len(samples) > cfg.historySamples {
 			samples = samples[len(samples)-cfg.historySamples:]
@@ -170,11 +171,14 @@ func run(cfg config) int {
 			warnActive = false
 		}
 
-		// --- Periodic report every REPORT_EVERY_SAMPLES samples. ---
-		if len(samples)%cfg.reportEvery == 0 && (len(samples)-1) != lastReportIdx {
+		// --- Periodic report every REPORT_EVERY samples. ---
+		// Counts on a MONOTONIC reportCount, never on len(samples): the
+		// history buffer is trimmed to historySamples, so its length pins at
+		// that cap and `len(samples) % reportEvery == 0` would stop firing
+		// after the first 240 samples — the monitor then goes silent forever.
+		if shouldReportReport(reportCount, cfg.reportEvery) {
 			sendTelegram(cfg, formatReportRich(cfg, samples, s), formatReport(cfg, samples, s))
-			lastReportIdx = len(samples) - 1
-			fmt.Printf("[system_monitor] report sent (%d samples)\n", len(samples))
+			fmt.Printf("[system_monitor] report sent (%d samples)\n", reportCount)
 		}
 
 		time.Sleep(time.Duration(cfg.pollSeconds) * time.Second)
@@ -188,6 +192,14 @@ func anyDiskHot(cfg config, s Sample) bool {
 		}
 	}
 	return false
+}
+
+// shouldReportReport returns true every reportEvery-th sample, counting on a
+// monotonic counter so the report cadence survives the history buffer being
+// trimmed to historySamples (regression: len(samples)%reportEvery used to pin
+// at the cap and go silent forever after the first historySamples samples).
+func shouldReportReport(reportCount, reportEvery int) bool {
+	return reportEvery > 0 && reportCount > 0 && reportCount%reportEvery == 0
 }
 
 func secondLine(text string) string {

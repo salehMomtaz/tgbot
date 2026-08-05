@@ -138,6 +138,36 @@ func TestUptimeStr(t *testing.T) {
 	}
 }
 
+// Regression: the report cadence must keep firing every reportEvery samples
+// forever. The original implementation counted on len(samples), which the
+// history buffer trims to historySamples — so after 240 samples the length
+// pinned at 240 and the modulo never advanced: reports stopped permanently.
+func TestShouldReportReport(t *testing.T) {
+	const every = 60
+	for i := 1; i <= 1200; i++ { // 1200 samples >> historySamples=240
+		got := shouldReportReport(i, every)
+		want := i%every == 0
+		if got != want {
+			t.Fatalf("sample %d: shouldReportReport = %v, want %v", i, got, want)
+		}
+	}
+	// Every multiple of reportEvery within one window fires.
+	for _, n := range []int{60, 120, 180, 240, 300, 360, 420, 600, 1200} {
+		if !shouldReportReport(n, every) {
+			t.Errorf("expected report at sample %d", n)
+		}
+	}
+	// Non-multiples never fire; a zero/negative reportEvery is a no-op.
+	for _, n := range []int{1, 59, 61, 119, 241, 299, 601, 1199} {
+		if shouldReportReport(n, every) {
+			t.Errorf("did not expect report at sample %d", n)
+		}
+	}
+	if shouldReportReport(60, 0) || shouldReportReport(60, -1) || shouldReportReport(0, 60) {
+		t.Errorf("shouldReportReport must be a no-op for reportEvery<=0 or reportCount==0")
+	}
+}
+
 func TestEsc(t *testing.T) {
 	if got := esc(`<b>&"'`); got != "&lt;b&gt;&amp;&#34;&#39;" {
 		t.Errorf("esc output mismatch: %q", got)
