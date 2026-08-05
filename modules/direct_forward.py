@@ -324,6 +324,7 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 progress_msg=None,
                 delete_progress_after=True,
                 caption=caption,
+                premium_allowed=True,
             )
         await _send_followups(bot_client, chat_id, followups)
         logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id}")

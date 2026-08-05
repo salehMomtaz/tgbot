@@ -10,7 +10,7 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 import config
 from utils.shared import queue, DOWNLOAD_CACHE  # Fixed: Import from clean shared registry
 from main import progress_bar_handler, log_event
-from utils.gate import is_authorized
+from utils.gate import is_authorized, is_premium_user
 from utils.downloader import (
     extract_formats,
     download_media,
@@ -54,31 +54,38 @@ def _spawn_fetch(coro) -> None:
 # ===========================================================================
 # Single-video format keyboard
 # ===========================================================================
-def build_format_keyboard(cache_id: str, videos: list, audios: list) -> InlineKeyboardMarkup:
+def build_format_keyboard(cache_id: str, videos: list, audios: list, premium_allowed: bool = True) -> InlineKeyboardMarkup:
     """Build the video/audio format-selection keyboard for a single media link.
 
     Video button sizes already include the merged best-audio track (see
     utils.downloader.extract_formats), so they match what actually gets uploaded.
+
+    Formats over Telegram's 2 GB bot upload ceiling are only reachable through
+    the Premium userbot (4 GB path). When the user is not Premium-whitelisted
+    (*premium_allowed* False) those options are shown locked with a 🔒 and route
+    to a "Premium required" answer instead of the download callback.
     """
+    _TWO_GB = 2000 * 1024 * 1024
+
+    def _btn(prefix: str, fmt: dict) -> InlineKeyboardButton:
+        locked = not premium_allowed and fmt.get("bytes", 0) > _TWO_GB
+        label = f"{prefix} {fmt['quality']} ({fmt['size_str']})"
+        if locked:
+            label = f"🔒 {label}"
+        callback = f"dl:{cache_id}:lock" if locked else f"dl:{cache_id}:{prefix}:{fmt['format_id']}"
+        return InlineKeyboardButton(text=label, callback_data=callback)
+
     max_rows = max(len(videos), len(audios))
     keyboard_rows = []
     for i in range(max_rows):
         row = []
         if i < len(videos):
-            v = videos[i]
-            row.append(InlineKeyboardButton(
-                text=f"🎥 {v['quality']} ({v['size_str']})",
-                callback_data=f"dl:{cache_id}:v:{v['format_id']}"
-            ))
+            row.append(_btn("🎥", videos[i]))
         else:
             row.append(InlineKeyboardButton(text="—", callback_data="none"))
 
         if i < len(audios):
-            a = audios[i]
-            row.append(InlineKeyboardButton(
-                text=f"🎵 {a['quality']} ({a['size_str']})",
-                callback_data=f"dl:{cache_id}:a:{a['format_id']}"
-            ))
+            row.append(_btn("🎵", audios[i]))
         else:
             row.append(InlineKeyboardButton(text="—", callback_data="none"))
         keyboard_rows.append(row)
@@ -118,7 +125,8 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
             "origin_message_id": reply_to_id,
         }
 
-        keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"])
+        premium_allowed = is_premium_user(user_id)
+        keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"], premium_allowed=premium_allowed)
 
         await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
         await status.close()
@@ -130,6 +138,7 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
                 f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
                 f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
                 f"Select an option below:"
+                + ("" if premium_allowed else "\n\n🔒 = 4GB Premium upload (ask the admin to enable it)")
             ),
             reply_markup=keyboard,
         )
@@ -373,6 +382,7 @@ def register_downloader_handlers(app: Client):
                         thumb_path=None,
                         progress_msg=status_msg,
                         reply_to_message_id=message.id,
+                        premium_allowed=is_premium_user(user_id),
                     )
                     await log_event(f"✅ **Direct Upload:** Finished for User `{user_id}` from source `{url}`.")
                 except Exception as e:
@@ -409,6 +419,14 @@ def register_downloader_handlers(app: Client):
             await callback_query.answer("Cancelled.")
             return
 
+        if action == "lock":
+            await callback_query.answer(
+                "🔒 This quality is over Telegram's 2GB bot upload limit. "
+                "Ask the admin to enable 4GB Premium uploads for you.",
+                show_alert=True,
+            )
+            return
+
         format_id = parts[3]
         cache_data = DOWNLOAD_CACHE.get(cache_id)
         if not cache_data:
@@ -418,9 +436,10 @@ def register_downloader_handlers(app: Client):
         target_list = cache_data["videos"] if action == 'v' else cache_data["audios"]
         target_fmt = next((f for f in target_list if f["format_id"] == format_id), None)
 
-        if not premium_app and target_fmt and target_fmt["bytes"] > (2000 * 1024 * 1024):
-            await callback_query.answer("❌ This format exceeds Telegram's 2GB bot upload limit. Please select another quality or connect your Premium Userbot.", show_alert=True)
-            return
+        if not premium_app or not is_premium_user(user_id):
+            if target_fmt and target_fmt["bytes"] > (2000 * 1024 * 1024):
+                await callback_query.answer("❌ This format exceeds Telegram's 2GB bot upload limit. Ask the admin to enable 4GB Premium uploads for you.", show_alert=True)
+                return
 
         await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
         await callback_query.answer("Transfer enqueued...")
@@ -476,6 +495,7 @@ def register_downloader_handlers(app: Client):
                     thumb_path=thumb_path,
                     progress_msg=callback_query.message,
                     reply_to_message_id=cache_data.get("origin_message_id"),
+                    premium_allowed=is_premium_user(user_id),
                 )
 
                 DOWNLOAD_CACHE.pop(cache_id, None)
@@ -647,6 +667,7 @@ def register_downloader_handlers(app: Client):
                         progress_msg=progress_msg,
                         delete_progress_after=False,  # keep the rolling message across videos
                         reply_to_message_id=origin_id,
+                        premium_allowed=is_premium_user(user_id),
                     )
                     success += 1
                     await log_event(f"✅ **Playlist item {idx}/{total}:** `{result['title']}` sent.")

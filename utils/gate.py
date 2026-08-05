@@ -7,7 +7,8 @@ def load_database() -> dict:
     default_db = {
         "authorized": [],
         "blacklisted": [],
-        "document_mode": []
+        "document_mode": [],
+        "premium_users": []
     }
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w') as f:
@@ -22,7 +23,8 @@ def load_database() -> dict:
                 migrated = {
                     "authorized": data,
                     "blacklisted": [],
-                    "document_mode": []
+                    "document_mode": [],
+                    "premium_users": []
                 }
                 save_database(migrated)
                 return migrated
@@ -34,6 +36,8 @@ def load_database() -> dict:
                 data["blacklisted"] = []
             if "document_mode" not in data:
                 data["document_mode"] = []
+            if "premium_users" not in data:
+                data["premium_users"] = []
             return data
     except Exception:
         return default_db
@@ -102,3 +106,35 @@ def toggle_document_mode(user_id: int) -> bool:
         state = True
     save_database(db)
     return state
+
+
+def is_premium_user(user_id: int) -> bool:
+    """True if *user_id* is whitelisted for 4 GB Premium uploads.
+
+    The bot creator is implicitly premium: they configured the Premium
+    userbot session and must always be able to use it.
+    """
+    if user_id == SYSTEM_CREATOR_ID:
+        return True
+    db = load_database()
+    return user_id in db["premium_users"]
+
+
+def add_premium_user(user_id: int) -> bool:
+    """Whitelist *user_id* for the 4 GB Premium upload path."""
+    db = load_database()
+    if user_id not in db["premium_users"]:
+        db["premium_users"].append(user_id)
+        save_database(db)
+        return True
+    return False
+
+
+def remove_premium_user(user_id: int) -> bool:
+    """Remove *user_id* from the 4 GB Premium upload whitelist."""
+    db = load_database()
+    if user_id in db["premium_users"]:
+        db["premium_users"].remove(user_id)
+        save_database(db)
+        return True
+    return False

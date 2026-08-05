@@ -21,7 +21,10 @@ from utils.gate import (
     toggle_document_mode,
     is_blacklisted,
     blacklist_user,
-    is_authorized
+    is_authorized,
+    is_premium_user,
+    add_premium_user,
+    remove_premium_user,
 )
 from utils.id_validator import is_valid_telegram_id
 
@@ -57,6 +60,7 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Main admin console keyboard. PO Token badge reflects live provider health."""
     doc_status = "✅" if is_document_mode(user_id) else "❌"
     pot_status = "🟢" if _pot_running() else "🔴"
+    premium_status = "🟢" if config.PREMIUM_STRING_SESSION else "⚪"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 List Users", callback_data="admin_list"),
          InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
@@ -64,10 +68,20 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🚫 Blacklist Logs", callback_data="admin_blacklist")],
         [InlineKeyboardButton(f"📄 Doc Mode: {doc_status}", callback_data="admin_toggle_doc"),
          InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
-        [InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu"),
-         InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue")],
-        [InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu"),
-         InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+        [InlineKeyboardButton(f"👑 Premium Uploads: {premium_status}", callback_data="admin_premium_menu"),
+         InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu")],
+        [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"),
+         InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
+        [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+    ])
+
+
+def get_premium_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Premium", callback_data="admin_premium_add"),
+         InlineKeyboardButton("➖ Remove Premium", callback_data="admin_premium_remove")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_premium_menu"),
+         InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
 
 
@@ -344,6 +358,36 @@ def register_admin_handlers(app: Client):
                 )
                 await log_event(f"🔓 **User Unbanned:** Creator unbanned and unblacklisted User ID `{target_id}`.")
 
+        elif state == "waiting_for_add_premium":
+            if add_premium_user(target_id):
+                await message.reply_text(
+                    f"✅ User `{target_id}` is now enabled for **4 GB Premium uploads**.",
+                    reply_markup=back_markup
+                )
+                await log_event(f"👑 **Premium Granted:** Creator enabled 4 GB uploads for User ID `{target_id}`.")
+            else:
+                await message.reply_text(
+                    f"ℹ️ User `{target_id}` is already Premium-enabled.",
+                    reply_markup=back_markup
+                )
+
+        elif state == "waiting_for_remove_premium":
+            db = load_database()
+            if target_id not in db["premium_users"]:
+                await message.reply_text(
+                    f"❌ Error: User ID `{target_id}` is not in the Premium whitelist.",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+
+            if remove_premium_user(target_id):
+                await message.reply_text(
+                    f"✅ User `{target_id}` Premium upload access revoked.",
+                    reply_markup=back_markup
+                )
+                await log_event(f"👑 **Premium Revoked:** Creator removed User ID `{target_id}` from Premium uploads.")
+
         message.stop_propagation()
 
     # =========================================================================
@@ -581,6 +625,46 @@ def register_admin_handlers(app: Client):
             ACTIVE_PROMPTS[user_id] = callback_query.message.id
             await callback_query.message.edit_text(
                 "➖ **Remove Authorized User**\nPlease type the numerical ID of the user you want to remove directly in your text box and press send:",
+                reply_markup=back_markup
+            )
+            await callback_query.answer()
+
+        # =========================================================================
+        # Premium Uploads (4 GB) Sub-Menus Configuration
+        # =========================================================================
+        elif data == "admin_premium_menu":
+            USER_STATES.pop(user_id, None)
+            ACTIVE_PROMPTS.pop(user_id, None)
+            db = load_database()
+            premium_users = db["premium_users"]
+            premium_lines = "\n".join([f"• `{uid}`" for uid in premium_users]) if premium_users else "No Premium-enabled users yet."
+
+            if config.PREMIUM_STRING_SESSION:
+                status_note = "🟢 Premium userbot session is configured — 4 GB uploads are available to whitelisted users."
+            else:
+                status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Generate one via `generate_session.py`."
+
+            await callback_query.message.edit_text(
+                f"👑 **Premium Uploads (4 GB)**\n\n{status_note}\n\n"
+                f"**Whitelisted users:**\n{premium_lines}",
+                reply_markup=get_premium_menu_keyboard()
+            )
+            await callback_query.answer()
+
+        elif data == "admin_premium_add":
+            USER_STATES[user_id] = "waiting_for_add_premium"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
+            await callback_query.message.edit_text(
+                "👑 **Enable 4 GB Premium Uploads**\nPlease type the numerical ID of the user to whitelist for 4 GB uploads:",
+                reply_markup=back_markup
+            )
+            await callback_query.answer()
+
+        elif data == "admin_premium_remove":
+            USER_STATES[user_id] = "waiting_for_remove_premium"
+            ACTIVE_PROMPTS[user_id] = callback_query.message.id
+            await callback_query.message.edit_text(
+                "👑 **Disable 4 GB Premium Uploads**\nPlease type the numerical ID of the user to remove from the Premium whitelist:",
                 reply_markup=back_markup
             )
             await callback_query.answer()

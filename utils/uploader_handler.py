@@ -3,7 +3,7 @@ import os
 import asyncio
 from pyrogram import Client
 from pyrogram.errors import MessageIdInvalid, RPCError
-from utils.gate import is_document_mode
+from utils.gate import is_document_mode, is_premium_user
 
 # Telegram upload ceilings (bytes).
 #   Bot API:  2 GB  (2 * 1024^3 = 2147483648)
@@ -37,17 +37,24 @@ async def send_reply_safe(send_fn, reply_to_message_id: int | None = None, **kwa
     return await send_fn(**kwargs)
 
 
-async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False, caption: str | None = None, reply_to_message_id: int | None = None):
+async def send_single_media(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document=False, caption: str | None = None, reply_to_message_id: int | None = None, premium_allowed: bool | None = None):
     """Sends a single media file using the designated client, passing thumbs to document uploads too.
 
     When *reply_to_message_id* is set (the user's original link message), the
     media message quote-replies to it so chat context stays attached to the
     request that produced the file.
+
+    *premium_allowed* decides whether the 4 GB Premium upload path may be used
+    for this recipient. ``None`` (default) infers it from the recipient's own
+    Premium whitelist status (*chat_id* in a private chat == the user id).
     """
     from utils.downloader import probe_video_dimensions
 
+    if premium_allowed is None:
+        premium_allowed = is_premium_user(chat_id)
+
     file_size = os.path.getsize(file_path)
-    use_premium = bool(premium_client and file_size > (2000 * 1024 * 1024))
+    use_premium = bool(premium_client and premium_allowed and file_size > (2000 * 1024 * 1024))
     client = premium_client if use_premium else bot_client
 
     if force_document:
@@ -92,7 +99,7 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
         )
 
 
-async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None, reply_to_message_id: int | None = None):
+async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None, reply_to_message_id: int | None = None, premium_allowed: bool | None = None):
     """On-Demand Sequential Uploader.
 
     Splits the file only if it exceeds the active Telegram ceiling, then streams
@@ -109,8 +116,11 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
     from utils.downloader import split_file_generator, split_video_by_size_generator
     from main import progress_bar_handler
 
+    if premium_allowed is None:
+        premium_allowed = is_premium_user(chat_id)
+
     file_size = os.path.getsize(file_path)
-    use_premium = bool(premium_client and file_size > (2000 * 1024 * 1024))
+    use_premium = bool(premium_client and premium_allowed and file_size > (2000 * 1024 * 1024))
 
     if use_premium:
         target_bytes = _PREMIUM_TARGET
@@ -171,6 +181,7 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 force_document=force_document or is_split,
                 caption=caption if part_num == 1 else None,
                 reply_to_message_id=reply_to_message_id,
+                premium_allowed=premium_allowed,
             )
 
             if part_path != file_path:
