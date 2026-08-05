@@ -49,6 +49,7 @@ ACTIVE_PROMPTS = {}
 # In-chat Premium session-string generation state.
 # PREMIUM_GEN[user_id] = {
 #     "client": temp in-memory Client, "phone": str, "phone_code_hash": str,
+#     "code_buffer": str (digits tapped on the dial pad, Step 2/3),
 #     "result": str|None, "expires_at": float
 # }
 # ---------------------------------------------------------------------------
@@ -60,6 +61,37 @@ _PREMIUM_GEN_TTL = 15 * 60  # auto-abort a dangling generation after 15 min
 _gen_abort_markup = InlineKeyboardMarkup([[
     InlineKeyboardButton("❌ Abort Session Generation", callback_data="admin_premium_gen_abort")
 ]])
+
+# Phone-call-app style dial pad used for Step 2/3 (login code entry).
+# The code is entered via inline-button taps (callback data), NEVER as a chat
+# message: Telegram's anti-sharing detection sees a login code typed into a
+# chat, flags it as "previously shared by your account" and instantly
+# invalidates it (PHONE_CODE_EXPIRED seconds after send_code). Buttons carry
+# the digit in callback_data so the code never appears in message text.
+# Simple numeric layout: 3x4 keypad (1-9, then backspace/0/OK) + Abort.
+_gen_dial_pad_markup = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("1", callback_data="admin_premium_gen_digit:1"),
+        InlineKeyboardButton("2", callback_data="admin_premium_gen_digit:2"),
+        InlineKeyboardButton("3", callback_data="admin_premium_gen_digit:3"),
+    ],
+    [
+        InlineKeyboardButton("4", callback_data="admin_premium_gen_digit:4"),
+        InlineKeyboardButton("5", callback_data="admin_premium_gen_digit:5"),
+        InlineKeyboardButton("6", callback_data="admin_premium_gen_digit:6"),
+    ],
+    [
+        InlineKeyboardButton("7", callback_data="admin_premium_gen_digit:7"),
+        InlineKeyboardButton("8", callback_data="admin_premium_gen_digit:8"),
+        InlineKeyboardButton("9", callback_data="admin_premium_gen_digit:9"),
+    ],
+    [
+        InlineKeyboardButton("⌫", callback_data="admin_premium_gen_bksp"),
+        InlineKeyboardButton("0", callback_data="admin_premium_gen_digit:0"),
+        InlineKeyboardButton("✓", callback_data="admin_premium_gen_enter"),
+    ],
+    [InlineKeyboardButton("❌ Abort Session Generation", callback_data="admin_premium_gen_abort")],
+])
 
 
 async def sweep_stale_generations(client=None):
@@ -202,6 +234,24 @@ def register_admin_handlers(app: Client):
         except Exception:
             pass
 
+    async def _premium_gen_pad_text(callback_query, gen):
+        """Re-render the Step 2/3 dial-pad message with the digits entered so far."""
+        code = gen.get("code_buffer", "")
+        shown = " ".join(list(code)) if code else "_ (empty) _"
+        try:
+            await callback_query.message.edit_text(
+                "🔑 **Step 2/3 — Enter the login code**\n\n"
+                f"Code sent to `{gen.get('phone', '')}`. Enter it with the **dial pad below** — "
+                "tap the digits like a phone call app, then **✓** when done.\n\n"
+                f"**Entered so far:** `{shown}`\n\n"
+                "_(Do NOT type the code as a message: Telegram flags codes typed "
+                "into a chat as 'shared' and instantly invalidates them.)_\n\n"
+                "_(Tap Abort at any time to cancel.)_",
+                reply_markup=_gen_dial_pad_markup
+            )
+        except Exception:
+            pass
+
     async def _handle_premium_gen_input(client: Client, message: Message,
                                         user_id: int, state: str, text: str, prompt_id):
         """Process one text step of the in-chat premium session generation."""
@@ -219,11 +269,17 @@ def register_admin_handlers(app: Client):
             )
             return
 
-        if prompt_id:
+        # The code step's "prompt" is the live dial-pad message (Step 2/3) which
+        # must survive text that the user types instead of tapping digits — only
+        # delete the prompt for the phone/password steps, and re-register the
+        # dial pad so abort/cleanup still finds it.
+        if prompt_id and state != "waiting_for_premium_code":
             try:
                 await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
             except Exception:
                 pass
+        elif prompt_id and state == "waiting_for_premium_code":
+            ACTIVE_PROMPTS[user_id] = prompt_id
 
         if state == "waiting_for_premium_phone":
             phone = text.strip().replace(" ", "")
@@ -258,49 +314,36 @@ def register_admin_handlers(app: Client):
                 "client": tmp,
                 "phone": phone,
                 "phone_code_hash": phone_code_hash,
+                "code_buffer": "",
                 "result": None,
                 "expires_at": _time.monotonic() + _PREMIUM_GEN_TTL,
             }
             USER_STATES[user_id] = "waiting_for_premium_code"
             step_msg = await message.reply_text(
                 "🔑 **Step 2/3 — Enter the login code**\n\n"
-                f"Code sent to `{phone}`. Type the confirmation code you received "
-                "(SMS or the Telegram app).\n\n"
+                f"Code sent to `{phone}`. Enter it with the **dial pad below** — "
+                "tap the digits like a phone call app, then **✓** when done.\n\n"
+                "_(Do NOT type the code as a message: Telegram flags codes typed "
+                "into a chat as 'shared' and instantly invalidates them.)_\n\n"
                 "_(Tap Abort at any time to cancel.)_",
-                reply_markup=_gen_abort_markup
+                reply_markup=_gen_dial_pad_markup
             )
             ACTIVE_PROMPTS[user_id] = step_msg.id
             return
 
         if state == "waiting_for_premium_code":
-            gen = PREMIUM_GEN.get(user_id)
-            if not gen:
-                await message.reply_text("⚠️ Session generation expired. Start again from the 👑 Premium menu.", reply_markup=back_markup)
-                return
-            code = text.strip()
-            try:
-                outcome = await premium_session.verify_code(
-                    gen["client"], gen["phone"], gen["phone_code_hash"], code
-                )
-            except Exception as e:
-                await message.reply_text(
-                    f"❌ Invalid code: `{e}`.\n\n"
-                    "Send the code again, or tap **Abort** to cancel.",
-                    reply_markup=_gen_abort_markup
-                )
-                return
-            if outcome == "2fa":
-                USER_STATES[user_id] = "waiting_for_premium_password"
-                step_msg = await message.reply_text(
-                    "🔑 **Step 3/3 — Two-factor password**\n\n"
-                    "This account has two-step verification enabled. Type your **2FA password** "
-                    "to finish logging in.\n\n"
-                    "_(Tap Abort at any time to cancel.)_",
-                    reply_markup=_gen_abort_markup
-                )
-                ACTIVE_PROMPTS[user_id] = step_msg.id
-                return
-            await _finish_premium_gen(client, message, user_id)
+            # The code MUST be entered via the dial pad buttons (callback data).
+            # A code typed as a chat message is detected by Telegram's
+            # anti-sharing logic and rejected server-side within seconds —
+            # accept it here only to tell the user why it won't work.
+            await message.reply_text(
+                "❌ Don't type the code as a message — Telegram flags codes sent "
+                "in a chat as 'previously shared by your account' and they stop "
+                "working instantly.\n\n"
+                "Please use the **dial pad** on the Step 2 message to enter the "
+                "code, then tap **✓**.",
+                reply_markup=_gen_abort_markup
+            )
             return
 
         if state == "waiting_for_premium_password":
@@ -966,6 +1009,80 @@ def register_admin_handlers(app: Client):
                 reply_markup=back_markup
             )
             await callback_query.answer("Aborted.", show_alert=False)
+
+        elif data.startswith("admin_premium_gen_digit:"):
+            # Dial-pad digit tap (Step 2/3). The digit travels in callback_data,
+            # never in a chat message, so Telegram's login-code anti-sharing
+            # detection is not triggered.
+            gen = PREMIUM_GEN.get(user_id)
+            if not gen or not gen.get("client"):
+                await callback_query.answer("Session generation expired. Start again from the 👑 Premium menu.", show_alert=True)
+                return
+            digit = data.rsplit(":", 1)[1]
+            if len(gen.get("code_buffer", "")) >= 6:
+                await callback_query.answer("Max 6 digits entered — tap ✓ or ⌫.", show_alert=False)
+                return
+            gen["code_buffer"] = gen.get("code_buffer", "") + digit
+            await _premium_gen_pad_text(callback_query, gen)
+            await callback_query.answer()
+
+        elif data == "admin_premium_gen_bksp":
+            gen = PREMIUM_GEN.get(user_id)
+            if not gen or not gen.get("client"):
+                await callback_query.answer("Session generation expired. Start again from the 👑 Premium menu.", show_alert=True)
+                return
+            gen["code_buffer"] = gen.get("code_buffer", "")[:-1]
+            await _premium_gen_pad_text(callback_query, gen)
+            await callback_query.answer()
+
+        elif data == "admin_premium_gen_enter":
+            # Submit the entered code (Step 2/3 -> 2FA or finish).
+            from utils import premium_session
+            gen = PREMIUM_GEN.get(user_id)
+            if not gen or not gen.get("client"):
+                await callback_query.answer("Session generation expired. Start again from the 👑 Premium menu.", show_alert=True)
+                return
+            code = gen.get("code_buffer", "")
+            if len(code) < 4:
+                await callback_query.answer("Enter the full code first, then tap ✓.", show_alert=True)
+                return
+            try:
+                outcome = await premium_session.verify_code(
+                    gen["client"], gen["phone"], gen["phone_code_hash"], code
+                )
+            except Exception as e:
+                gen["code_buffer"] = ""
+                await callback_query.message.edit_text(
+                    f"❌ Invalid code: `{e}`.\n\n"
+                    "The code was rejected — check it on the dial pad again.\n\n"
+                    "_(If the code expired, tap **Abort** and start over.)_",
+                    reply_markup=_gen_dial_pad_markup
+                )
+                await callback_query.answer()
+                return
+            if outcome == "2fa":
+                USER_STATES[user_id] = "waiting_for_premium_password"
+                step_msg = await callback_query.message.edit_text(
+                    "🔑 **Step 3/3 — Two-factor password**\n\n"
+                    "This account has two-step verification enabled. Type your **2FA password** "
+                    "to finish logging in.\n\n"
+                    "_(Tap Abort at any time to cancel.)_",
+                    reply_markup=_gen_abort_markup
+                )
+                ACTIVE_PROMPTS[user_id] = step_msg.id
+                await callback_query.answer()
+                return
+            # Success: replace the dial pad (which shows the entered code) with a
+            # plain "logging in" note before exporting the session string.
+            try:
+                await callback_query.message.edit_text(
+                    "✅ Code accepted — logging in and exporting the session string…"
+                )
+            except Exception:
+                pass
+            await _finish_premium_gen(client, callback_query.message, user_id)
+            await callback_query.answer()
+            return
 
         elif data == "admin_premium_gen_clean":
             # Menu button: sweep any stale generation, then re-render the menu.
