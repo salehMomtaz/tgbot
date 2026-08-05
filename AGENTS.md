@@ -419,7 +419,10 @@ Don't port it to Go.
   completion/abort/`/start` escape/TTL expiry (`sweep_stale_generations` is
   driven by `utils/keyboard_expiry.expiry_loop`) — a dangling temp login is a
   bug. Do not re-add a terminal `generate_session.py`; keep the flow in the
-  console.
+  console. **`register_admin_handlers(app)` names its closure param `app`, not
+  `client`** — inner closures like `_premium_gen_cleanup` must use `app` (or
+  accept `client` as their own param); referencing `client` at that scope raises
+  `NameError` on every callback and the button silently dies.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`

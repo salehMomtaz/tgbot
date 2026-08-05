@@ -102,6 +102,24 @@ The terminal `generate_session.py` flow is gone; the admin generates the
   result TTL). `sweep_stale_generations(client)` is a module-level background
   sweep driven by `utils.keyboard_expiry.expiry_loop` so a dangling temp login
   can never leak even if the admin walks away mid-flow.
+- **Closure gotcha (fixed 2026-08-05):** `register_admin_handlers(app)` names
+  its closure parameter `app`, NOT `client`. A first-pass implementation wrote
+  `purge_active_prompt(user_id, client)` inside `_premium_gen_cleanup`, which
+  threw `NameError: name 'client' is not defined` on every
+  `admin_premium_gen` / `_abort` callback — the button looked completely dead
+  (unanswered callback = stuck spinner). Always reference the client via the
+  enclosing scope's real parameter (`app`). Message/callback handlers define
+  their own `client` parameter, so `client` is only valid *inside* them.
+- **Callback safety net:** `admin_callback_handler` is now a thin try/except
+  wrapper over `_admin_callback_dispatch` — any dispatch error logs to the
+  channel and answers the callback with an alert instead of hanging the
+  spinner. Admin callback branches are a huge elif-chain; keep new branches
+  inside the dispatch.
+- **"🧹 Cleanup Stale Gen" is its own callback** (`admin_premium_gen_clean`).
+  It originally shared `admin_premium_gen_abort`, so clicking it on the menu
+  re-edited the PREMIUM menu into an "aborted" message (and repeated presses
+  produced `MessageNotModified`). The menu button now re-renders the menu after
+  sweeping; the abort callback is only for the in-flow Abort button.
 - The generated string is **sensitive** (full account access) and is shown in
   the private chat; a restart is required after saving before the Premium
   userbot actually uses it.
