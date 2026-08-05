@@ -1,5 +1,6 @@
 # main.py
 import os
+import sys
 import time
 import signal
 import asyncio
@@ -516,3 +517,31 @@ if __name__ == "__main__":
         loop.run_until_complete(main_engine())
     except KeyboardInterrupt:
         print("Stopping bot gracefully...")
+
+
+def schedule_self_restart(delay: float = 3.0) -> None:
+    """Restart this process on its own after `delay` seconds.
+
+    The bot runs under systemd with `Restart=always`. Sending SIGTERM to our own
+    PID trips the KeyboardInterrupt path in `__main__` above: pyrogram drains,
+    the PO-token provider is stopped, cookie locks are released, the process
+    exits, and systemd relaunches `run.sh` — which re-reads `.env`, so a freshly
+    saved PREMIUM_STRING_SESSION takes effect. This is exactly what
+    `sudo systemctl restart tgbot` does, without needing shell access.
+
+    When INVOCATION_ID is absent (not running under systemd, e.g. a tmux/foreground
+    dev run), fall back to re-execing the process image in place.
+    """
+    def _restart_now():
+        if os.environ.get("INVOCATION_ID"):
+            logging.info("[Restart] systemd detected, sending SIGTERM to self.")
+            os.kill(os.getpid(), signal.SIGTERM)
+        else:
+            logging.info("[Restart] No systemd; re-execing in place.")
+            os.execv(sys.executable, [sys.executable, os.path.abspath("main.py")])
+
+    async def _delayed_restart():
+        await asyncio.sleep(delay)
+        _restart_now()
+
+    asyncio.get_running_loop().create_task(_delayed_restart())

@@ -1117,15 +1117,15 @@ def register_admin_handlers(app: Client):
             PREMIUM_GEN.pop(user_id, None)
             await callback_query.message.edit_text(
                 "✅ **Session string saved!**\n\n"
-                "`PREMIUM_STRING_SESSION` has been written to `.env` and the console "
-                "now shows the session as configured.\n\n"
-                "**A bot restart is required for the Premium userbot to actually use it:**\n"
-                "`sudo systemctl restart tgbot`\n\n"
-                "After restart, whitelist the users who may upload 4 GB via **➕ Add Premium**.",
+                "`PREMIUM_STRING_SESSION` has been written to `.env`.\n\n"
+                "🔄 **Restarting the bot automatically** to activate it — back in "
+                "a few seconds. No shell access needed.",
                 reply_markup=back_markup
             )
-            await log_event("👑 **Premium Session:** New PREMIUM_STRING_SESSION saved to .env by creator. Bot restart required.")
+            await log_event("👑 **Premium Session:** New PREMIUM_STRING_SESSION saved to .env by creator. Restarting automatically.")
             await callback_query.answer()
+            from main import schedule_self_restart
+            schedule_self_restart(delay=3.0)
 
         # =========================================================================
         # Cookies Sub-Menus Configuration
