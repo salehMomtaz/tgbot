@@ -405,6 +405,21 @@ Don't port it to Go.
   `premium_allowed=True` (operator's own pipeline; the relay chat may differ
   from the creator id). Do NOT widen the 4 GB path back to global — the whitelist
   is the whole point.
+- **The premium session string is generated in-chat, not on the terminal.**
+  The 👑 Premium menu's **🔑 Generate Session** runs the interactive
+  phone → code → (optional 2FA) login on a temporary **in-memory** pyrogram
+  client (`utils/premium_session.py`) and exports `PREMIUM_STRING_SESSION`;
+  💾 Save to .env writes it via `dotenv.set_key` (dotenv-style quoting — safe
+  for `run.sh`'s parser) and refreshes `config.PREMIUM_STRING_SESSION` in memory.
+  The gen flow lives in `modules/admin.py` (`PREMIUM_GEN`,
+  `waiting_for_premium_phone/_code/_password`, callbacks
+  `admin_premium_gen/_abort/_save`); its free-form text states are dispatched
+  **before** the `is_valid_telegram_id` gate. Every step shows an
+  **❌ Abort Session Generation** button, and the temp client is disconnected on
+  completion/abort/`/start` escape/TTL expiry (`sweep_stale_generations` is
+  driven by `utils/keyboard_expiry.expiry_loop`) — a dangling temp login is a
+  bug. Do not re-add a terminal `generate_session.py`; keep the flow in the
+  console.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`

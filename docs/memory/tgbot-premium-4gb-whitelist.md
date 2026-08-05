@@ -72,3 +72,51 @@ users, and non-whitelisted users saw the full format list including impossible
 - **The whitelist is the whole point.** The 4 GB path must stay per-user; if a
   future change makes it global again, that's a regression (and the admin
   console becomes decorative).
+
+## In-chat session-string generation (2026-08-05)
+
+The terminal `generate_session.py` flow is gone; the admin generates the
+`PREMIUM_STRING_SESSION` entirely from the 👑 Premium menu
+(`🔑 Generate Session`):
+
+- **`utils/premium_session.py`** — thin wrapper over a temporary **in-memory**
+  pyrogram client (`Client(":memory:", api_id=…, api_hash=…)`) that runs the
+  interactive login: `send_code` (→ `phone_code_hash`), `sign_in` (raises
+  `SessionPasswordNeeded` when 2FA is on), `check_password`, then
+  `export_session_string`. `save_session_string` persists it to `.env` via
+  `dotenv.set_key` (dotenv-style quoting — exactly what `run.sh`'s parser and
+  `config.py` expect) and refreshes `config.PREMIUM_STRING_SESSION` in memory.
+  The temp client **never writes a session file** (":memory:") and is always
+  disconnected via `discard_client`.
+- **`modules/admin.py`** — `admin_premium_gen` starts the flow, then the three
+  states `waiting_for_premium_phone` / `_code` / `_password` accept free-form
+  text. They are dispatched **before** the `is_valid_telegram_id` gate (they are
+  not user IDs). Every step carries a **❌ Abort Session Generation** button
+  (`admin_premium_gen_abort`); a finished flow shows the string in a code block
+  with **💾 Save to .env** (`admin_premium_gen_save`, writes via
+  `save_session_string`) or **❌ Discard**.
+- **Cleanup invariants** — the temp client is disconnected on: completion
+  (before the result is shown), abort, `/start` escape, leaving to `admin_main`,
+  reopening the premium menu, or TTL expiry. `PREMIUM_GEN[user_id]` holds
+  `{client, phone, phone_code_hash, result, expires_at}` (15-min login TTL, 5-min
+  result TTL). `sweep_stale_generations(client)` is a module-level background
+  sweep driven by `utils.keyboard_expiry.expiry_loop` so a dangling temp login
+  can never leak even if the admin walks away mid-flow.
+- The generated string is **sensitive** (full account access) and is shown in
+  the private chat; a restart is required after saving before the Premium
+  userbot actually uses it.
+
+## Inline-keyboard auto-expiration (2026-08-05)
+
+`utils/keyboard_expiry.py` strips unused inline keyboards so chat history does
+not accumulate dead buttons:
+
+- Registry keyed by `(chat_id, message_id)` — message ids are **only unique per
+  chat**, so a single-`message_id` key would let two users' keyboards collide
+  (both chats frequently land on the same small message id).
+- `watch(chat_id, message_id)` is called by `main.py`'s send/edit monkeypatches
+  whenever a message carries a `reply_markup`; `touch(chat_id, message_id)`
+  resets the 20-min deadline from the group `-2` callback interceptor (every
+  button press keeps the keyboard alive); `expiry_loop` runs every 30 s,
+  strips up to 50 expired `reply_markup`s per tick, and also drives
+  `sweep_stale_generations` above.
