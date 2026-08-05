@@ -393,6 +393,18 @@ Don't port it to Go.
 - **Upload ceilings** (`utils/uploader_handler.py`): Bot API 2 GB / Premium 4 GB,
   with a *target* below the limit and a *hard* ceiling because the ffmpeg
   keyframe splitter can overshoot. Don't tighten target past the hard ceiling.
+- **4 GB uploads are a per-user admin whitelist, gated on `is_premium_user`.**
+  Bots are hard-capped at 2 GB by Telegram ("Bots can't be Premium users" —
+  tdlib/telegram-bot-api#583); only a Premium *user* account over MTProto can
+  send 4 GB. The 4 GB path is therefore only active when `PREMIUM_STRING_SESSION`
+  is set, AND the recipient is Premium-whitelisted (Admin → 👑 Premium Uploads;
+  the creator is always premium). The uploader takes an explicit
+  `premium_allowed` flag (`None` → inferred from `is_premium_user(chat_id)`);
+  the downloader locks >2 GB format buttons (🔒) for non-whitelisted users and
+  rejects the >2 GB callback at `dl:` dispatch. Direct-forward relays pass
+  `premium_allowed=True` (operator's own pipeline; the relay chat may differ
+  from the creator id). Do NOT widen the 4 GB path back to global — the whitelist
+  is the whole point.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`
