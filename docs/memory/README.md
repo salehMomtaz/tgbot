@@ -41,7 +41,10 @@ code or the git log alone. Last updated: 2026-08-04.
 - [Instagram anti-detection posture](tgbot-ig-anti-detection.md) — the DM
   poller got the account flagged; jittered ≥several-minute cadence,
   activity-watermark zero-idle-cost polling, stable session/device, optional
-  single residential proxy, and 3–5 h checkpoint freezes.
+  single residential proxy, and 3–5 h checkpoint freezes. **Update 2026-08-05:**
+  a second native checkpoint hit after clean relay traffic; deeper research
+  implicates the Python `requests` TLS fingerprint + un-echoed `IG-U-RUR`
+  routing headers (see `reference/` clones: okgram, insta-wizard, instaharvest_v2).
 - [System monitor](tgbot-system-monitor.md) — the health monitor is now a
   static **Go binary** (`cmd/tgbot-monitor/` → `build/tgbot-monitor`, the
   project's one Go component); a /proc-only, zero-dep process that keeps
