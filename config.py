@@ -157,6 +157,15 @@ IG_DIRECT_USERNAME = os.getenv("IG_DIRECT_USERNAME", "")          # bot account 
 IG_DIRECT_PASSWORD = os.getenv("IG_DIRECT_PASSWORD", "")          # bot account password (fallback)
 IG_DIRECT_TOTP_SEED = os.getenv("IG_DIRECT_TOTP_SEED", "")        # optional 2FA seed
 IG_DIRECT_FROM_USERNAME = os.getenv("IG_DIRECT_FROM_USERNAME", "")  # YOUR IG handle (whose DMs to accept)
+# Anti-detection (utils/ig_anti_detect.py). The private API previously rode a
+# plain Python requests TLS fingerprint (a dead giveaway); these pin the
+# session to a real Chrome fingerprint and the account's home region.
+IG_DIRECT_TRANSPORT_IMPERSONATE = os.getenv("IG_DIRECT_TRANSPORT_IMPERSONATE", "chrome136") or "chrome136"
+IG_DIRECT_COUNTRY = os.getenv("IG_DIRECT_COUNTRY", "US") or "US"
+IG_DIRECT_COUNTRY_CODE = get_env_int("IG_DIRECT_COUNTRY_CODE", 1) or 1
+IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
+IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
+IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
 
 # X / Twitter direct-forward
 X_DIRECT_ENABLED = os.getenv("X_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")

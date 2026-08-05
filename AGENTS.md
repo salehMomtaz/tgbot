@@ -189,6 +189,24 @@ have to rediscover them.
     optional ONE stable proxy (`DIRECT_FORWARD_PROXY`, residential near the
     account owner, never rotated); checkpoint challenges freeze the worker
     3–5 h (no retry storms) until a human passes them in the official app.
+    **On top of the pacing, `utils/ig_anti_detect.py` closes the identity-
+    correlation gaps that triggered the 2026-08-05 native checkpoint:**
+    the instagrapi private session is given a **curl_cffi-backed TLS-
+    impersonating transport** (`CurlCffiAdapter` from `curl-adapter>=1.2.1`
+    — see requirements.txt; the private API previously rode plain Python
+    requests TLS, an instant "this is a script" JA3), Instagram's **echo
+    headers are captured + persisted + re-applied** (`IG-U-RUR`/`IG-U-SHBID`/
+    `IG-U-SHBTS`/`X-IG-WWW-Claim`/`X-MID`; instagrapi natively drops the
+    shbid/shbts pair), **geo/locale/timezone are pinned** to the account's
+    home region (`IG_DIRECT_COUNTRY`/`IG_DIRECT_COUNTRY_CODE`/
+    `IG_DIRECT_LOCALE`/`IG_DIRECT_TZ_OFFSET`/`IG_DIRECT_TZ_NAME`), and a short
+    **paced warmup** runs after login. Every piece degrades to a no-op on
+    failure. Checkpoint hits alert the relay chat directly, not just the log
+    channel. One wiring gotcha: `install_token_echo` wraps the *bound*
+    `cl.private_request` — do NOT re-pass `self` into it. If you upgrade
+    instagrapi and the class patches stop matching, the module logs loud
+    warnings — verify `_configure_private_session_retry` / `base_headers` /
+    `get_settings` patch points still exist.
     **The IG worker NEVER dies on a login failure** — it retries on the poll
     cadence with a fresh client per attempt, so a mid-run `igcookies.txt`
     re-upload is picked up without a bot restart; only real challenge errors

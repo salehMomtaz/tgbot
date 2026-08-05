@@ -47,6 +47,17 @@ multi-hour freezes on checkpoint challenges instead of retry storms.
 ``DIRECT_FORWARD_POLL_SECONDS`` / ``_JITTER_PCT`` / ``DIRECT_FORWARD_PROXY``
 tune it in .env. See docs/DIRECT_FORWARD_SETUP.md → "Avoiding checkpoints".
 
+On top of the pacing, the private API no longer speaks Python's stock TLS
+fingerprint (an instant "this is a script" tell): ``utils/ig_anti_detect.py``
+mounts a curl_cffi-backed TLS-impersonating transport on the instagrapi
+session, captures and persists Instagram's echo headers (IG-U-RUR / IG-U-SHBID
+/ IG-U-SHBTS / X-IG-WWW-Claim / X-MID) and re-applies them on every request,
+pins country/locale/timezone to the account's home region, and runs a short
+paced warmup after login. Every piece degrades to a no-op on failure so the
+worker always survives a library hiccup. Checkpoint hits now also alert the
+relay chat directly (not just the log channel) with instructions to pass the
+verification in the official app.
+
 Sessions persist to disk (direct_ig_session.json / direct_x_cookies.json).
 First run primes the cursor and skips backlog. Delete direct_forward_state.json
 to re-prime (this also clears the pairing). No third-party APIs.
@@ -63,6 +74,7 @@ from typing import Any
 
 import config
 from utils import cookie_manager
+from utils import ig_anti_detect
 
 logger = logging.getLogger(__name__)
 
@@ -862,6 +874,29 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         if ig_proxy:
             c.set_proxy(ig_proxy)
             logger.info("[DirectForward/IG] using configured DIRECT_FORWARD_PROXY for the DM session")
+        # Anti-detection hardening (utils/ig_anti_detect.py): TLS-impersonating
+        # transport, geo pinning, and echo-token capture. Each piece degrades
+        # to a no-op on failure, so a library hiccup never kills the worker.
+        try:
+            ig_anti_detect.install_transport(
+                c, getattr(config, "IG_DIRECT_TRANSPORT_IMPERSONATE", "chrome136") or "chrome136")
+        except Exception as e:
+            logger.warning(f"[DirectForward/IG] transport install degraded: {e}")
+        try:
+            ig_anti_detect.pin_geo(
+                c,
+                country=getattr(config, "IG_DIRECT_COUNTRY", "US") or "US",
+                country_code=getattr(config, "IG_DIRECT_COUNTRY_CODE", 1) or 1,
+                locale=getattr(config, "IG_DIRECT_LOCALE", "en_US") or "en_US",
+                timezone_offset=getattr(config, "IG_DIRECT_TZ_OFFSET", -14400),
+                timezone_name=getattr(config, "IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00",
+            )
+        except Exception as e:
+            logger.warning(f"[DirectForward/IG] geo pin degraded: {e}")
+        try:
+            ig_anti_detect.install_token_echo(c)
+        except Exception as e:
+            logger.warning(f"[DirectForward/IG] token-echo install degraded: {e}")
         return c
 
     # The cookie jar (and hence the sessionid) can change after startup: the
@@ -881,6 +916,12 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             await loop.run_in_executor(None, lambda: _ig_login(cl))
             cl.dump_settings(IG_SESSION_FILE)
             os.chmod(IG_SESSION_FILE, 0o600)
+            # Cold-start warmup: a few paced, benign reads so the first real
+            # poll isn't the session's first activity on a fresh IP.
+            try:
+                await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
             break
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
             freeze = random.uniform(3 * 3600, 5 * 3600)
@@ -888,6 +929,18 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                          f"Pausing this worker for ~{freeze / 3600:.1f}h. "
                          f"Open the official Instagram app on the bot account and pass the "
                          f"checkpoint there, then restart the bot for a clean resume.")
+            try:
+                await bot_client.send_message(
+                    chat_id=chat_id,
+                    text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
+                          f"The IG direct-forward worker hit a manual-verification "
+                          f"checkpoint during login and is pausing ~{freeze / 3600:.1f}h "
+                          f"to avoid making it worse.\n\n"
+                          f"Open the official Instagram app on the bot account and pass the "
+                          f"verification there, then restart the bot. Instagram: `{e}`"),
+                )
+            except Exception as alert_err:
+                logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
             await asyncio.sleep(freeze)
             cl = _make_client()
         except Exception as e:
@@ -1025,12 +1078,28 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                          f"Pausing this worker for ~{freeze / 3600:.1f}h. "
                          f"Open the official Instagram app on the bot account and pass the "
                          f"checkpoint there, then restart the bot for a clean resume.")
+            try:
+                await bot_client.send_message(
+                    chat_id=chat_id,
+                    text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
+                          f"The IG direct-forward worker hit a manual-verification "
+                          f"checkpoint while polling and is pausing ~{freeze / 3600:.1f}h "
+                          f"to avoid making it worse.\n\n"
+                          f"Open the official Instagram app on the bot account and pass the "
+                          f"verification there, then restart the bot. Instagram: `{e}`"),
+                )
+            except Exception as alert_err:
+                logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
             await asyncio.sleep(freeze)
         except LoginRequired:
             logger.warning(f"[DirectForward/IG] session expired — attempting re-login.")
             try:
                 await loop.run_in_executor(None, lambda: _ig_login(cl))
                 cl.dump_settings(IG_SESSION_FILE)
+                try:
+                    await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
+                except Exception as e:
+                    logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
             except Exception as e:
                 logger.error(f"[DirectForward/IG] re-login failed: {e}. Sleeping 1h.")
                 await asyncio.sleep(3600)

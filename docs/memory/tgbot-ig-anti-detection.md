@@ -78,15 +78,38 @@ issue/PRs:
    resolves it; freezing was correct. insta-wizard's `challenge.py` taxonomy
    (VettedDelta / UFAC / scraping-warning) is the reference for classifying.
 
-### Concrete mitigations (in priority order, not all applied yet)
+### Concrete mitigations (all applied 2026-08-05)
+
+Implemented in `utils/ig_anti_detect.py` (wired into `_make_client` /
+`_ig_login` in `modules/direct_forward.py`). Every piece is independently
+failing-safe: a missing dependency or a library change only logs a warning and
+the worker keeps running on the previous behaviour.
 
 | # | Lever | Status |
 |---|---|---|
-| 1 | **Impersonated transport** for instagrapi (curl_cffi/httpcloak/TLS-client) so the TLS fingerprint matches a phone — the single biggest 2026 lever | pending (needs an instagrapi fork/patch; upstream PR #2364 was closed unmerged) |
-| 2 | **Echo `IG-U-RUR`/`X-MID`/`X-IG-WWW-Claim` + persist them** in the session bundle | pending (upstream instagrapi gap) |
-| 3 | **Sticky residential proxy** (`DIRECT_FORWARD_PROXY`) — DC ASN is the residual risk | config knob exists, not set on test VPS |
-| 4 | **geo/locale/device explicit sync** via `set_country/set_locale/set_timezone_offset` so the session never drifts from the account's home region | can add (instagrapi API exists) |
-| 5 | Keep the 3–5 h freeze on native checkpoints; optionally alert to the log channel when one hits (currently only `logs/bot.log`) | could add |
+| 1 | **Impersonated transport** for instagrapi — `CurlCffiAdapter` (from the `curl-adapter` PyPI package, the same adapter instagrapi's own public-transport `curl` extra uses) mounted on `cl.private`. `cl.private` stays a `requests.Session` so cookies/proxies/verify/headers all keep working; only the TLS layer impersonates `chrome136`. Requires `pip install "curl-adapter>=1.2.1"` (added to requirements.txt) + a compat shim (curl_cffi 0.15 renamed `normalize_browser_type` → `resolve_latest_browser_type`). `_configure_private_session_retry` is patched once so every `load_settings`/`login_by_sessionid` re-applies the transport instead of silently re-mounting the stock HTTPAdapter | **done** |
+| 2 | **Echo `IG-U-RUR`/`X-MID`/`X-IG-WWW-Claim` + persist them** — `install_token_echo` wraps `cl.private_request` to capture `ig-set-ig-u-rur`, `ig-set-ig-u-shbid`, `ig-set-ig-u-shbts`, `x-ig-set-www-claim`, `ig-set-x-mid` from every response into `cl.settings` (durable via the per-poll `dump_settings`), and patches `base_headers` + `get_settings` (instagrapi natively serializes rur/www_claim/mid but DROPS shbid/shbts) to re-apply captured values | **done** |
+| 3 | **Sticky residential proxy** (`DIRECT_FORWARD_PROXY`) — DC ASN is the residual risk | knob exists; test VPS refreshes cookies through the SOCKS5 proxy whose egress = the bot's own IP |
+| 4 | **geo/locale/device explicit sync** via `set_country/set_country_code/set_locale/set_timezone_offset` (`pin_geo`), driven by `IG_DIRECT_COUNTRY`/`IG_DIRECT_COUNTRY_CODE`/`IG_DIRECT_LOCALE`/`IG_DIRECT_TZ_OFFSET`/`IG_DIRECT_TZ_NAME` (defaults US / 1 / en_US / -14400 / GMT-04:00) | **done** |
+| 5 | Keep the 3–5 h freeze on native checkpoints, **and alert the relay chat directly** (not just the log channel) with instructions to pass the verification in the official app | **done** |
+| 6 | **Cold-start warmup** — `warmup()` runs a few paced benign reads (`account_info`, `direct_threads(5)` ×3) right after login so the first real poll isn't the session's first activity on a fresh IP | **done** |
+
+### Deployment facts (2026-08-05, test VPS)
+
+- `curl-adapter==1.2.1` installed in the VPS venv; `curl_cffi==0.15.1b2` (yt-dlp
+  extra, left untouched).
+- Verified end-to-end in the running bot: transport swaps to `CurlCffiAdapter`
+  and survives `load_settings` re-mounts; `login_by_sessionid` and the
+  persisted-session resume both work through the impersonated transport;
+  warmup runs after resume; worker entered the idle `~300 s ±40%` poll loop with
+  `NRestarts=0`, no checkpoint, geo persisted (`US / -14400 / en_US`), `mid`
+  captured. `ig_u_rur`/`shbid` were not set in that run (Instagram only sends
+  them on certain responses); instagrapi's synthetic values remain the fallback
+  and the capture persists real values whenever the server does send them.
+- Gotcha hit during wiring: wrapping `cl.private_request` must NOT re-pass
+  `self` (the captured `orig_request` is already a bound method) — passing it
+  shifted the endpoint arg and blew up with `'Client' object has no attribute
+  'startswith'`.
 
 ### Reference clones (untracked, in `reference/`)
 

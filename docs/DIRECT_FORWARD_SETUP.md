@@ -88,14 +88,19 @@ community best practices):
 | Session identity                 | persisted `direct_ig_session.json`, same device/UA forever  | — (automatic) |
 | IP reputation                    | optional **one stable** residential proxy for the account   | `DIRECT_FORWARD_PROXY` |
 | Checkpoint response              | freeze 3–5 h; never a retry storm                           | — (fixed) |
-| TLS/HTTP fingerprint             | **known gap (2026):** instagrapi uses Python `requests` (JA3/JA4 + HTTP/1.1) which the WAF flags; a phone-impersonating transport (curl_cffi/httpcloak) is the fix | — (upstream) |
+| TLS/HTTP fingerprint             | private API rides a **curl_cffi-backed impersonating transport** (`CurlCffiAdapter`, `curl-adapter>=1.2.1`) speaking a real Chrome JA3/JA4 instead of Python `requests` | `IG_DIRECT_TRANSPORT_IMPERSONATE` (default `chrome136`) |
+| Echo headers                     | `IG-U-RUR` / `IG-U-SHBID` / `IG-U-SHBTS` / `X-IG-WWW-Claim` / `X-MID` are captured from every response, persisted, and re-applied | — (automatic) |
+| Geo / locale / timezone          | pinned to the account's home region, never drifts           | `IG_DIRECT_COUNTRY` / `IG_DIRECT_COUNTRY_CODE` / `IG_DIRECT_LOCALE` / `IG_DIRECT_TZ_OFFSET` / `IG_DIRECT_TZ_NAME` |
+| Cold start                       | paced benign warmup (`account_info` + `direct_threads`) right after login | — (automatic) |
+| Checkpoint alert                 | freeze 3–5 h **and** a direct Telegram alert to the relay chat with instructions to pass verification in the official app | — (automatic) |
 
 > **2026-08-05:** a second checkpoint (native manual-verification) hit after
-> clean relay traffic — cadence was fine; the trigger was identity correlation.
-> The top suspects are the Python `requests` TLS fingerprint riding an Android
-> UA, and missing `IG-U-RUR`/`X-MID`/`X-IG-WWW-Claim` echo+persistence. Research
-> + code references live in `reference/` (okgram, insta-wizard, instaharvest_v2)
-> and `docs/memory/tgbot-ig-anti-detection.md`.
+> clean relay traffic — cadence was fine; the trigger was identity correlation
+> (Python `requests` TLS riding an Android UA, plus missing echo-header
+> persistence). All of `utils/ig_anti_detect.py`'s levers above are now
+> implemented, deployed, and verified (see
+> `docs/memory/tgbot-ig-anti-detection.md`). Reference code: `reference/`
+> (okgram, insta-wizard, instaharvest_v2).
 
 **Practical rules that matter most:**
 
