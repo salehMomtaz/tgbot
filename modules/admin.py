@@ -123,7 +123,7 @@ def get_premium_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ Add Premium", callback_data="admin_premium_add"),
          InlineKeyboardButton("➖ Remove Premium", callback_data="admin_premium_remove")],
         [InlineKeyboardButton("🔑 Generate Session", callback_data="admin_premium_gen"),
-         InlineKeyboardButton("🧹 Cleanup Stale Gen", callback_data="admin_premium_gen_abort")],
+         InlineKeyboardButton("🧹 Cleanup Stale Gen", callback_data="admin_premium_gen_clean")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_premium_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
@@ -194,7 +194,7 @@ def register_admin_handlers(app: Client):
         if gen and gen.get("client"):
             await discard_client_quiet(gen["client"])
         USER_STATES.pop(user_id, None)
-        await purge_active_prompt(user_id, client)
+        await purge_active_prompt(user_id, app)
 
     async def discard_client_quiet(tmp_client):
         try:
@@ -262,13 +262,14 @@ def register_admin_handlers(app: Client):
                 "expires_at": _time.monotonic() + _PREMIUM_GEN_TTL,
             }
             USER_STATES[user_id] = "waiting_for_premium_code"
-            await message.reply_text(
+            step_msg = await message.reply_text(
                 "🔑 **Step 2/3 — Enter the login code**\n\n"
                 f"Code sent to `{phone}`. Type the confirmation code you received "
                 "(SMS or the Telegram app).\n\n"
                 "_(Tap Abort at any time to cancel.)_",
                 reply_markup=_gen_abort_markup
             )
+            ACTIVE_PROMPTS[user_id] = step_msg.id
             return
 
         if state == "waiting_for_premium_code":
@@ -290,13 +291,14 @@ def register_admin_handlers(app: Client):
                 return
             if outcome == "2fa":
                 USER_STATES[user_id] = "waiting_for_premium_password"
-                await message.reply_text(
+                step_msg = await message.reply_text(
                     "🔑 **Step 3/3 — Two-factor password**\n\n"
                     "This account has two-step verification enabled. Type your **2FA password** "
                     "to finish logging in.\n\n"
                     "_(Tap Abort at any time to cancel.)_",
                     reply_markup=_gen_abort_markup
                 )
+                ACTIVE_PROMPTS[user_id] = step_msg.id
                 return
             await _finish_premium_gen(client, message, user_id)
             return
@@ -522,7 +524,16 @@ def register_admin_handlers(app: Client):
         # an Abort button; the temp client is always cleaned up (disconnect) on
         # completion, abort, /start escape, or TTL expiry.
         if state in ("waiting_for_premium_phone", "waiting_for_premium_code", "waiting_for_premium_password"):
-            await _handle_premium_gen_input(client, message, user_id, state, input_text, prompt_id)
+            try:
+                await _handle_premium_gen_input(client, message, user_id, state, input_text, prompt_id)
+            except Exception as e:
+                logger.exception(f"[AdminGen] Error in {state}: {e}")
+                await _premium_gen_cleanup(user_id)
+                await message.reply_text(
+                    "❌ Something went wrong in the session generation flow. The temp "
+                    "login client was cleaned up — please start again from the 👑 Premium menu.",
+                    reply_markup=back_markup
+                )
             message.stop_propagation()
             return
 
@@ -770,6 +781,19 @@ def register_admin_handlers(app: Client):
     # =========================================================================
     @app.on_callback_query(filters.regex(r"^admin_"))
     async def admin_callback_handler(client: Client, callback_query: CallbackQuery):
+        # Any exception in the dispatch below must still resolve the callback
+        # spinner and be logged — an unanswered callback looks like "the bot is
+        # dead" to the user. Admin console buttons re-render/answer at the end.
+        try:
+            await _admin_callback_dispatch(client, callback_query)
+        except Exception as e:
+            logger.exception(f"[AdminCallback] Error handling {callback_query.data!r}: {e}")
+            try:
+                await callback_query.answer("⚠️ An internal error occurred. See log channel.", show_alert=True)
+            except Exception:
+                pass
+
+    async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery):
         data = callback_query.data
         user_id = callback_query.from_user.id
 
@@ -943,8 +967,25 @@ def register_admin_handlers(app: Client):
             )
             await callback_query.answer("Aborted.", show_alert=False)
 
+        elif data == "admin_premium_gen_clean":
+            # Menu button: sweep any stale generation, then re-render the menu.
+            # No edit-text of different content, so repeated presses are safe.
+            await _premium_gen_cleanup(user_id)
+            db = load_database()
+            premium_users = db["premium_users"]
+            premium_lines = "\n".join([f"• `{uid}`" for uid in premium_users]) if premium_users else "No Premium-enabled users yet."
+            if config.PREMIUM_STRING_SESSION:
+                status_note = "🟢 Premium userbot session is configured — 4 GB uploads are available to whitelisted users."
+            else:
+                status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Tap **🔑 Generate Session** to create one right here."
+            await callback_query.message.edit_text(
+                f"👑 **Premium Uploads (4 GB)**\n\n{status_note}\n\n"
+                f"**Whitelisted users:**\n{premium_lines}",
+                reply_markup=get_premium_menu_keyboard()
+            )
+            await callback_query.answer("Stale generation cleaned.", show_alert=False)
+
         elif data == "admin_premium_gen_save":
-            import time as _t
             gen = PREMIUM_GEN.get(user_id)
             result = (gen or {}).get("result")
             if not result:
