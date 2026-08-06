@@ -423,6 +423,16 @@ Don't port it to Go.
   `client`** — inner closures like `_premium_gen_cleanup` must use `app` (or
   accept `client` as their own param); referencing `client` at that scope raises
   `NameError` on every callback and the button silently dies.
+  **The login code is entered via a numeric dial pad** (`_gen_dial_pad_markup`,
+  `admin_premium_gen_digit:<d>`/`_bksp`/`_enter`), never as chat text — Telegram's
+  anti-account-sharing detection expires any code that is typed into a chat
+  message (`PHONE_CODE_EXPIRED`, "code was previously shared by your account").
+  `waiting_for_premium_code` therefore *rejects* typed codes; only the 2FA step
+  stays free-form text. **Saving the string auto-restarts the bot**
+  (`main.py::schedule_self_restart`): under systemd it SIGTERMs its own PID, the
+  existing `_on_sigterm`→`KeyboardInterrupt` path does the graceful teardown, and
+  `Restart=always` relaunches `run.sh` (re-reading `.env`) — no SSH/`systemctl`
+  needed. Do not print a manual restart instruction here.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`

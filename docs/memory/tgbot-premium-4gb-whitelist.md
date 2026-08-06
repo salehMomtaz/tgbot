@@ -124,6 +124,56 @@ The terminal `generate_session.py` flow is gone; the admin generates the
   the private chat; a restart is required after saving before the Premium
   userbot actually uses it.
 
+## Dial-pad code entry — never type the login code in chat (2026-08-06)
+
+The login code must be entered via a **numeric dial pad**, not as chat text.
+
+- **Root cause:** Telegram's anti-account-sharing detection. Typing the code as
+  a chat message caused a security notice and `PHONE_CODE_EXPIRED` seconds after
+  `send_code`: *"The code was entered correctly, but sign in was not allowed,
+  because this code was previously shared by your account."* The digits travel
+  in **callback data**, never as chat text, so the detection is not triggered.
+- **`_gen_dial_pad_markup`** — a 3×4 numeric keypad (rows 1-9, then
+  `⌫ / 0 / ✓`, plus a full-width **❌ Abort** row). Callback data:
+  `admin_premium_gen_digit:<d>`, `admin_premium_gen_bksp`, `admin_premium_gen_enter`.
+- **`PREMIUM_GEN`** gains `"code_buffer": ""`. `_premium_gen_pad_text` re-renders
+  the Step 2/3 message with an "Entered so far:" line; it tolerates
+  `MessageNotModified`. The prompt id is re-registered in `ACTIVE_PROMPTS` so the
+  dial pad stays alive while text flows.
+- **`waiting_for_premium_code` text input now rejects typed codes** with an
+  explanatory reply ("don't type the code, use the keypad") instead of accepting
+  them — a typed code would burn the login. The 2FA step (`waiting_for_premium_password`)
+  stays free-form text (a password is not a login code).
+- **Callback semantics:** digits append (cap 6, `>4` required), backspace pops,
+  enter validates ≥4 digits; on `SessionPasswordNeeded` it switches to the 2FA
+  step, otherwise it verifies the code and proceeds to export. On any exception
+  the buffer is reset and the pad re-rendered — the flow never dies from a bad
+  entry. On success the dial-pad message is edited to "✅ Code accepted — logging
+  in and exporting the session string…" before `_finish_premium_gen`.
+- Verified working live on the VPS (2026-08-06); the flow generates and exports
+  the session string entirely from the phone.
+
+## Self-restart after saving — no shell access needed (2026-08-06)
+
+`admin_premium_gen_save` previously printed `sudo systemctl restart tgbot`,
+forcing an SSH+sudo session — the exact thing the in-chat flow existed to remove.
+
+- **`main.py::schedule_self_restart(delay=3.0)`** — after the "saved" message is
+  rendered, the bot restarts **itself**:
+  - Under systemd (`INVOCATION_ID` is set for systemd services — verified on the
+    VPS), it sends `SIGTERM` to its own PID. `main.py`'s existing `_on_sigterm`
+    handler turns that into `KeyboardInterrupt`, which drives the same graceful
+    teardown systemd uses on `systemctl restart`: pyrogram drains, the PO-token
+    provider stops (`PotProviderManager.stop`), cookie locks are released. The
+    process exits and `Restart=always` + `run.sh` relaunch it, re-reading `.env`
+    — so the fresh `PREMIUM_STRING_SESSION` is picked up.
+  - Without systemd (tmux/foreground dev), it falls back to `os.execv` in place.
+- **Call sites:** only `admin_premium_gen_save` (after `save_session_string`).
+  The 3 s delay lets the confirmation message and log line flush before teardown.
+- Verified on the VPS: `kill -TERM <MainPID>` → `KeyboardInterrupt` graceful path
+  → systemd relaunches with a new MainPID and restart counter +1. The dial pad +
+  save flow itself was tested live by the operator.
+
 ## Inline-keyboard auto-expiration (2026-08-05)
 
 `utils/keyboard_expiry.py` strips unused inline keyboards so chat history does
