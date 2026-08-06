@@ -434,6 +434,21 @@ def _disk_usage_percent(path: str) -> float:
         return 0.0
 
 
+def required_merge_headroom(final_bytes: int) -> int:
+    """Total free disk required to download-and-merge a file of *final_bytes*.
+
+    A ``{video}+bestaudio`` download peaks at roughly **2x the final merged
+    file** on disk: yt-dlp holds the separate video part + audio part while
+    ffmpeg writes the merged mp4 (peak V + A + M ≈ 2M), and metadata embedding
+    then writes a temp copy next to the final file. The uploader's splitter
+    keeps at most one extra part on disk at a time, which fits under the 2M
+    peak for files large enough to be split. 500 MB of headroom is added for
+    ffmpeg temp buffers. Use this before downloading so a too-small VPS fails
+    fast with a clear message instead of mid-merge ffprobe errors.
+    """
+    return final_bytes * 2 + 500 * 1024 * 1024
+
+
 def _ensure_disk_space(path: str, needed_bytes: int = 0) -> None:
     """Raise RuntimeError if disk is critically full or cannot accommodate *needed_bytes*."""
     try:
@@ -1001,7 +1016,7 @@ def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
         return 320, 320, 0
 
 
-def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None, muxed: bool = False) -> dict:
+def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None, muxed: bool = False, expected_size_bytes: int | None = None) -> dict:
     """Download a single media item.
 
     Two mutually exclusive selection modes:
@@ -1025,6 +1040,11 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     progressive ``http-*``, TikTok, etc.). It is downloaded as-is — no
     ``+bestaudio`` merge, which would double the audio track or make yt-dlp
     refuse the selector.
+
+    ``expected_size_bytes`` is the merged size shown on the tapped button. It is
+    used to pre-check that the VPS has room for the 2x-merge peak *before* the
+    download starts, so a disk-constrained server fails with a clear message
+    rather than a mid-merge ffprobe error.
     """
     url = normalize_url(url)
     task_dir = f"cache/{cache_id}"
@@ -1045,9 +1065,14 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     use_cookies_now = bool(site_jar) and not is_instagram
     cookie_path = cookie_manager.acquire(site_jar) if use_cookies_now else None
 
-    # Conservative disk check: reserve 1 GB + estimated size. The estimate is rough;
-    # we verify again before metadata embedding.
-    _ensure_disk_space(task_dir, 1024 * 1024 * 1024)
+    # Conservative disk check: reserve the 2x-merge peak headroom for the
+    # expected file size (falls back to 1 GB when the size is unknown). This
+    # catches the "VPS too small to merge video+audio" case up front instead of
+    # letting ffmpeg die mid-merge with "unable to obtain file audio codec".
+    if expected_size_bytes:
+        _ensure_disk_space(task_dir, required_merge_headroom(expected_size_bytes))
+    else:
+        _ensure_disk_space(task_dir, 1024 * 1024 * 1024)
 
     ydl_opts = {
         'outtmpl': out_tmpl,
@@ -1243,8 +1268,10 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     title = info.get('title', 'Unknown Title')
     uploader = info.get('uploader', 'Unknown Artist')
 
-    # Embed metadata into the file itself using ffmpeg (no re-encode)
-    _ensure_disk_space(task_dir, os.path.getsize(filename) if os.path.exists(filename) else 0)
+    # Embed metadata into the file itself using ffmpeg (no re-encode). The
+    # embed writes a temp copy beside the final file, so require room for
+    # file + temp copy (~2x file size).
+    _ensure_disk_space(task_dir, required_merge_headroom(os.path.getsize(filename) if os.path.exists(filename) else 0))
     filename = embed_metadata_ffmpeg(filename, title, uploader, clean_thumb, format_type)
 
     # yt-dlp may leave fragment/part files on interruption; purge them after a successful download

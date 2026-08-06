@@ -441,6 +441,16 @@ def register_downloader_handlers(app: Client):
                 await callback_query.answer("❌ This format exceeds Telegram's 2GB bot upload limit. Ask the admin to enable 4GB Premium uploads for you.", show_alert=True)
                 return
 
+        # Early disk check: fail fast with a clear message before enqueueing if
+        # the VPS cannot hold the 2x-merge peak for this format's size.
+        if target_fmt and target_fmt.get("bytes"):
+            from utils.downloader import _ensure_disk_space, required_merge_headroom
+            try:
+                _ensure_disk_space(f"cache/{cache_id}", required_merge_headroom(target_fmt["bytes"]))
+            except RuntimeError as disk_err:
+                await callback_query.answer(f"❌ {disk_err}", show_alert=True)
+                return
+
         await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
         await callback_query.answer("Transfer enqueued...")
 
@@ -462,7 +472,8 @@ def register_downloader_handlers(app: Client):
                     None, download_media, cache_data["url"], format_id, action, cache_id, thread_progress,
                     None, (target_fmt.get("height") if action == "v" and target_fmt else None),
                     cache_data.get("best_audio_format_id") if action == "v" else None,
-                    bool(target_fmt.get("muxed")) if action == "v" and target_fmt else False
+                    bool(target_fmt.get("muxed")) if action == "v" and target_fmt else False,
+                    (target_fmt.get("bytes") if target_fmt else None)
                 )
 
                 file_path = result['file_path']
