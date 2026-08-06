@@ -32,4 +32,4 @@ enabled, check the service first:
 it must be started ad-hoc without systemd, stop the service first and run it
 detached from the repo dir with `./run.sh`. See
 [Cookie protection & monitor](tgbot-cookie-protection-and-monitor.md) and
-[tgbot ↔ balebot port relationship](tgbot-balebot-port-relationship.md).
+[tgbot ↔ balebot integration](tgbot-balebot-integration.md).

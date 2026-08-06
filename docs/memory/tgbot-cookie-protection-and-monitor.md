@@ -40,4 +40,4 @@ there; use inotifywait. There may be a leftover auditd watch rule; it's harmless
 Both bots coexist on the same test VPS: balebot's POT provider on
 `127.0.0.1:4416`, tgbot's on `127.0.0.1:4417`. See
 [VPS two-bots runtime state](vps-two-bots-runtime-state.md) and
-[tgbot ↔ balebot port relationship](tgbot-balebot-port-relationship.md).
+[tgbot ↔ balebot integration](tgbot-balebot-integration.md).

@@ -1,9 +1,12 @@
 # AGENTS.md — notes for contributors & AI agents working on tgbot
 
-This is a pyrogram-based Telegram media downloader/streamer. Its sibling project
-**balebot** (aiogram v3, Bale.ai) is the reference implementation many patterns
-were ported from. This file captures the **non-obvious invariants** so you don't
-have to rediscover them.
+This is a pyrogram-based Telegram media downloader/streamer — **tgbot is the
+primary bot and the reference implementation**. Its sibling **balebot**
+(aiogram v3, Bale.ai) was an experiment to try Bale.ai messenger bots; it shares
+the same download core (it was derived from tgbot's design), but tgbot is the
+source of truth. A future optional Bale frontend inside this repo is designed in
+`docs/memory/tgbot-balebot-integration.md`. This file captures the **non-obvious
+invariants** so you don't have to rediscover them.
 
 ## Orientation
 
@@ -478,7 +481,10 @@ Don't port it to Go.
 
 ## When porting from balebot
 
-balebot is the more mature reference. When porting a feature:
+balebot is a leaner, Bale-only variant of tgbot's own design (not a reference
+ahead of tgbot). Porting *from* it to tgbot is only ever bringing a Bale-only
+feature over, or the reverse — extracting shared core back out. When translating
+aiogram↔pyrogram:
 - aiogram `Router`/`F` filters → pyrogram ordered groups + `filters.*`.
 - `bot.send_message(chat_id=, text=)` → `client.send_message(chat_id=, text=)` or
   `callback_query.message.edit_text(...)` / `message.reply_text(...)`.

@@ -9,9 +9,11 @@ code or the git log alone. Last updated: 2026-08-04.
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
 > credentials, IP addresses, or usernames are stored here.
 
-- [tgbot ↔ balebot port relationship](tgbot-balebot-port-relationship.md) — tgbot
-  ports balebot's PO-token provider, cookie protection, and `install.sh`
-  deployment; GitHub explorer and translate are intentionally NOT ported.
+- [tgbot ↔ balebot integration](tgbot-balebot-integration.md) — tgbot is the
+  reference; balebot was a Bale.ai experiment. Full platform/API diff + a plan
+  for an optional Bale frontend inside tgbot (one process, one PO provider, one
+  yt-dlp), including balebot-only modules (GitHub explorer, translate, /yt,
+  /transcript, /web) that could come to Telegram.
 - [Cookie protection & monitor](tgbot-cookie-protection-and-monitor.md) — cookie
   corruption is fixed (`b44db54`); yt-dlp only ever touches disposable snapshots;
   `cookie-watch.service` (inotifywait) is the tamper monitor; `auditd` is inert on
