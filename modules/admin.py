@@ -146,7 +146,8 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu")],
         [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"),
          InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
-        [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
+        [InlineKeyboardButton("🔄 Restart Bot", callback_data="admin_restart"),
+         InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
     ])
 
 
@@ -1123,6 +1124,33 @@ def register_admin_handlers(app: Client):
                 reply_markup=back_markup
             )
             await log_event("👑 **Premium Session:** New PREMIUM_STRING_SESSION saved to .env by creator. Restarting automatically.")
+            await callback_query.answer()
+            from main import schedule_self_restart
+            schedule_self_restart(delay=3.0)
+
+        # =========================================================================
+        # Restart Bot (self-restart via systemd SIGTERM / execv fallback)
+        # =========================================================================
+        elif data == "admin_restart":
+            USER_STATES.pop(user_id, None)
+            ACTIVE_PROMPTS.pop(user_id, None)
+            confirm_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, restart now", callback_data="admin_restart_confirm"),
+                 InlineKeyboardButton("↩️ Cancel", callback_data="admin_main")],
+            ])
+            await callback_query.message.edit_text(
+                "🔄 **Restart the bot?**\n\nThe bot will shut down gracefully and "
+                "come back in a few seconds. Any running download will be "
+                "interrupted and the queue cleared.\n\nContinue?",
+                reply_markup=confirm_keyboard
+            )
+            await callback_query.answer()
+
+        elif data == "admin_restart_confirm":
+            await callback_query.message.edit_text(
+                "🔄 **Restarting the bot…**\n\nBack in a few seconds."
+            )
+            await log_event(f"🔄 **Admin Action:** Bot restart requested by creator (`{user_id}`).")
             await callback_query.answer()
             from main import schedule_self_restart
             schedule_self_restart(delay=3.0)
