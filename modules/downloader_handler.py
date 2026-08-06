@@ -67,12 +67,12 @@ def build_format_keyboard(cache_id: str, videos: list, audios: list, premium_all
     """
     _TWO_GB = 2000 * 1024 * 1024
 
-    def _btn(prefix: str, fmt: dict) -> InlineKeyboardButton:
+    def _btn(prefix: str, action: str, fmt: dict) -> InlineKeyboardButton:
         locked = not premium_allowed and fmt.get("bytes", 0) > _TWO_GB
         label = f"{prefix} {fmt['quality']} ({fmt['size_str']})"
         if locked:
             label = f"🔒 {label}"
-        callback = f"dl:{cache_id}:lock" if locked else f"dl:{cache_id}:{prefix}:{fmt['format_id']}"
+        callback = f"dl:{cache_id}:lock" if locked else f"dl:{cache_id}:{action}:{fmt['format_id']}"
         return InlineKeyboardButton(text=label, callback_data=callback)
 
     max_rows = max(len(videos), len(audios))
@@ -80,12 +80,12 @@ def build_format_keyboard(cache_id: str, videos: list, audios: list, premium_all
     for i in range(max_rows):
         row = []
         if i < len(videos):
-            row.append(_btn("🎥", videos[i]))
+            row.append(_btn("🎥", "v", videos[i]))
         else:
             row.append(InlineKeyboardButton(text="—", callback_data="none"))
 
         if i < len(audios):
-            row.append(_btn("🎵", audios[i]))
+            row.append(_btn("🎵", "a", audios[i]))
         else:
             row.append(InlineKeyboardButton(text="—", callback_data="none"))
         keyboard_rows.append(row)

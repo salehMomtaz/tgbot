@@ -9,6 +9,24 @@ peaks at ~2× the final file, ffmpeg died with
 and the user's media never uploaded. The new box has 96 GB disk (~83 GB free),
 3.8 GiB RAM + 4.0 GiB swap, `MemoryMax=2500M` in the systemd unit.
 
+## Root cause (corrected)
+
+The original VPS diagnosis blamed disk space. That was **wrong** — the same
+error reappeared on this machine with 82 GB free. The real cause was
+commit `f67e576` (2026-08-05, deployed before both failures): it rewrote the
+`dl:` callback action token from `v`/`a` to the **button emoji**
+(`dl:{cache_id}:🎥:{format_id}`), but `dl_callback_handler` still branched on
+`action == 'v'`/`'a'`. So every 🎥 video button fell through to the **audio**
+path (`FFmpegExtractAudio`), which ran ffprobe on a video-only stream and died
+with `WARNING: unable to obtain file audio codec with ffprobe`. Audio buttons
+happened to work by coincidence (they hit the `else` branch). The `target_fmt`
+lookup silently returned `None` on the emoji, so the 2 GB premium gate and the
+new disk pre-check were both bypassed.
+
+**Fix:** `build_format_keyboard`'s `_btn()` now takes an explicit action token
+(`"v"`/`"a"`) for the callback while keeping the emoji only in the button label.
+The playlist path (`pl:` `vh`/`ah` tokens) was already correct and is untouched.
+
 ## What changed
 
 1. **Size-aware disk pre-check** (commit `d9042af`) — `utils/downloader.py`:
@@ -18,7 +36,10 @@ and the user's media never uploaded. The new box has 96 GB disk (~83 GB free),
    embed check now use it. The `dl:` dispatch in
    `modules/downloader_handler.py` checks disk **before** enqueueing and answers
    the callback with a user-facing alert if insufficient. On this machine the
-   same 3.1 GB case now passes: needs ~6.7 GB peak, we have 82 GB free.
+   same 3.1 GB case passes: needs ~6.7 GB peak, we have ~82 GB free. This is a
+   defensive hardening — it was NOT the actual cause of the failure (see Root
+   cause above), but it stays because the pre-check was previously dead code
+   (bypassed via the `target_fmt=None` emoji bug) and now runs for real.
 
 2. **Provisioning** — `./install.sh` installed ffmpeg + deps, Deno 2.9.4
    (`~/.deno/bin/deno`, added to PATH by `run.sh` — the bot process finds it,
