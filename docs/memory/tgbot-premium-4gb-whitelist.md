@@ -198,6 +198,74 @@ bot can be rebooted entirely from chat — no SSH, no `systemctl`.
   back active with a fresh MainPID. The button itself (edit → confirm → restart)
   exercises that same code path.
 
+## >2 GB delivery: stage-to-log-channel + bot relay (2026-08-06)
+
+The first live 3.1 GB test failed on two independent bugs, then the delivery
+path itself was redesigned.
+
+### Root cause #1: `dl:` callbacks carried labels, not tokens
+
+Format buttons were registered with `dl:<cache_id>:<emoji>`-style data, but the
+`dl:` dispatcher switched on `:v:` / `:a:`. The emoji→`v`/`a` fix (`f609b38`)
+made the video/audio path route correctly. This surfaced while re-testing the
+premium flow.
+
+### Root cause #2: `from main import premium_app` created a zombie client
+
+`modules/downloader_handler.py` did `from main import premium_app` at import
+time. Since `main.py` runs as `__main__`, this re-imported it as a *separate*
+`main` module whose module-level `premium_app` was a second, **never-started**
+pyrogram Client whose `.me` is `None`. Premium uploads died instantly
+(`AUTH_KEY_UNREGISTERED`-class errors). Proof: `m.premium_app is ns['premium_app']`
+→ `False`.
+
+**Fix:** `register_downloader_handlers(app, premium_app)` now receives the
+already-started instance from `main_engine()` (the import line is gone).
+Verified: incremental uploads work after restart.
+
+### The redesign: bots can't upload >2 GB, so the bot relays a copy
+
+Bots are hard-capped at 2 GB; only a Premium *user* can push 4 GB. The old
+design sent the big file **as the premium userbot** — correct upload, wrong
+sender, and it bypassed the reply-to-link quoting.
+
+New path in `utils/uploader_handler.py::_stage_and_relay` (used when
+`use_premium and config.LOG_CHANNEL_ID`):
+
+1. The premium userbot uploads the raw file to `LOG_CHANNEL_ID` with a
+   "📦 Staged for delivery" caption. The operator is the channel admin, so the
+   file is visible there and doubles as a permanent record.
+2. The bot calls `copy_message(chat_id, from_chat_id=LOG_CHANNEL_ID,
+   message_id=staged.id, caption=<user caption>)`. `copy_message` forwards by
+   `file_id` — **no size limit**, the file already lives on Telegram's CDN. The
+   sender shows as the bot, and `reply_to_message_id` makes it quote-reply to the
+   user's link (invariant #14).
+3. If staging throws for any reason, `send_single_media` logs a warning and
+   falls back to the **direct premium send** so the file still reaches the user.
+
+The staged message deliberately stays in the log channel ("Keep in log channel"
+choice). Verified end-to-end with a 3.1 GB video (`C6Q2ZjyKxa0`, 3277923411 B):
+staged as log msg 14894, delivered as bot msg 88093 replying to 88086 (the
+user's link), sender 7665239058 (the bot).
+
+### Test driver (tools/)
+
+`tools/telethon_login.py` (one-time operator login → `telethon_session.txt`,
+git-ignored) + `tools/telethon_drive.py` (send a link/message, press inline
+buttons by substring, pick v/a from the live keyboard, assert size ranges;
+handles both `NewMessage` and `MessageEdited` since tier keyboards arrive as
+edits). All flows below were exercised with it on the production box:
+
+- single video (`aqz-KE-bpKQ` 480p → 59.2 MB, msg 88103, reply-to link),
+- audio (`a:258` → 30.7 MB m4a),
+- playlist tiers (`pl:*:whole` → `pl:*:vl` → 2 videos),
+- direct-file download (README.md doc),
+- format-menu Cancel (dismisses, no job),
+- the whole admin console (List Users, Blacklist, PO Token, Direct-Forward,
+  Cookie Jars, Premium menu, Doc Mode toggle, Abort Transfer, Close, and a live
+  Restart-Bot cycle: self-SIGTERM → systemd relaunch → bot responds, `NRestarts=1`,
+  no crash loop).
+
 ## Inline-keyboard auto-expiration (2026-08-05)
 
 `utils/keyboard_expiry.py` strips unused inline keyboards so chat history does
