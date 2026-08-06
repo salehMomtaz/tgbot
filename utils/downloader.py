@@ -451,8 +451,16 @@ def required_merge_headroom(final_bytes: int) -> int:
 
 def _ensure_disk_space(path: str, needed_bytes: int = 0) -> None:
     """Raise RuntimeError if disk is critically full or cannot accommodate *needed_bytes*."""
+    # disk_usage needs an existing path (statvfs); walk up to the nearest
+    # ancestor so the early dl: dispatch check works before the task dir exists.
+    check_path = path
+    while check_path and not os.path.exists(check_path):
+        parent = os.path.dirname(check_path)
+        if parent == check_path:
+            break
+        check_path = parent
     try:
-        usage = shutil.disk_usage(path)
+        usage = shutil.disk_usage(check_path or ".")
     except Exception as exc:
         raise RuntimeError(f"Cannot check disk space: {exc}")
 
