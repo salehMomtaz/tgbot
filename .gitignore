@@ -49,6 +49,9 @@ direct_forward_state.json
 # OpenCode session export in markdown
 session-ses_0438.md
 
+# Telethon operator session (logged-in user token for agent-side interaction)
+telethon_session.txt
+
 # Locally-cloned Instagram anti-detection reference repos (research only,
 # intentionally NOT tracked — clone them with `git clone` into reference/)
 reference/

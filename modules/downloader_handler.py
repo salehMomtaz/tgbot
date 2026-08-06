@@ -300,8 +300,7 @@ async def begin_playlist_flow(message: Message, url: str, custom_filename, user_
     _spawn_fetch(meta_job())
 
 
-def register_downloader_handlers(app: Client):
-    from main import premium_app
+def register_downloader_handlers(app: Client, premium_app: Client = None):
 
     # =========================================================================
     # Group 1: Link Downloader Handler (Only triggers if the text is a link)

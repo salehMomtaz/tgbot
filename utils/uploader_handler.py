@@ -1,6 +1,7 @@
 # utils/uploader_handler.py
 import os
 import asyncio
+import config
 from pyrogram import Client
 from pyrogram.errors import MessageIdInvalid, RPCError
 from utils.gate import is_document_mode, is_premium_user
@@ -47,6 +48,14 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
     *premium_allowed* decides whether the 4 GB Premium upload path may be used
     for this recipient. ``None`` (default) infers it from the recipient's own
     Premium whitelist status (*chat_id* in a private chat == the user id).
+
+    Premium (>2 GB) uploads cannot be sent by the bot itself — bots are hard
+    capped at 2 GB (only a Premium user account can upload 4 GB). They are
+    therefore staged into the log channel by the Premium userbot, then the bot
+    *copies* that message into the recipient chat (``copy_message`` sends by
+    ``file_id``, which has no size limit since the file already lives on
+    Telegram's CDN). This keeps the sender as the bot and lets the copy
+    quote-reply to the user's link message.
     """
     from utils.downloader import probe_video_dimensions
 
@@ -55,6 +64,22 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
 
     file_size = os.path.getsize(file_path)
     use_premium = bool(premium_client and premium_allowed and file_size > (2000 * 1024 * 1024))
+
+    if use_premium and config.LOG_CHANNEL_ID:
+        try:
+            return await _stage_and_relay(
+                bot_client, premium_client, chat_id, file_path, action, title,
+                uploader, duration, thumb_path, progress_fn,
+                force_document, caption, reply_to_message_id,
+            )
+        except Exception as e:
+            # Log channel staging is best-effort: fall back to a direct premium
+            # send so the file still reaches the recipient on config drift.
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Log-channel staging failed, falling back to direct premium send: {e}"
+            )
+
     client = premium_client if use_premium else bot_client
 
     if force_document:
@@ -97,6 +122,79 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             caption=caption or f"🎥 **{title}**\nUploaded via Downloader Bot",
             progress=progress_fn
         )
+
+
+async def _stage_and_relay(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_fn, force_document: bool, caption: str | None, reply_to_message_id: int | None):
+    """Premium (>2 GB) upload: stage into the log channel, then bot copies to chat.
+
+    The Premium userbot uploads the raw file to ``LOG_CHANNEL_ID`` (only a
+    Premium account can push >2 GB), then the bot calls ``copy_message`` to
+    relay it to *chat_id* — copying uses the existing ``file_id`` so there is no
+    size limit, the sender shows as the bot, and the copy can quote-reply to the
+    user's link message. The staged message stays in the log channel as a record.
+    """
+    from utils.downloader import probe_video_dimensions
+
+    stage_caption = (
+        f"📦 **Staged for delivery to `{chat_id}`**\n"
+        f"{'📄' if force_document else ('🎵' if action == 'a' else '🎥')} **{title}**\n"
+        f"`{os.path.basename(file_path)}`"
+    )
+
+    if force_document:
+        staged = await send_reply_safe(
+            premium_client.send_document,
+            None,
+            chat_id=config.LOG_CHANNEL_ID,
+            document=file_path,
+            caption=stage_caption,
+            thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+            progress=progress_fn
+        )
+    elif action == 'a':
+        staged = await send_reply_safe(
+            premium_client.send_audio,
+            None,
+            chat_id=config.LOG_CHANNEL_ID,
+            audio=file_path,
+            title=title,
+            performer=uploader,
+            duration=int(duration),
+            thumb=thumb_path,
+            caption=stage_caption,
+            progress=progress_fn
+        )
+    else:  # action == 'v'
+        width, height, parsed_duration = probe_video_dimensions(file_path)
+        final_duration = parsed_duration if parsed_duration > 0 else int(duration)
+        staged = await send_reply_safe(
+            premium_client.send_video,
+            None,
+            chat_id=config.LOG_CHANNEL_ID,
+            video=file_path,
+            width=width,
+            height=height,
+            duration=final_duration,
+            thumb=thumb_path,
+            supports_streaming=True,
+            caption=stage_caption,
+            progress=progress_fn
+        )
+
+    user_caption = caption or (
+        f"📁 **{title}**" if force_document
+        else f"🎵 **{title}**\nUploaded via Downloader Bot" if action == 'a'
+        else f"🎥 **{title}**\nUploaded via Downloader Bot"
+    )
+
+    return await send_reply_safe(
+        bot_client.copy_message,
+        reply_to_message_id,
+        chat_id=chat_id,
+        from_chat_id=config.LOG_CHANNEL_ID,
+        message_id=staged.id,
+        caption=user_caption,
+    )
 
 
 async def process_split_and_upload(bot_client: Client, premium_client: Client, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg, delete_progress_after: bool = True, caption: str | None = None, reply_to_message_id: int | None = None, premium_allowed: bool | None = None):

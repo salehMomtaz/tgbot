@@ -368,7 +368,7 @@ async def main_engine():
     from modules.stream_interceptor import register_stream_interceptor_handlers
 
     register_admin_handlers(app)
-    register_downloader_handlers(app)
+    register_downloader_handlers(app, premium_app)
     register_stream_interceptor_handlers(app)
 
     # Group -2 Incoming Update Log Interceptors
