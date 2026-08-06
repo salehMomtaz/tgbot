@@ -323,6 +323,41 @@ python main.py
 Never run two bot instances against the same `BOT_TOKEN` at once — Telegram errors
 with "terminated by other getUpdates". Stop tmux/systemd before the other starts.
 
+## Secrets handling (this repo lives in-place, secrets are neighbours)
+
+The bot is deployed **inside the git working tree** (`/home/dev/opencode/tgbot`),
+so secrets are never isolated — they sit next to tracked code. The protection is
+`.gitignore`, not geography. Rules that keep them out of git:
+
+- **`.env` is the only env file, and it is git-ignored.** Never commit it, never
+  copy it under another name that isn't ignored, never commit a diff or a redacted
+  copy that still contains real values. `.env.example` (tracked) is the template;
+  real values live only in the machine's `.env`.
+- **Cookie jars, sessions, DB and forward state are ignored by layout and by
+  name** (`.gitignore` lines 2–47): `cookies/`, `database.json`, `*.session`,
+  `direct_forward_state.json`, `direct_ig_session.json`, `direct_x_cookies.json`,
+  `*.autobak`. Anything that contains a session token must stay under one of
+  these paths or names — if you introduce a new secret file, **add it to
+  `.gitignore` in the same change**. New per-site jars go under
+  `cookies/ytdlp/<site>.txt` (inside the ignored `cookies/` tree).
+- **Verify before you trust.** `git status` should never show `.env`, jars,
+  sessions or `database.json`. `git check-ignore -v <path>` confirms a rule.
+  If anything secret shows as tracked/untracked, stop and fix `.gitignore`
+  before continuing. Check `git ls-files | grep -E '\.(env|session)|cookies/'`
+  occasionally to prove no secret ever got committed.
+- **Never pipe secrets through the shell history.** Prefer `scp`/`rsync` for
+  whole-dir migration (`scp -P 1605 -r dev@66.23.198.52:/path/.env .`), not
+  `cat > file <<EOF`. If you must type a value interactively, it's fine; don't
+  leave it in a command you re-run.
+- **The remote VPS is retired** (services stopped+disabled) but still holds a
+  full secret copy at `dev@66.23.198.52:1605`. Treat that box as a trusted
+  backup until it's decommissioned or wiped; do not paste its credentials into
+  tracked files.
+- **Read-only jars are on purpose.** `main.py::initialize_cookie_jars` locks
+  jars to `0o444` (invariant #4); the bot writes through snapshots. Don't chmod
+  them writable for ad-hoc testing — copy to `/tmp` instead, as the bot itself
+  does via `cookie_manager.acquire`.
+
 ### Service lifecycle (systemd) — the "it died after reboot" trap
 
 `install.sh` renders and installs `tgbot.service` but deliberately does **not**
