@@ -168,11 +168,35 @@ forcing an SSH+sudo session — the exact thing the in-chat flow existed to remo
     process exits and `Restart=always` + `run.sh` relaunch it, re-reading `.env`
     — so the fresh `PREMIUM_STRING_SESSION` is picked up.
   - Without systemd (tmux/foreground dev), it falls back to `os.execv` in place.
-- **Call sites:** only `admin_premium_gen_save` (after `save_session_string`).
-  The 3 s delay lets the confirmation message and log line flush before teardown.
+- **Call sites:** `admin_premium_gen_save` (after `save_session_string`) and the
+  admin console's **🔄 Restart Bot** button (see below). The 3 s delay lets the
+  confirmation message and log line flush before teardown.
 - Verified on the VPS: `kill -TERM <MainPID>` → `KeyboardInterrupt` graceful path
   → systemd relaunches with a new MainPID and restart counter +1. The dial pad +
   save flow itself was tested live by the operator.
+
+## Admin console "Restart Bot" button (2026-08-06)
+
+The main admin console now exposes the same self-restart to the operator, so the
+bot can be rebooted entirely from chat — no SSH, no `systemctl`.
+
+- **`build_console_keyboard`** gains a `🔄 Restart Bot` row paired with
+  `❌ Close Console` (`admin_restart`).
+- **`admin_restart`** renders a confirmation dialog ("Restart the bot? …Any
+  running download will be interrupted and the queue cleared.") with
+  `✅ Yes, restart now` (`admin_restart_confirm`) and `↩️ Cancel` (`admin_main`).
+  It also pops any stale `USER_STATES`/`ACTIVE_PROMPTS` first.
+- **`admin_restart_confirm`** edits the message to "🔄 Restarting the bot…",
+  logs to the channel, answers the callback, then calls
+  `schedule_self_restart(delay=3.0)` — the exact mechanism above.
+- The dispatch branch lives inside `_admin_callback_dispatch` right after
+  `admin_premium_gen_save`; it references only `callback_query`/`user_id`/
+  `log_event`/`schedule_self_restart` (never `client` directly), so it is immune
+  to the `app`-vs-`client` closure gotcha.
+- Verified live on the VPS: the SIGTERM path produced `Stopping bot
+  gracefully...` in the journal, systemd scheduled the restart, and the bot came
+  back active with a fresh MainPID. The button itself (edit → confirm → restart)
+  exercises that same code path.
 
 ## Inline-keyboard auto-expiration (2026-08-05)
 

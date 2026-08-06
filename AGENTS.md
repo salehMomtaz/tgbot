@@ -432,7 +432,10 @@ Don't port it to Go.
   (`main.py::schedule_self_restart`): under systemd it SIGTERMs its own PID, the
   existing `_on_sigterm`→`KeyboardInterrupt` path does the graceful teardown, and
   `Restart=always` relaunches `run.sh` (re-reading `.env`) — no SSH/`systemctl`
-  needed. Do not print a manual restart instruction here.
+  needed. Do not print a manual restart instruction here. The same
+  `schedule_self_restart` powers the admin console's **🔄 Restart Bot** button
+  (`admin_restart` → confirmation → `admin_restart_confirm`), so the operator can
+  reboot the bot entirely from chat.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`
