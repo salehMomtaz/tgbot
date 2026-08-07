@@ -358,6 +358,25 @@ def _fetch_bytes(url: str, referer: str | None = None) -> bytes:
     return resp.content
 
 
+def _video_upload_kwargs(file_path: str) -> dict:
+    """Full send_video metadata for a raw CDN video (DM attachments, carousels).
+
+    Raw CDN bytes have no sidecar cover file, so probe width/height/duration
+    and generate a frame thumbnail — otherwise every such upload would arrive
+    thumbless (Telegram only auto-generates thumbs for <10MB videos).
+    Best-effort: never raises, so a corrupt file still uploads as before.
+    """
+    from utils.downloader import probe_video_dimensions, extract_video_frame_thumb
+    width, height, duration = probe_video_dimensions(file_path)
+    return {
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "thumb": extract_video_frame_thumb(file_path),
+        "supports_streaming": True,
+    }
+
+
 def _header_lines(platform: str, sender_label: str, author_label: str | None,
                   author_id: str | None, post_url: str | None) -> list[str]:
     lines = [f"📥 **{platform} DM** from {sender_label}"]
@@ -564,13 +583,14 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
             path, is_video = files[0]
             if is_video:
                 await bot_client.send_video(chat_id=chat_id, video=path,
-                                            caption=caption, supports_streaming=True)
+                                            caption=caption, **_video_upload_kwargs(path))
             else:
                 await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
             from pyrogram.types import InputMediaPhoto, InputMediaVideo
             group = [
-                (InputMediaVideo(p, caption=caption if j == 0 else "") if is_video
+                (InputMediaVideo(p, caption=caption if j == 0 else "",
+                                 **_video_upload_kwargs(p)) if is_video
                  else InputMediaPhoto(p, caption=caption if j == 0 else ""))
                 for j, (p, is_video) in enumerate(files)
             ]
@@ -586,7 +606,7 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                         if is_video:
                             await bot_client.send_video(chat_id=chat_id, video=p,
                                                         caption=caption if not sent_any else "",
-                                                        supports_streaming=True)
+                                                        **_video_upload_kwargs(p))
                         else:
                             await bot_client.send_photo(chat_id=chat_id, photo=p,
                                                         caption=caption if not sent_any else "")
@@ -600,10 +620,11 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
         return True
     finally:
         for p, _f in files:
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+            for candidate in (p, f"{os.path.splitext(p)[0]}_thumb.jpg"):
+                try:
+                    os.remove(candidate)
+                except Exception:
+                    pass
 
 
 def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
@@ -792,12 +813,13 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
             await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
             await bot_client.send_video(chat_id=chat_id, video=path,
-                                        caption=caption, supports_streaming=True)
+                                        caption=caption, **_video_upload_kwargs(path))
         await _send_followups(bot_client, chat_id, followups)
-        try:
-            os.remove(path)
-        except Exception:
-            pass
+        for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
+            try:
+                os.remove(candidate)
+            except Exception:
+                pass
         logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> direct attachment delivered")
         return
 
@@ -1189,12 +1211,13 @@ async def _x_process_message(m, queue, chat_id, bot_client, premium_client, send
             await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
             await bot_client.send_video(chat_id=chat_id, video=path,
-                                        caption=caption, supports_streaming=True)
+                                        caption=caption, **_video_upload_kwargs(path))
         await _send_followups(bot_client, chat_id, followups)
-        try:
-            os.remove(path)
-        except Exception:
-            pass
+        for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
+            try:
+                os.remove(candidate)
+            except Exception:
+                pass
         return
 
     # 3) Plain text with links.

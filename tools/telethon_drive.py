@@ -44,12 +44,19 @@ def _parse_size_mb(label: str) -> float | None:
 
 
 def media_summary(m):
-    if m.video:
-        return {"type": "video", "size": m.video.size, "w": m.video.w, "h": m.video.h, "duration": m.video.duration}
+    if m.video or m.document:
+        v = m.video or m.document
+        va = next((a for a in v.attributes if type(a).__name__ == "DocumentAttributeVideo"), None)
+        return {
+            "type": "video" if m.video else "document",
+            "size": v.size,
+            "w": va.w if va else None,
+            "h": va.h if va else None,
+            "duration": va.duration if va else None,
+            "thumb_count": len([t for t in (v.thumbs or []) if getattr(t, "w", None)]),
+        }
     if m.audio:
         return {"type": "audio", "size": m.audio.size, "duration": m.audio.duration}
-    if m.document:
-        return {"type": "document", "size": m.document.size}
     if m.photo:
         return {"type": "photo"}
     return None

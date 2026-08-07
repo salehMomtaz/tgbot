@@ -320,6 +320,29 @@ invariants** so you don't have to rediscover them.
       10.2) are a **group-chat** feature; this bot is private-only, so they are
       intentionally not used. Don't add them for private chats.
 
+17. **Every video upload must carry a thumbnail; discovery is magic-bytes, not
+    extensions.** Telegram's server auto-generates a video thumbnail **only for
+    files < 10 MB** — larger videos arrive thumbless unless the sender provides
+    one. yt-dlp's `writethumbnail` writes TikTok's cover as `<title>.image`
+    (not `.jpg`), so an extension-only lookup silently dropped EVERY TikTok
+    thumb and only < 10 MB TikTok videos *appeared* fine (server-generated).
+    Rule: `download_media` locates the cover via
+    `utils/downloader.py::_find_thumbnail_file` (extension list **plus** a
+    magic-byte scan of the task dir for `<stem>.*` / `<stem>_*` siblings —
+    `_looks_like_image` checks JPEG/PNG/WebP/GIF/BMP magic). If no cover
+    exists, `extract_video_frame_thumb` pulls a 320×320 frame from the video
+    (ffmpeg `-ss 1` then `-ss 0` retry, best-effort `None`). This fallback is
+    wired into `send_single_media`, `_stage_and_relay` and (resolved once,
+    reused for part 1 of a split) `process_split_and_upload`, so **any** video
+    upload — YouTube, TikTok, IG, X, yt-dlp sites, and the direct-forward DM
+    relays (`_video_upload_kwargs`: probe width/height/duration + frame thumb)
+    — is fully specified: `duration`, `width`, `height`, `thumb`,
+    `supports_streaming`. Frame thumbs are named `<video>_thumb.jpg` (unique
+    per file — never a shared `frame_thumb.jpg`, which two concurrent DM
+    relays in `cache/` would clobber) and swept by the hourly cache cleaner /
+    the relays' own `finally` blocks. Do not revert the fallback to "no thumb";
+    do not rename the frame thumb to a fixed name.
+
 
 ## Running / testing
 

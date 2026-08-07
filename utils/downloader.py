@@ -1044,6 +1044,92 @@ def convert_thumbnail_to_jpeg(input_path: str, cache_id: str) -> str:
         return input_path
 
 
+_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.image', '.jfif', '.gif', '.bmp')
+
+
+def _looks_like_image(path: str) -> bool:
+    """True when the file's magic bytes look like JPEG/PNG/WebP/GIF/BMP.
+
+    Some extractors (TikTok) write the writethumbnail cover with a nonstandard
+    extension (``.image``), so extension matching alone is unreliable. The
+    bytes are the ground truth — ffmpeg (convert_thumbnail_to_jpeg) already
+    relies on them rather than the filename.
+    """
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+    except Exception:
+        return False
+    if not head:
+        return False
+    if head[:3] == b'\xff\xd8\xff':            # JPEG
+        return True
+    if head[:8] == b'\x89PNG\r\n\x1a\n':       # PNG
+        return True
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':  # WebP
+        return True
+    if head[:3] in (b'GIF',):                  # GIF
+        return True
+    if head[:2] == b'BM':                      # BMP
+        return True
+    return False
+
+
+def _find_thumbnail_file(base_path: str, task_dir: str) -> str | None:
+    """Locate the writethumbnail cover for a downloaded media file.
+
+    Tries the known image extensions first, then falls back to a magic-byte
+    scan of *task_dir* for any sibling whose stem matches the media stem —
+    TikTok names its cover ``<title>.image``, which the extension list alone
+    would never match and which used to leave every TikTok upload thumbless.
+    """
+    for ext in _IMAGE_EXTENSIONS:
+        test_path = f"{base_path}{ext}"
+        if os.path.isfile(test_path) and _looks_like_image(test_path):
+            return test_path
+    stem = os.path.basename(base_path)
+    try:
+        entries = os.listdir(task_dir)
+    except Exception:
+        entries = []
+    for name in entries:
+        if name == os.path.basename(base_path):
+            continue
+        if name.startswith(stem + '.') or name.startswith(stem + '_'):
+            candidate = os.path.join(task_dir, name)
+            if os.path.isfile(candidate) and _looks_like_image(candidate):
+                return candidate
+    return None
+
+
+def extract_video_frame_thumb(video_path: str) -> str | None:
+    """Generate a 320x320 JPEG thumbnail by extracting a frame from the video.
+
+    Fallback when a platform provides no usable cover file: guarantees every
+    video upload carries a thumbnail. Best-effort — returns None on any
+    failure so a corrupt/non-seekable file still uploads (without a thumb,
+    exactly as before this fallback existed).
+    """
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    out = os.path.join(os.path.dirname(video_path) or '.', f"{base}_thumb.jpg")
+    if os.path.exists(out):
+        os.remove(out)
+    vf = 'scale=w=320:h=320:force_original_aspect_ratio=decrease,pad=320:320:(ow-iw)/2:(oh-ih)/2:black'
+    for seek in ('1', '0'):
+        try:
+            subprocess.run(
+                ['ffmpeg', '-y', '-ss', seek, '-i', video_path,
+                 '-vf', vf, '-vframes', '1', '-q:v', '5', out],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                timeout=60,
+            )
+            if os.path.isfile(out) and os.path.getsize(out) > 0:
+                return out
+        except Exception:
+            continue
+    return None
+
+
 def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
     try:
         probe = ffmpeg.probe(file_path)
@@ -1296,12 +1382,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 filename = f"{base}.mkv"
 
     base_path, _ = os.path.splitext(filename)
-    thumb_path = None
-    for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-        test_path = f"{base_path}{ext}"
-        if os.path.exists(test_path):
-            thumb_path = test_path
-            break
+    thumb_path = _find_thumbnail_file(base_path, task_dir)
 
     clean_thumb = None
     if thumb_path:

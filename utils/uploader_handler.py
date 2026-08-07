@@ -107,6 +107,12 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             progress=progress_fn
         )
     else:  # action == 'v'
+        if not (thumb_path and os.path.exists(thumb_path)):
+            # No usable platform cover — extract a frame so every video upload
+            # carries a thumbnail (Telegram auto-generates only <10MB videos;
+            # larger files need the sender to provide one or they arrive blank).
+            from utils.downloader import extract_video_frame_thumb
+            thumb_path = extract_video_frame_thumb(file_path)
         width, height, parsed_duration = probe_video_dimensions(file_path)
         final_duration = parsed_duration if parsed_duration > 0 else int(duration)
         return await send_reply_safe(
@@ -165,6 +171,9 @@ async def _stage_and_relay(bot_client: Client, premium_client: Client, chat_id: 
             progress=progress_fn
         )
     else:  # action == 'v'
+        if not (thumb_path and os.path.exists(thumb_path)):
+            from utils.downloader import extract_video_frame_thumb
+            thumb_path = extract_video_frame_thumb(file_path)
         width, height, parsed_duration = probe_video_dimensions(file_path)
         final_duration = parsed_duration if parsed_duration > 0 else int(duration)
         staged = await send_reply_safe(
@@ -234,6 +243,12 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
     # part stays independently playable; documents are binary-chunked instead.
     is_media = action in ('v', 'a')
 
+    if action == 'v' and not (thumb_path and os.path.exists(thumb_path)):
+        # Resolve a real thumbnail ONCE (platform cover → frame extraction),
+        # reused across split parts instead of re-extracting per part.
+        from utils.downloader import extract_video_frame_thumb
+        thumb_path = extract_video_frame_thumb(file_path)
+
     parts_list = []
 
     try:
@@ -274,7 +289,7 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 title=title if not is_split else f"{title} (Part {part_num})",
                 uploader=uploader,
                 duration=duration,
-                thumb_path=thumb_path if not is_split else None,
+                thumb_path=(thumb_path if part_num == 1 else None),
                 progress_fn=upload_progress,
                 force_document=force_document or is_split,
                 caption=caption if part_num == 1 else None,
