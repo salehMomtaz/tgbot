@@ -334,6 +334,31 @@ def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
     return 0
 
 
+def _sane_filesize(size: int | None, duration_seconds: int, tbr: float) -> int:
+    """Guard against per-fragment filesize artifacts before estimating.
+
+    Some extractors (Dailymotion HLS most notably) report a *single segment's*
+    byte count as ``filesize`` — e.g. ~8 KB for a real ~17 MB stream. If the
+    reported size implies a bitrate that is physically impossible for the
+    declared tbr/duration (<1% of tbr), treat it as absent so
+    :func:`estimate_format_size` falls through to its tbr × duration chain
+    (invariant #11) instead of lying about a fragment.
+    """
+    size = size or 0
+    if size <= 0 or duration_seconds <= 0 or not tbr or tbr <= 0:
+        return size
+    implied_kbps = (size * 8) / duration_seconds / 1000
+    return size if implied_kbps >= tbr * 0.01 else 0
+
+
+def _is_hls_format(fmt: dict) -> bool:
+    """True for HLS (m3u8) formats — their 'url' is a playlist manifest, so a
+    CDN Content-Length probe would measure the manifest, not the file."""
+    protocol = (fmt.get("protocol") or "")
+    fmt_id = (fmt.get("format_id") or "")
+    return protocol.startswith("m3u8") or fmt_id.lower().startswith("hls")
+
+
 def format_size_short(size_bytes: int) -> str:
     """Format file size into short, compact strings to prevent glass button text cuts."""
     if size_bytes <= 0:
@@ -703,19 +728,28 @@ def extract_formats(url: str) -> dict:
         if fmt.get('format_note') == 'storyboard' or fmt.get('ext') == 'mhtml':
             continue
 
-        size = estimate_format_size(fmt, duration_seconds)
+        tbr = fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr') or 0
+        # Some extractors (Dailymotion HLS) report a single segment's size as
+        # filesize (~8 KB for a real ~17 MB stream). Sanitize those so the
+        # estimator falls back to the tbr × duration chain; a sanitized size is
+        # no longer an exact content-length.
+        fmt_eff = dict(fmt)
+        fmt_eff['filesize'] = _sane_filesize(fmt.get('filesize'), duration_seconds, tbr)
+        fmt_eff['filesize_approx'] = _sane_filesize(fmt.get('filesize_approx'), duration_seconds, tbr)
+        size = estimate_format_size(fmt_eff, duration_seconds)
         # Only fmt['filesize'] is a real content-length (clen for YouTube). Anything
         # else (filesize_approx from tbr, or the height/bitrate heuristic) is an
         # ESTIMATE that tends to run high, so the real file is often smaller.
-        exact = bool(fmt.get('filesize'))
-
+        exact = bool(fmt_eff['filesize'])
         # Mark formats whose size would otherwise be a blind guess for an exact
         # CDN content-length probe (see _apply_cdn_size_probes). Instagram DASH
         # reels are the driver: no filesize, no usable tbr, often no duration.
+        # HLS formats are excluded: their 'url' is a manifest, so a probe would
+        # measure the .m3u8, not the file.
         has_stream_meta = bool(
             fmt.get('filesize_approx') or fmt.get('tbr') or fmt.get('vbr') or fmt.get('abr')
         )
-        probe_worthy = (not exact) and (duration_seconds <= 0 or not has_stream_meta)
+        probe_worthy = (not exact) and (duration_seconds <= 0 or not has_stream_meta) and not _is_hls_format(fmt)
 
         if fmt.get('vcodec') == 'none' and fmt.get('acodec') not in (None, 'none'):
             abr = fmt.get('abr') or 0
@@ -749,7 +783,7 @@ def extract_formats(url: str) -> dict:
                 # content-length gets an exact CDN probe.
                 probe_worthy = (not exact) and (
                     muxed or (duration_seconds <= 0 or not has_stream_meta)
-                )
+                ) and not _is_hls_format(fmt)
                 video_options.append({
                     'format_id': fmt['format_id'],
                     'quality': f"{resolution}p",

@@ -60,3 +60,9 @@ code or the git log alone. Last updated: 2026-08-04.
   bit (tracked `100644` in git, reset by a pull) so systemd crash-looped with
   `status=203/EXEC` while `bot.log` stayed clean; fixed the git mode,
   hardened `install.sh`, documented the fingerprint.
+- [2026-08-07 full health pass](tgbot-2026-08-07-health-pass.md) — runtime +
+  feature + security pass on the production box (old US VPS expired). Every
+  site tested live via the Telethon driver; fixes: non-core yt-dlp sites now
+  routed to the format flow, HLS fragment-size artifact guard, silent
+  `MESSAGE_NOT_MODIFIED`, SSRF guard on the direct-file path, secret file
+  perms `600`.

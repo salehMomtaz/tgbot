@@ -156,6 +156,14 @@ invariants** so you don't have to rediscover them.
     Muxed single-stream sites (TikTok) have no audio merge, so exactness is the
     video's own; the joint video+audio rule only applies when a separate
     best-audio stream exists. Sizes display rounded (nearest MB, sub-MB as KB).
+    (d) **Fragment-size artifact guard** (`_sane_filesize`, added 2026-08-07):
+    some extractors (Dailymotion HLS) report a *single segment's* size as
+    `filesize` (440 B for a real 220 MB stream), which made buttons say `0K`/`8K`.
+    A `filesize`/`filesize_approx` implying <1% of the declared tbr is treated
+    as absent so the estimator falls through to its tbr×duration chain — the
+    estimator itself is untouched. Relatedly, HLS formats are excluded from CDN
+    probing (`_is_hls_format`): an `.m3u8` probe measures the manifest, not the
+    file. Don't "fix" the estimator; keep the guard upstream.
     See `docs/memory/tgbot-ytdlnis-size-approach.md`.
 
 12. **Cookies live under `cookies/<platform>/`, never at the project root.**
@@ -178,6 +186,15 @@ invariants** so you don't have to rediscover them.
     switch — adding a new site is just dropping a `<site>.txt` in `cookies/ytdlp/`.
     Any pre-existing flat-root jars (`ytcookies.txt`, `igcookies.txt`, etc.) need
     `mv` into the new layout during deployment; the old paths are not honoured.
+    **Routing gate (2026-08-07):** the message-level switch is
+    `is_social_media_link` (modules/downloader_handler.py) — a URL that is NOT
+    in its allowlist falls into the **direct-file** path (plain HTTP GET, no
+    format selection). Adding a new site therefore needs BOTH its domain in
+    that allowlist AND (optionally) a per-site jar. The direct-file path has an
+    SSRF guard (`_is_ssrf_target`): it refuses loopback/private/link-local
+    destinations, protecting the 127.0.0.1 PO provider and internal services.
+    Only `http://`/`https://` count as links (`is_link`) — `file://`, `ftp://`
+    etc. are plain text and never downloaded.
 
 13. **Direct-forward = DM relay from the bot's own Instagram/X accounts.**
     `modules/direct_forward.py` (replacing the old saved/liked `auto_forward`)

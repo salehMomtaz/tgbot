@@ -1,5 +1,7 @@
 # modules/downloader_handler.py
 import os
+import ipaddress
+import socket
 import uuid
 import shutil
 import asyncio
@@ -29,9 +31,23 @@ def is_link(text: str) -> bool:
 
 
 def is_social_media_link(url: str) -> bool:
-    """Check if the target link belongs to supported media crawlers."""
+    """Check if the target link belongs to a supported media crawler.
+
+    The format-selection flow (yt-dlp extract_formats + cookie jars) must
+    serve every yt-dlp-supported site, not just the core six. Everything that
+    is NOT in this list still falls through to the direct-file path, so a raw
+    .mp4/.jpg link keeps working as before. Adding a new site here also works
+    with the per-site jar layout (cookies/ytdlp/<site>.txt) — see
+    get_cookies_for_url / _site_cookie_context.
+    """
     url_lower = url.lower()
-    social_domains = ["youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com"]
+    social_domains = [
+        "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com",
+        "soundcloud.com", "snd.sc", "dailymotion.com", "dai.ly", "vimeo.com",
+        "twitch.tv", "facebook.com", "fb.watch", "reddit.com", "bilibili.com",
+        "bandcamp.com", "mixcloud.com", "rutube.ru", "ok.ru", "vk.com",
+        "tumblr.com", "streamable.com",
+    ]
     return any(domain in url_lower for domain in social_domains)
 
 
@@ -775,8 +791,38 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         ))
 
 
+async def _is_ssrf_target(url: str) -> bool:
+    """True when *url* would resolve to a local/private network address.
+
+    SSRF guard for the direct-file path: never let an arbitrary HTTP URL reach
+    loopback, RFC1918 private ranges, link-local, or metadata services. This
+    protects the 127.0.0.1-bound PO provider and any internal VPS service from
+    being probed/read through the bot.
+    """
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return True
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        loop = asyncio.get_event_loop()
+        try:
+            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except Exception:
+            return True  # unresolvable host — refuse rather than guess
+        ips = [ipaddress.ip_address(info[4][0]) for info in infos]
+    return any(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+        for ip in ips
+    )
+
+
 async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
     """Download direct file URL stream to secure subfolder."""
+    if await _is_ssrf_target(url):
+        raise RuntimeError("Refusing to fetch a local/private network address.")
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
 

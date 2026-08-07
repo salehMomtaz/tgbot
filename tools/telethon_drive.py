@@ -35,11 +35,12 @@ DEFAULT_TIMEOUT = 180
 
 def _parse_size_mb(label: str) -> float | None:
     import re
-    m = re.search(r"\(([\d.]+)([MG])\)", label)
+    m = re.search(r"\(\s*~?([\d.]+)\s*([KMG])\)", label)
     if not m:
         return None
     val = float(m.group(1))
-    return val * 1024 if m.group(2) == "G" else val
+    mult = {"K": 1 / 1024, "M": 1, "G": 1024}
+    return val * mult[m.group(2)]
 
 
 def media_summary(m):
@@ -107,7 +108,7 @@ async def main(args):
 
                 # Sequential presses: each --press matches the NEXT button that
                 # satisfies it (whether the keyboard is a new message or an edit).
-                if press_index[0] < len(args.press):
+                if args.press and press_index[0] < len(args.press):
                     pat = args.press[press_index[0]]
                     for row in event.buttons or []:
                         for b in row:
@@ -115,8 +116,13 @@ async def main(args):
                             data = (b.data or b"").decode("utf-8", "replace")
                             if _matches(pat, label, data):
                                 print(json.dumps({"press": label, "data": data, "pattern": pat}))
-                                await b.click()
+                                # Increment BEFORE the click: the bot usually edits
+                                # the menu in response, and that edit event can be
+                                # dispatched while `await b.click()` is pending. With
+                                # the index already advanced, the edit is handled with
+                                # the NEXT pattern instead of being consumed early.
                                 press_index[0] += 1
+                                await b.click()
                                 return
 
                 # Auto-pick of a media format (single-video keyboard).

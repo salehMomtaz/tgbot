@@ -831,6 +831,16 @@ def register_admin_handlers(app: Client):
         try:
             await _admin_callback_dispatch(client, callback_query)
         except Exception as e:
+            # Re-tapping an already-open admin menu re-edits the message with
+            # identical content -> Telegram 400 MESSAGE_NOT_MODIFIED. That is a
+            # benign no-op, not an error: resolve the callback spinner quietly
+            # and skip the traceback + scare alert.
+            if "MESSAGE_NOT_MODIFIED" in str(e) or "MessageNotModified" in type(e).__name__:
+                try:
+                    await callback_query.answer()
+                except Exception:
+                    pass
+                return
             logger.exception(f"[AdminCallback] Error handling {callback_query.data!r}: {e}")
             try:
                 await callback_query.answer("⚠️ An internal error occurred. See log channel.", show_alert=True)
