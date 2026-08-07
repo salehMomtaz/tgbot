@@ -343,6 +343,20 @@ invariants** so you don't have to rediscover them.
     the relays' own `finally` blocks. Do not revert the fallback to "no thumb";
     do not rename the frame thumb to a fixed name.
 
+18. **`best_audio_format_id` must prefer the ORIGINAL-language track on
+    multi-audio videos.** Multi-audio YouTube videos expose 7+ parallel audio
+    tracks per itag; the extractor marks each with `language_preference`
+    (10 = original, 5 = default, −1/unset = dubbed) and yt-dlp's own
+    `bestaudio` sorts by it. The bot's single-video merge uses its OWN
+    `best_audio_format_id`, so `extract_formats` sorts audio options by
+    `(language_preference, bitrate)` both descending (`utils/downloader.py`) —
+    originals first, then default, then dubs, bitrate only within a class.
+    Do NOT collapse back to a pure-bitrate sort: on dubbed videos the original
+    is usually the LOWEST-bitrate track, so a bitrate-only sort merges a Hindi
+    AI dub into the video (see `docs/memory/tgbot-2026-08-07-original-audio.md`).
+    The `+bestaudio` fallback selectors and `PLAYLIST_TIERS` are already
+    language-aware via yt-dlp's sort — leave them alone.
+
 
 ## Running / testing
 

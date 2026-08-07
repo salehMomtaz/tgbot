@@ -758,6 +758,7 @@ def extract_formats(url: str) -> dict:
                 'quality': f"{int(abr)}k",
                 'bytes': size,
                 'bitrate': abr,
+                'lang_pref': fmt.get('language_preference', -1),
                 'exact': exact,
                 'probe': probe_worthy,
                 'probe_url': fmt.get('url') if probe_worthy else None,
@@ -797,7 +798,17 @@ def extract_formats(url: str) -> dict:
                 })
 
     video_options = sorted(video_options, key=lambda x: x['height'], reverse=True)
-    audio_options = sorted(audio_options, key=lambda x: x['bitrate'], reverse=True)
+    # Multi-audio YouTube videos expose the original track with
+    # `language_preference` 10 (5 = default, -1/unset = dubbed). yt-dlp's own
+    # `bestaudio` already prefers the original, but our pure-bitrate sort was
+    # overriding that and merging a higher-bitrate DUBBED track (e.g. Hindi AI
+    # dub) into the video. Sort by language preference FIRST, then bitrate, so
+    # the original-language track always wins the merge and the audio buttons.
+    audio_options = sorted(
+        audio_options,
+        key=lambda x: (x['lang_pref'], x['bitrate']),
+        reverse=True,
+    )
 
     unique_videos = []
     seen_heights = set()
