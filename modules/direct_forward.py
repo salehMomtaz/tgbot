@@ -32,9 +32,13 @@ partner. Pairing is a handshake:
      confirms in Telegram.
 
 ``IG_DIRECT_FROM_USERNAME`` in .env also acts as a static pre-pair (resolved to
-a numeric user id once and persisted). X cannot offer an inbox-wide pairing
-handshake (twikit can only read DM history of a known user id), so the X
-protection is the numeric ``X_DIRECT_FROM_USER_ID`` itself.
+a numeric user id once and persisted). X pairing works the same way: Admin
+Console → 📨 Direct-Forward → 🔗 Pair X/Twitter issues a code; you DM it to the
+bot's X account; the worker scans the inbox (trusted + message requests) for
+the code and locks the pair to your numeric X user id. ``X_DIRECT_FROM_USER_ID``
+remains as a static pre-pair / fallback. Note X's E2EE "X Chat" rollout: the
+inbox scan reads the legacy DM API, so the handshake conversation must stay in
+the unencrypted inbox (don't enable the 4-digit passcode on that chat).
 
 Anti-detection posture (Instagram)
 ----------------------------------
@@ -187,14 +191,25 @@ def cancel_pairing(platform: str) -> None:
 
 def unpair_platform(platform: str) -> bool:
     """Forget the paired DM contact for *platform*. Returns True when a pair
-    existed. The worker re-reads the state on its next poll, so unlinking is
-    effective within one poll interval without a restart."""
+    existed. Also cancels any pending pairing handshake for the platform. The
+    worker re-reads the state on its next poll, so unlinking is effective
+    within one poll interval without a restart."""
     state = _load_state()
+    _pending_pairs.pop(platform, None)
     if _get_pair(state, platform):
         state.get(platform, {}).pop("paired", None)
         _save_state(state)
         return True
     return False
+
+
+def set_platform_pair(platform: str, user_id: str | int, username: str = "") -> None:
+    """Persist a paired DM contact for *platform* directly (no handshake).
+    Used for the admin console's manual numeric-id entry; the worker picks it
+    up on its next poll."""
+    state = _load_state()
+    _set_pair(state, platform, user_id, username)
+    _save_state(state)
 
 
 def pairing_status(platform: str, state: dict) -> str:
@@ -1232,6 +1247,160 @@ async def _x_process_message(m, queue, chat_id, bot_client, premium_client, send
         logger.info(f"[DirectForward/X] message {m.id}: no relayable media — skipped")
 
 
+# =========================================================================
+# X DM inbox scanning (no third-party API: twikit has no inbox-listing
+# endpoint, so we hit X's own inbox_initial_state.json through twikit's v11
+# client. The snapshot's entries are STALE — any conversation we care about
+# is re-fetched fresh via dm_conversation.)
+# =========================================================================
+
+def _x_inbox_params(cursor: str | None = None, filter_: str | None = None) -> dict:
+    return {
+        "include_profile_interstitial_type": "1",
+        "include_blocking": "1",
+        "include_blocked_by": "1",
+        "include_followed_by": "1",
+        "include_want_retweets": "1",
+        "include_mute_edge": "1",
+        "include_can_dm": "1",
+        "include_can_media_tag": "1",
+        "include_ext_is_blue_verified": "1",
+        "include_ext_verified_type": "1",
+        "include_ext_profile_image_shape": "1",
+        "skip_status": "1",
+        "dm_secret_conversations_enabled": "false",
+        "krs_registration_enabled": "true",
+        "cards_platform": "Web-12",
+        "include_cards": "1",
+        "include_ext_alt_text": "true",
+        "include_ext_limited_action_results": "true",
+        "include_quote_count": "true",
+        "include_reply_count": "1",
+        "tweet_mode": "extended",
+        "include_ext_views": "true",
+        "dm_users": "false",
+        "include_groups": "true",
+        "include_inbox_timelines": "true",
+        "include_ext_media_color": "true",
+        "supports_reactions": "true",
+        "include_ext_edit_control": "true",
+        "include_ext_business_affiliations_label": "true",
+        "ext": "mediaColor,altText,mediaStats,highlightedLabel,voiceInfo,birdwatchPivot,superFollowMetadata,unmentionInfo,editControl",
+        "include_conversation_info": "true",
+        **(  # cursor / low-quality (message-requests) filter
+            {"cursor": cursor} if cursor else {}
+        ) | ({"filter": filter_} if filter_ else {}),
+    }
+
+
+async def _x_fetch_inbox(client, low_quality: bool = False) -> dict:
+    """Fetch X's DM inbox (trusted, or the low-quality message-requests bucket
+    when *low_quality*). Returns the raw ``inbox_initial_state`` dict, or {}."""
+    from twikit.client.v11 import Endpoint
+    params = _x_inbox_params(filter_="low_quality" if low_quality else None)
+    response, _ = await client.v11.base.get(
+        Endpoint.DM_INBOX, params=params, headers=client.v11.base._base_headers)
+    state = response.get("inbox_initial_state", response)
+    return state if isinstance(state, dict) else {}
+
+
+async def _x_inbox_conversations(client, low_quality: bool = False) -> list[dict]:
+    """List X DM conversations (trusted or message requests). Returns a list of
+    {conversation_id, participants: {uid: screen_name}}. The entries inside are
+    STALE; use _x_conversation_messages for fresh reads."""
+    state = await _x_fetch_inbox(client, low_quality=low_quality)
+    conversations = state.get("conversations", {}) or {}
+    users = state.get("users", {}) or {}
+    out = []
+    for conv_id, conv in conversations.items():
+        participants = {}
+        for p in (conv.get("participants") or []):
+            uid = p.get("user_id")
+            if not uid:
+                continue
+            u = users.get(uid, {}) or {}
+            participants[str(uid)] = u.get("screen_name", "")
+        out.append({
+            "conversation_id": conv_id,
+            "participants": participants,
+        })
+    return out
+
+
+async def _x_conversation_messages(client, conversation_id: str) -> list[dict]:
+    """Fresh messages for one X conversation (the inbox snapshot's entries are
+    stale). Returns newest-first [{id, time, text, sender_id}]."""
+    try:
+        response, _ = await client.v11.dm_conversation(conversation_id, None)
+    except Exception as e:
+        logger.warning(f"[DirectForward/X] conversation {conversation_id} fetch failed: {e}")
+        return []
+    timeline = response.get("conversation_timeline", {}) or {}
+    msgs = []
+    for entry in timeline.get("entries") or []:
+        m = (entry.get("message") or {}).get("message_data") or {}
+        if m:
+            msgs.append({
+                "id": (entry.get("message") or {}).get("id", ""),
+                "time": m.get("time", ""),
+                "text": m.get("text", "") or "",
+                "sender_id": str(m.get("sender_id", "")),
+            })
+    msgs.sort(key=lambda x: str(x["time"]), reverse=True)
+    return msgs
+
+
+async def _x_pairing_scan(client, state: dict, bot_client, chat_id: int) -> bool:
+    """Scan the bot account's X DM inboxes (trusted + message requests) for an
+    active pairing code; on match, lock the pair and confirm in Telegram.
+    Returns True when the code was consumed."""
+    pending = _pending_pairs.get("x")
+    if not pending:
+        return False
+    if pending["expires_at"] <= time.time():
+        _pending_pairs.pop("x", None)
+        return False
+    code = pending["code"]
+    for low_quality in (False, True):
+        try:
+            convs = await _x_inbox_conversations(client, low_quality=low_quality)
+        except Exception as e:
+            logger.warning(f"[DirectForward/X] inbox listing failed: {e}")
+            continue
+        for conv in convs:
+            msgs = await _x_conversation_messages(client, conv["conversation_id"])
+            for m in msgs:
+                if code not in m.get("text", ""):
+                    continue
+                sender_uid = m.get("sender_id", "")
+                if not sender_uid:
+                    continue
+                username = (conv.get("participants", {}).get(sender_uid, "") or "").lstrip("@")
+                _set_pair(state, "x", sender_uid, username)
+                # Bump the cursor to the code message so the relay starts from
+                # AFTER the pairing DM (a fresh pair must not replay its whole
+                # pre-pairing backlog).
+                try:
+                    _bump_cursor(state, "x", int(m["id"]) or 0)
+                except Exception:
+                    _bump_cursor(state, "x", 0)
+                _save_state(state)
+                _pending_pairs.pop("x", None)
+                try:
+                    await bot_client.send_message(
+                        chat_id=chat_id,
+                        text=(f"✅ **X/Twitter paired!** Found our chat: this bot's account ↔ "
+                              f"@{username or sender_uid} (id `{sender_uid}`).\n"
+                              f"From now on, media you DM to the bot's X account will "
+                              f"be relayed here automatically. Other people's DMs are ignored."),
+                    )
+                except Exception as e:
+                    logger.warning(f"[DirectForward/X] pairing confirmation failed: {e}")
+                logger.info(f"[DirectForward/X] paired with @{username} (id {sender_uid}) via handshake code")
+                return True
+    return False
+
+
 async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> None:
     try:
         from twikit import Client as XClient
@@ -1240,9 +1409,9 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                      "(pip install twikit) — X direct-forward disabled.")
         return
 
-    if not (config.X_DIRECT_USERNAME and config.X_DIRECT_PASSWORD and config.X_DIRECT_FROM_USER_ID):
-        logger.error("[DirectForward/X] need X_DIRECT_USERNAME, X_DIRECT_PASSWORD and "
-                     "X_DIRECT_FROM_USER_ID — X direct-forward disabled.")
+    if not (config.X_DIRECT_USERNAME and config.X_DIRECT_PASSWORD):
+        logger.error("[DirectForward/X] need X_DIRECT_USERNAME and X_DIRECT_PASSWORD "
+                     "— X direct-forward disabled.")
         return
 
     x_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
@@ -1271,27 +1440,69 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
     if "x" not in state:
         state["x"] = {"last_id": "0"}
         _save_state(state)
-        logger.info("[DirectForward/X] first run — priming cursor, backlog is skipped.")
-        try:
-            history = await client.get_dm_history(user_id=config.X_DIRECT_FROM_USER_ID)
-            if history:
-                _bump_cursor(state, "x", int(history[0].id))
-                _save_state(state)
-        except Exception as e:
-            logger.warning(f"[DirectForward/X] priming peek failed: {e}")
 
-    sender_label = f"x-user `{config.X_DIRECT_FROM_USER_ID}`"
+    # Effective relay partner: the persisted pairing wins over the .env value
+    # (which doubles as a static pre-pair). First run only primes when we
+    # already know a partner; otherwise we wait for a pairing handshake.
+    pair = _get_pair(state, "x")
+    env_uid = config.X_DIRECT_FROM_USER_ID
+    partner_uid = (pair or {}).get("user_id") or env_uid
+
+    if "x" not in state or "last_id" not in state.get("x", {}):
+        if partner_uid:
+            logger.info("[DirectForward/X] first run — priming cursor, backlog is skipped.")
+            try:
+                history = await client.get_dm_history(user_id=partner_uid)
+                if history:
+                    _bump_cursor(state, "x", int(history[0].id))
+                    _save_state(state)
+            except Exception as e:
+                logger.warning(f"[DirectForward/X] priming peek failed: {e}")
+        else:
+            logger.info("[DirectForward/X] no partner yet — waiting for a pairing "
+                        "handshake (Admin Console → Direct-Forward → Pair X/Twitter) "
+                        "or an X_DIRECT_FROM_USER_ID.")
+
     poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
-    logger.info(f"[DirectForward/X] polling DM history from {sender_label} every ~{poll}s "
-                f"(jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+    if partner_uid:
+        logger.info(f"[DirectForward/X] polling DM history from x-user `{partner_uid}` "
+                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+    else:
+        logger.info(f"[DirectForward/X] polling DM inbox for a pairing handshake "
+                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+    _warned_no_partner = False
 
     while True:
         try:
-            history = await client.get_dm_history(user_id=config.X_DIRECT_FROM_USER_ID)
+            # Re-read the pairing state each cycle: an admin Pair/Unpair or a
+            # manual ID set takes effect on the next poll without a restart.
+            state = _load_state()
+            pair = _get_pair(state, "x")
+            partner_uid = (pair or {}).get("user_id") or env_uid
+
+            # While a pairing code is pending, scan the whole inbox (trusted +
+            # message requests) for it and bind the sender when it arrives.
+            if "x" in _pending_pairs:
+                await _x_pairing_scan(client, state, bot_client, chat_id)
+                state = _load_state()
+                pair = _get_pair(state, "x")
+                partner_uid = (pair or {}).get("user_id") or env_uid
+
+            if not partner_uid:
+                if not _warned_no_partner:
+                    logger.info("[DirectForward/X] no partner yet — waiting for a pairing "
+                                "handshake (Admin Console → Direct-Forward → Pair X/Twitter).")
+                    _warned_no_partner = True
+                await asyncio.sleep(_poll_interval())
+                continue
+            _warned_no_partner = False
+
+            sender_label = f"x-user `{partner_uid}`"
+            history = await client.get_dm_history(user_id=partner_uid)
             last_seen = _cursor(state, "x")
             new_msgs = sorted(
                 (m for m in history
-                 if int(m.id) > last_seen and str(m.sender_id) == str(config.X_DIRECT_FROM_USER_ID)),
+                 if int(m.id) > last_seen and str(m.sender_id) == str(partner_uid)),
                 key=lambda m: int(m.id),
             )
             for m in new_msgs:

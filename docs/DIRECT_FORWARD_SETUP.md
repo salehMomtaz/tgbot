@@ -19,11 +19,13 @@ bot account are ignored. The first run primes the cursor and skips the existing
 backlog. Pair in one of two ways:
 
 - **Interactive handshake (recommended):** Telegram → Admin Console → 📨
-  Direct-Forward → 🔗 Pair Instagram. The bot issues a one-time 6-digit code
-  (valid 10 min). Send it via Instagram DM to the bot account; the bot confirms
-  the pair in your Telegram chat and locks relays to your Instagram user id.
-- **Static pre-pair:** `IG_DIRECT_FROM_USERNAME` in `.env` (resolved to your
-  numeric user id at startup and persisted).
+  Direct-Forward → 🔗 Pair Instagram (or 🔗 Pair X/Twitter). The bot issues a
+  one-time 6-digit code (valid 10 min). Send it via DM to the bot account; the
+  bot confirms the pair in your Telegram chat and locks relays to your
+  platform user id.
+- **Static pre-pair:** `IG_DIRECT_FROM_USERNAME` / `X_DIRECT_FROM_USER_ID` in
+  `.env` (IG resolves to a numeric id at startup and persists; X keeps the id
+  as-is).
 
 Unpair any time via the Direct-Forward menu. Deleting `direct_forward_state.json`
 clears both the cursor and the pairing.
@@ -127,11 +129,25 @@ X_DIRECT_ENABLED=true
 X_DIRECT_USERNAME=bot_x_handle
 X_DIRECT_PASSWORD=bot_x_password
 X_DIRECT_EMAIL=bot_x_email
-X_DIRECT_FROM_USER_ID=0123456789        # YOUR numeric X user id
+X_DIRECT_FROM_USER_ID=0123456789        # YOUR numeric X user id (OPTIONAL)
 ```
 
 Finding your numeric X user id: any "what's my user id" service/bot, or check
 the `profile_id` for your handle. DMs from any other sender are ignored.
+
+**`X_DIRECT_FROM_USER_ID` is now optional.** Since the 2026-08-08 pairing
+feature, you can pair entirely in chat: Admin Console → 📨 Direct-Forward →
+**🔗 Pair X/Twitter** issues a one-time 6-digit code; send it as a DM from your
+account to the bot's X account; the worker scans the bot's inbox (trusted +
+message requests) and binds your numeric X user id automatically. The env var
+remains a static pre-pair / fallback — the persisted pairing wins over it.
+There's also **⌨️ Set X ID manually** if you already know your numeric id.
+
+**X Chat / E2EE caveat:** the pairing scan (and DM relay) read X's **legacy DM
+API**. If X Chat (the 2025 E2EE rollout with the 4-digit passcode) is enabled
+on the conversation with the bot account, its messages are encrypted and the
+forwarder cannot read them. Keep that chat in the normal (unencrypted) inbox —
+never enable the passcode on it.
 
 **Warning:** X aggressively locks accounts on fresh automation logins from
 datacenter IPs. If login fails repeatedly, warm the account first: log in once

@@ -247,6 +247,24 @@ invariants** so you don't have to rediscover them.
     skips backlog. State: `direct_forward_state.json` (+ `thread_activity`
     watermarks). The worker starts in `main.main_engine()` after the FastAPI
     server; a misconfiguration must never block the bot.
+    **X pairing = in-chat handshake, same as IG (2026-08-08).** Both platforms
+    pair via Admin Console → 📨 Direct-Forward → 🔗 Pair (one-time 6-digit code
+    you DM to the bot account), plus ⌨️ manual numeric-id entry. twikit has NO
+    inbox-listing API, so the X scan hits X's own
+    `https://x.com/i/api/1.1/dm/inbox_initial_state.json` directly through
+    twikit's v11 client (`client.v11.base.get(..., headers=
+    _base_headers)` with the full `_x_inbox_params` — mirrored from the proven
+    mcp-twikit fork). The snapshot's entries are STALE: each conversation is
+    re-fetched fresh via `client.v11.dm_conversation(conv_id, None)`. First-time
+    DMs land in the **message-requests bucket** (`filter=low_quality`), so the
+    scan checks BOTH inboxes. `X_DIRECT_FROM_USER_ID` is now optional (static
+    pre-pair/fallback; the persisted pairing wins). `unpair_platform` also
+    cancels a pending handshake. **X Chat E2EE caveat:** the 2025 X Chat
+    rollout (4-digit passcode, only when BOTH opt in) is unreadable to twikit's
+    legacy DM API — the handshake conversation MUST stay in the unencrypted
+    inbox (`dm_secret_conversations_enabled=false` keeps the scan pinned to
+    it). The worker re-reads pairing state each poll, so Pair/Unpair/manual-ID
+    take effect without a restart.
 
  14. **Interactive responses quote the user's link message.** The format
      keyboard, playlist menus, skip warnings and **every uploaded file part**
