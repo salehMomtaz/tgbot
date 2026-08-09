@@ -17,6 +17,7 @@ from utils.downloader import (
     extract_formats,
     download_media,
     extract_playlist_meta,
+    normalize_url,
     is_playlist_url,
     is_pure_playlist_url,
     PLAYLIST_TIERS,
@@ -130,8 +131,11 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
         data = await loop.run_in_executor(None, extract_formats, url)
 
         cache_id = str(uuid.uuid4())[:8]
+        # Store the normalized URL so download_media doesn't re-resolve a
+        # TikTok shortlink (vt.tiktok.com) that may trigger the anti-bot
+        # interstitial on the second fetch.
         DOWNLOAD_CACHE[cache_id] = {
-            "url": url,
+            "url": data.get("normalized_url") or url,
             "title": data["title"],
             "videos": data["videos"],
             "audios": data["audios"],

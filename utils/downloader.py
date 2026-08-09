@@ -870,7 +870,8 @@ def extract_formats(url: str) -> dict:
         'thumbnail': info.get('thumbnail'),
         'videos': unique_videos,
         'audios': unique_audios,
-        'best_audio_format_id': best_audio_format_id
+        'best_audio_format_id': best_audio_format_id,
+        'normalized_url': url,  # post-normalize URL (e.g. resolved TikTok shortlink)
     }
 
 
@@ -1349,13 +1350,14 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 last_attempt_error = str(e2)
 
         # TikTok's anti-bot interstitial fails stochastically between attempts
-        # — a clean no-cookies retry converts many of them. The first attempt's
-        # cookie snapshot is closed out as a non-auth failure (block pages are
-        # not login errors, so the watchdog stays quiet).
+        # — two retries (no-auth, then cookies again) convert most transient
+        # failures. Sensitive/NSFW content requires cookies, so the no-auth
+        # retry alone is not enough.
         if info is None and "tiktok.com" in url.lower():
             if snap_in_play:
                 cookie_manager.commit(snap_in_play, success=False)
                 snap_in_play = None
+            # Retry 1: no-auth (for public content blocked by interstitial)
             retry_opts = dict(ydl_opts)
             retry_opts.pop('cookiefile', None)
             try:
@@ -1363,6 +1365,17 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                     info = ydl.extract_info(url, download=True)
             except Exception as e2:
                 last_attempt_error = str(e2)
+            # Retry 2: fresh cookie snapshot (for login-walled sensitive content)
+            if info is None and site_jar:
+                snap_in_play = cookie_manager.acquire(site_jar)
+                retry_opts2 = dict(ydl_opts)
+                if snap_in_play:
+                    retry_opts2['cookiefile'] = snap_in_play
+                try:
+                    with yt_dlp.YoutubeDL(retry_opts2) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                except Exception as e2:
+                    last_attempt_error = str(e2)
 
         if info is None:
             cookie_manager.commit(snap_in_play, success=False, error_text=last_attempt_error)
