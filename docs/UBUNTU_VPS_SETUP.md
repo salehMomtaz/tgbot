@@ -167,16 +167,20 @@ chmod +x install.sh
 The installer is **one command that sets up the entire server**. It will ask for
 your password (for `sudo`) and then do, automatically:
 
-1. Install system packages: `git python3 ffmpeg tmux curl` and build tools.
+1. Install system packages: `git python3 ffmpeg tmux curl nodejs npm` and build tools.
 2. Install **Deno** (the runtime for the YouTube PO-token provider) into `~/.deno`.
 3. Create a Python virtual environment (`venv/`) and install all dependencies
    (including the yt-dlp PO-token plugin).
-4. **Clone and build the PO-token provider** — this step compiles a native library
+4. Install the **XChat bridge's npm deps** (`emusks`/`cycletls`) for the X
+   encrypted self-DM relay.
+5. **Clone and build the PO-token provider** — this step compiles a native library
    and **can take a few minutes** the first time. Don't panic if it looks stuck;
    let it finish.
-5. Create a **2 GB swap file** so a 1 GB VPS doesn't run out of memory.
-6. Install a **systemd service** (`tgbot.service`) tuned to your server's RAM.
-7. Create a `.env` file from the template for you to edit (next step).
+6. Create a **2 GB swap file** so a 1 GB VPS doesn't run out of memory.
+7. Install **systemd services** (`tgbot.service` tuned to your server's RAM, plus
+   the always-enabled `tgbot-xchat-bridge.service` and the optional
+   `tgbot-monitor.service`).
+8. Create a `.env` file from the template for you to edit (next step).
 
 When it finishes you'll see a `[install] Provisioning complete.` summary. ✅
 
@@ -381,8 +385,10 @@ your paired account are relayed. See also `docs/DIRECT_FORWARD_SETUP.md` →
 
 **How to set it up:**
 
-1. Create a dedicated account on Instagram (e.g. `@mybot_ig`) and/or X.
-   From your **personal** account, open a DM thread with the bot account.
+1. Create a dedicated account on Instagram (e.g. `@mybot_ig`). For X there is
+   **no separate account** — the self-DM method uses your own "Message Yourself"
+   conversation, authenticated with the shared `xcookies.txt` jar. From your
+   **personal** account, open a DM thread with the IG bot account.
 2. Upload the bot account's cookie jar (`🍪 Cookie Jars → Instagram / X`).
    For Instagram this is usually all the auth you need — the DM client
    bootstraps from the jar's `sessionid`. For X the jar IS the entire DM
@@ -395,7 +401,10 @@ your paired account are relayed. See also `docs/DIRECT_FORWARD_SETUP.md` →
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
    X_DIRECT_ENABLED=true
    ```
-   (X needs nothing else — the worker boots from `xcookies.txt`.)
+   X needs nothing else for plain self-DMs — the worker boots from
+   `xcookies.txt`. If you also want the **X Chat-encrypted** self-DM relayed,
+   add `XCHAT_PIN=<your 4-digit passcode>`; the auto-enabled
+   `tgbot-xchat-bridge` unit handles the decryption.
 4. Restart the bot: `sudo systemctl restart tgbot`.
 5. From your **real** account, DM a post / reel / story / photo / video (or
    paste a link) to the bot account; for X, send tweet links/photos/videos to

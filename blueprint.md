@@ -256,16 +256,18 @@ misread the requirement.)
    IG_DIRECT_ENABLED=true
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle   # only your DMs are relayed
    X_DIRECT_ENABLED=true
+   XCHAT_PIN=1234      # optional: only if your self-DM uses X Chat E2EE (passcode)
    ```
 4. **Restart the bot:** `sudo systemctl restart tgbot`. Look for
    `[DirectForward] started -> chat ...` in the logs. Unconfigured pieces log
    a clear reason and never block the bot.
 5. **DM the relay.** On Instagram, share a reel, story, post, photo, video or
    paste a link into the DM thread with the bot account. On X, send tweet
-   links, photos or videos to your own "Message Yourself" conversation (keep it
-   out of X Chat encrypted mode — twikit can't read those). Within one poll
-   interval it lands in your Telegram chat with the caption
-   `📥 <Platform> DM from @you`.
+   links, photos or videos to your own "Message Yourself" conversation. If you
+   enabled X Chat (E2EE passcode) on that conversation, the
+   `tgbot-xchat-bridge` Deno sidecar decrypts it (set `XCHAT_PIN`); otherwise
+   twikit reads it directly. Within one poll interval it lands in your Telegram
+   chat with the caption `📥 <Platform> DM from @you`.
 
 **What it supports:** DM photo/video attachments (sent directly as Telegram
 photo/video), post/reel/clip shares, story shares, tweet shares, and plain

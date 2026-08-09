@@ -9,7 +9,8 @@ The bot relays media into your Telegram chat from two very different setups:
   ("Message Yourself"); the bot — authenticated with the same `xcookies.txt`
   jar yt-dlp already uses — polls that one conversation and relays it.
 
-No third-party APIs — `instagrapi` for Instagram, `twikit` for X.
+No third-party APIs — `instagrapi` for Instagram, `twikit` for X, plus the
+in-repo `xchat_bridge.mjs` Deno sidecar for X Chat (E2EE) decryption.
 
 ```
 IG:  You ──DM──▶ Bot's IG account          X:  You ──DM to YOURSELF──▶
@@ -40,7 +41,8 @@ Unpair Instagram any time via the Direct-Forward menu. Deleting
 
 1. A **dedicated Instagram account** for the bot (not your personal one).
 2. For X: **no separate account** — just a working `xcookies.txt` (the same
-   jar the downloader uses).
+   jar the downloader uses) and, if your self-DM is passcode-protected, the
+   `XCHAT_PIN` for the bridge (see the X section below).
 3. From your *personal* account, open a DM thread with the IG bot account so
    the thread exists; for X, make sure your self-DM ("Message Yourself") thread
    exists.
@@ -138,14 +140,36 @@ write-back keeps the jar warm, so there is **no twikit-specific session file**
 
 ```
 X_DIRECT_ENABLED=true
+XCHAT_PIN=1234        # only if your self-DM uses X Chat (E2EE) — see below
 ```
 
-That's the only X setting. To use it:
+**To use the X relay:**
 
 1. Upload a working Twitter jar: **Telegram → Admin Console → 🍪 Cookie Jars →
    Twitter → ✏️ Replace** (export with a "Get cookies.txt LOCALLY" browser
    extension while logged in to the account you will DM from).
 2. In X, open **Message Yourself** and send tweet links, photos, or videos.
+
+**X Chat / E2EE — now fully supported via the bridge.** The 2025 X Chat rollout
+(4-digit passcode, enabled when both parties opt in) encrypts the self-DM
+conversation, which twikit's legacy DM API cannot read. tgbot ships a Deno
+sidecar, `xchat_bridge.mjs`, that decrypts the XChat-encrypted self-DM with
+your PIN and appends canonical lines to `cache/xchat_inbox.jsonl` — the X
+worker reads that file first, and only falls back to the twikit poll when no
+bridge output exists. So you **may** enable the passcode on your self-DM; the
+bridge handles it. To use it:
+
+1. Set `XCHAT_PIN=<your 4-digit passcode>` in `.env`.
+2. `install.sh` installs and **enables** the `tgbot-xchat-bridge` systemd unit
+   (wrapper: `tools/start_xchat_bridge.sh`, logs to
+   `sudo journalctl -u tgbot-xchat-bridge -f`). It auto-starts on boot and is a
+   harmless no-op until both `X_DIRECT_ENABLED` and `XCHAT_PIN` are set.
+3. The bridge needs the project's npm deps (`emusks` → `cycletls`); install.sh
+   runs `npm install` for you. Runtime is Deno (already installed).
+
+Without `XCHAT_PIN` the bridge stays down and the worker's twikit fallback
+still relays **unencrypted** self-DMs — only passcode-protected messages are
+invisible.
 
 **How each DM type is handled:**
 
@@ -159,11 +183,6 @@ That's the only X setting. To use it:
   session (ton.twitter.com URLs 401 without cookies).
 - **Plain link** → generic download pipeline.
 
-**X Chat / E2EE caveat:** the relay reads X's **legacy DM API**. If X Chat (the
-2025 E2EE rollout with the 4-digit passcode) is enabled on your self-DM
-conversation, its messages are encrypted and the forwarder cannot read them.
-Keep that conversation in the normal (unencrypted) inbox — never enable the
-passcode on it.
 
 **Warning:** a fresh `xcookies.txt` export from a datacenter IP can be
 challenged by X on first use. Warm the account first: log in once in a browser
@@ -191,3 +210,7 @@ downloads, so a DM relay never starves you out of the bot.
   (backlog will be skipped again on the next boot).
 - `direct_ig_session.json` — Instagram's live session. Delete to force
   re-login. (X has no session file — it rides the shared `xcookies.txt` jar.)
+- `cache/xchat_inbox.jsonl` — the bridge's canonical message lines (the worker
+  filters by cursor, so it is safe to truncate).
+- `cache/xchat_bridge_state.json` — the bridge's own `last_seq`. Delete to
+  re-prime (the bridge then skips backlog, same as the worker).

@@ -86,7 +86,7 @@ dpkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "inst
 # golang-go is NOT in SYSTEM_PKGS: the monitor ships as prebuilt binaries
 # (prebuilt/tgbot-monitor-linux-amd64 / -arm64). Go is installed lazily only
 # if a prebuilt is missing and a source build is needed (see section 5b).
-SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates)
+SYSTEM_PKGS=(git python3 python3-venv python3-pip ffmpeg tmux curl ca-certificates nodejs npm)
 CANVAS_PKGS=(build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev)
 
 missing=()
@@ -162,6 +162,30 @@ log "Installing Python dependencies (incl. bgutil yt-dlp plugin)..."
 source venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# 4b. XChat bridge npm dependencies (emusks → cycletls) via node/npm
+# ---------------------------------------------------------------------------
+# The X direct-forward worker reads cache/xchat_inbox.jsonl, produced by the
+# Deno sidecar xchat_bridge.mjs. That sidecar imports emusks (and its cycletls
+# dep) from the project's local node_modules — so a fresh clone needs
+# `npm install` before the bridge can run. Runtime is Deno; node/npm are only
+# needed to populate node_modules here. Idempotent: skipped when already present.
+if [[ -f "package.json" ]]; then
+    if [[ -d "node_modules/emusks" ]]; then
+        log "XChat bridge npm deps already present (node_modules/emusks)."
+    else
+        log "Installing XChat bridge npm deps (npm install → emusks/cycletls)..."
+        if ! have npm; then
+            warn "npm not found — XChat bridge deps skipped (X encrypted self-DM won't work)."
+        elif npm install --no-audit --no-fund >/dev/null 2>&1; then
+            log "XChat bridge npm deps installed."
+            note "xchat-npm:$PROJECT_DIR/node_modules"
+        else
+            warn "'npm install' failed — XChat bridge deps missing (X encrypted self-DM won't work)."
+        fi
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # 5. bgutil PO-token provider source + native canvas build
@@ -346,6 +370,28 @@ if [[ -f "$PROJECT_DIR/deploy/tgbot-monitor.service" ]]; then
     note "systemd-unit:/etc/systemd/system/tgbot-monitor.service"
 fi
 
+# 6d. Render + install + ENABLE the XChat bridge unit. Unlike tgbot.service,
+# this one is auto-enabled: its wrapper exits 0 cleanly when X relay is disabled
+# or XCHAT_PIN is unset, so an enabled-but-unconfigured unit is a harmless no-op
+# (no crash loop) — and the operator gets encrypted self-DM relay for free the
+# moment they set X_DIRECT_ENABLED + XCHAT_PIN.
+if [[ -f "$PROJECT_DIR/deploy/tgbot-xchat-bridge.service" ]]; then
+    log "Rendering XChat-bridge unit → /etc/systemd/system/tgbot-xchat-bridge.service"
+    TMP_BR="$(mktemp)"
+    sed \
+        -e "s|__USER__|${REAL_USER}|g" \
+        -e "s|__GROUP__|${REAL_GROUP}|g" \
+        -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
+        "$PROJECT_DIR/deploy/tgbot-xchat-bridge.service" > "$TMP_BR"
+    $SUDO cp "$TMP_BR" /etc/systemd/system/tgbot-xchat-bridge.service
+    rm -f "$TMP_BR"
+    $SUDO systemctl daemon-reload
+    if $SUDO systemctl enable tgbot-xchat-bridge.service >/dev/null 2>&1; then
+        log "XChat-bridge unit enabled (auto-starts on boot; no-op until X_DIRECT_ENABLED + XCHAT_PIN are set)."
+    fi
+    note "systemd-unit:/etc/systemd/system/tgbot-xchat-bridge.service"
+fi
+
 # ---------------------------------------------------------------------------
 # Seed a .env from .env.example if none exists (newbie convenience)
 # ---------------------------------------------------------------------------
@@ -365,9 +411,11 @@ cat >&2 <<EOF
 [install]   • Python venv + requirements          : ok
 [install]   • bgutil provider (ref $BGUTIL_REF)   : ok
 [install]   • Go monitor binary                   : $( [[ -x "$PROJECT_DIR/build/tgbot-monitor" ]] && echo ok || echo MISSING )
+[install]   • XChat bridge npm deps               : $( [[ -d "$PROJECT_DIR/node_modules/emusks" ]] && echo ok || echo MISSING )
 [install]   • Swap                                : $(swapon --show --noheadings 2>/dev/null | awk '{print $1}' | paste -sd, - || echo n/a)
 [install]   • systemd unit                        : installed (not started)
 [install]   • system-monitor unit                 : installed (not started)
+[install]   • XChat-bridge unit                   : installed + ENABLED (no-op until configured)
 
 Next steps:
   1. Edit .env with your real API_ID / API_HASH / BOT_TOKEN / SYSTEM_CREATOR_ID
@@ -382,9 +430,14 @@ Next steps:
        sudo systemctl enable --now tgbot-monitor
      (It also auto-spawns when the bot starts, so this is optional — but enabling
      the unit makes it survive reboots unconditionally.)
+  5. Optional — X encrypted self-DM relay: the XChat bridge unit is already
+     installed + enabled. To use it, set in .env:
+       XCHAT_PIN=<your X Chat passcode>
+     and (if not already) X_DIRECT_ENABLED=true. The bridge auto-starts on boot.
 
 Logs:
        sudo journalctl -u tgbot -f        # live service log
        tail -f logs/bot.log               # the bot's own timestamped log
        sudo journalctl -u tgbot-monitor -f   # live system-monitor log
+       sudo journalctl -u tgbot-xchat-bridge -f   # live XChat bridge log
 EOF

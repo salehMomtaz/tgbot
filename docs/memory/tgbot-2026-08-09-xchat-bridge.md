@@ -12,7 +12,7 @@ decodes the XChat thrift stream and hands the messages to the bot over a file.
 
 ```
 X self-DM (encrypted) 
-  → xchat_bridge.mjs (Deno, manual sidecar)
+  → xchat_bridge.mjs (Deno, auto-started tgbot-xchat-bridge.service)
       • logs into X with the SHARED cookies/twitter/xcookies.txt jar (auth_token+twid)
       • recovers the XChat identity from Juicebox realms with the operator's PIN (XCHAT_PIN)
       • polls ONLY the self-conversation <self_id>-<self_id> on a RANDOM 10–600 s window
@@ -129,12 +129,16 @@ change the ceiling check to compare against a video-only `filesize`.
 
 ## Operational notes
 
-- The bridge is a **manual sidecar**, not spawned by the bot. Launch command
-  used (production):
-  `XCHAT_PIN=$(cat <pinfile>) CYCLETLS_PORT=19220 setsid nohup deno run -A xchat_bridge.mjs > /tmp/opencode/xchat_bridge.log 2>&1 < /dev/null &`
-  `XCHAT_PIN` is NOT yet in `.env`/`.env.example` — worth adding so a reboot can
-  be scripted (the bot only ever READS the inbox; a fresh `xchat_bridge_state.json`
-  just re-primes the cursor, no double-delivery).
+- The bridge is now a **systemd unit, not a manual sidecar** (2026-08-09
+  follow-up): `deploy/tgbot-xchat-bridge.service` → wrapper
+  `tools/start_xchat_bridge.sh` (parses `.env` dotenv-style — never `source` —
+  gates on `X_DIRECT_ENABLED` + `XCHAT_PIN`, `exec`s Deno). install.sh installs
+  AND enables it; an unconfigured bridge exits 0 so the unit never crash-loops.
+  `XCHAT_PIN` belongs in `.env` (it is git-ignored; only `XCHAT_PIN=` empty
+  appears in `.env.example`). After editing `.env`: `sudo systemctl restart
+  tgbot-xchat-bridge`. Logs: `sudo journalctl -u tgbot-xchat-bridge -f`.
+  npm deps (`emusks`/`cycletls`) are installed by install.sh (`npm install`
+  → `node_modules/`, git-ignored). Runtime is Deno (already installed).
 - Kill hygiene: `pgrep -x deno` + read `/proc/<pid>/cmdline` to pick the bridge
   (avoid `pkill -f` matching your own shell). Never kill the PO provider deno.
 - Verification tool: operator's Telethon StringSession (`telethon_session.txt`,

@@ -36,9 +36,9 @@ invariants** so you don't have to rediscover them.
 | Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
-| Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` |
+| Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
-| Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) |
+| Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
 
 ## Critical invariants (do not break these)
 
@@ -275,13 +275,23 @@ invariants** so you don't have to rediscover them.
     payloads by MAGIC BYTES, never by size** — X serves legitimately tiny
     images (a 133-byte solid PNG is a real photo), so a `<500B` guard dropped
     real media. Only HTML interstitials are rejected.
-    **X Chat E2EE caveat:**
-    the 2025 X Chat rollout (4-digit passcode, only when BOTH opt in) is
-    unreadable to twikit's legacy DM API — the self-DM conversation MUST stay
-    in the unencrypted inbox (`dm_secret_conversations_enabled=false`). The
-    worker reads the jar ONCE at boot (`_x_jar_cookies` in `_twitter_worker`),
-    NOT per poll — a mid-run xcookies re-upload (or switching the relay to a
-    different X account) requires a bot restart. The watched conversation is
+    **X Chat E2EE is handled by the bridge — the passcode is now OPTIONAL, not
+    forbidden.** The 2025 X Chat rollout (4-digit passcode, only when BOTH opt
+    in) encrypts the self-DM so twikit's legacy DM API returns nothing. The
+    Deno sidecar `xchat_bridge.mjs` decrypts it (`XCHAT_PIN` from `.env`),
+    appends canonical lines to `cache/xchat_inbox.jsonl`, and the worker reads
+    that file FIRST (`_x_read_inbox` → `_x_process_bridge_line`), falling back
+    to the twikit poll only when no bridge output exists. The bridge runs as
+    its own `tgbot-xchat-bridge.service` systemd unit (wrapper
+    `tools/start_xchat_bridge.sh`, which parses `.env` dotenv-style — never
+    `source` — and gates on `X_DIRECT_ENABLED` + `XCHAT_PIN`; install.sh
+    installs AND enables it, and it is a harmless no-op until configured).
+    Bridge cursor semantics: its `last_seq` (in `cache/xchat_bridge_state.json`)
+    lives in the SAME id space as the legacy DM ids, so the shared `x.last_id`
+    cursor dedupes; first boot primes and skips backlog. The worker reads the
+    jar ONCE at boot (`_x_jar_cookies` in `_twitter_worker`), NOT per poll — a
+    mid-run xcookies re-upload (or switching the relay to a different X
+    account) requires a bot restart. The watched conversation is
     `<twid-uid>-<twid-uid>`: the account that self-DMs MUST be the one whose
     session is in the jar, or its messages land in a thread the worker never
     reads (media silently never arrives).
@@ -471,6 +481,14 @@ code bug. `Restart=always` means an enabled service also self-heals on crash.
 
 `cookie-watch.service` (the inotifywait tamper monitor) is a separate, harmless
 enabled unit — leave it running.
+
+`tgbot-xchat-bridge.service` (the XChat E2EE sidecar) is the one unit
+`install.sh` DOES enable automatically — its wrapper exits 0 cleanly when X
+relay or the PIN is unconfigured, so an enabled-but-unused unit is a harmless
+no-op instead of a crash loop, and it "just works" the moment `XCHAT_PIN` is
+set. Don't disable it. `tgbot-monitor.service` is installed but disabled by
+default (the bot spawns a detached monitor at startup); enabling it makes the
+monitor survive reboots unconditionally.
 
 ## Logging
 

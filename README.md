@@ -42,7 +42,8 @@ required). Runs as a `systemd` service that survives reboots.
   4 GB. Only one extra segment ever sits on disk.
 - **📨 Direct-forward DM relay.** DM a video, reel, story, tweet share, or link to
   the bot's own Instagram/X accounts and it relays into a Telegram chat — driven
-  by the platform's private APIs, no third-party services.
+  by the platform's private APIs, no third-party services. X **self-DM** even
+  works when the conversation is X Chat-encrypted (a Deno sidecar decrypts it).
 - **🔄 Auto-updating engine.** A background loop upgrades `yt-dlp` to its nightly
   build every 6 hours (preserving the `[default]` extras).
 - **🔗 Zero-disk streaming.** Forward a Telegram file → get an HTTP stream link.
@@ -66,7 +67,8 @@ required). Runs as a `systemd` service that survives reboots.
    - A private log channel ID (`LOG_CHANNEL_ID`) — **required**: the bot refuses
      to start without it.
 3. **That's it.** `install.sh` installs everything else (git, python, ffmpeg,
-   tmux, Deno, the PO-token provider, Go + the system-monitor binary, swap).
+   tmux, Deno, node/npm for the XChat bridge, the PO-token provider, Go + the
+   system-monitor binary, swap).
 
 ---
 
@@ -361,9 +363,13 @@ delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
   your personal account (whitelist or pairing handshake) to the bot's account.
 - The bot relays them into your Telegram chat; links go through the normal
   yt-dlp pipeline (with cookie jars), enqueued behind interactive downloads.
-- Instagram uses `instagrapi` and X uses `twikit` — the platforms' own private
-  APIs, no third-party services. The session is persisted so deleting the wrong
-  file is the #1 way to trigger a checkpoint challenge.
+- Instagram uses `instagrapi`; X uses `twikit` against the **self-DM** method
+  (you DM yourself — no separate bot account). When your self-DM is X
+  Chat-encrypted, a Deno sidecar (`xchat_bridge.mjs`, run as the auto-enabled
+  `tgbot-xchat-bridge` unit) decrypts it — set `XCHAT_PIN` in `.env`. The
+  platform's own private APIs are used, no third-party services. Sessions are
+  persisted so deleting the wrong file is the #1 way to trigger a checkpoint
+  challenge.
 - Configure via `.env` (`DIRECT_FORWARD_*`, see
   [`docs/DIRECT_FORWARD_SETUP.md`](docs/DIRECT_FORWARD_SETUP.md)); unconfigured,
   the feature self-disables. Pair / unpair the Instagram account from the Admin

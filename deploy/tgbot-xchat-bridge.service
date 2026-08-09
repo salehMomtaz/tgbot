@@ -1,0 +1,56 @@
+# tgbot-xchat-bridge.service — systemd unit TEMPLATE for the XChat bridge.
+#
+# This file is a TEMPLATE. `./install.sh` copies it to /etc/systemd/system/
+# and substitutes the real values for __USER__, __GROUP__, and __PROJECT_DIR__
+# based on the user that ran install.sh. You do NOT need to edit it by hand.
+#
+# WHAT THIS IS: the X direct-forward worker relays your X self-DM. Since the
+# 2025 X Chat rollout, that conversation can be E2EE (4-digit passcode), which
+# twikit's legacy DM API cannot read. xchat_bridge.mjs (a Deno sidecar) decrypts
+# it and appends canonical lines to cache/xchat_inbox.jsonl, which the worker
+# polls. This unit keeps that sidecar alive across reboots and crashes.
+#
+# The wrapper (tools/start_xchat_bridge.sh) parses .env itself (dotenv-style)
+# for X_DIRECT_ENABLED / XCHAT_PIN — there is deliberately NO EnvironmentFile,
+# for the same reason tgbot.service has none (systemd would mangle dotenv
+# values; see tgbot.service notes). When X relay is disabled or XCHAT_PIN is
+# unset, the wrapper exits 0 and this unit simply stays down — no crash loop.
+#
+# It is installed (and ENABLED — unlike tgbot.service) by install.sh, because
+# it is harmless when unconfigured and only ever helps when X is on.
+#
+# HOW TO INSTALL + ENABLE (done for you by ./install.sh):
+#   sudo systemctl enable --now tgbot-xchat-bridge
+#   sudo journalctl -u tgbot-xchat-bridge -f   # live bridge log
+#   tail -f /tmp/xchat_bridge.log               # (when run ad-hoc, not systemd)
+
+[Unit]
+Description=Telegram downloader bot — XChat encrypted self-DM bridge
+Documentation=https://github.com/salehMomtaz/tgbot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/tools/start_xchat_bridge.sh
+
+# Restart only on crash. A clean exit (not configured) must NOT restart-loop.
+Restart=on-failure
+RestartSec=10
+
+# The bridge is a small Deno process (few tens of MB). Generous headroom.
+MemoryMax=512M
+
+# On stop, systemd kills the whole control group (deno + its cycletls Go
+# child) so no orphaned cycletls server holds the port.
+KillMode=control-group
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
