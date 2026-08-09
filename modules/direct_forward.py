@@ -1223,6 +1223,31 @@ def _x_twid_user_id(cookies: dict) -> str | None:
     return uid if uid.isdigit() else None
 
 
+def test_x_connection() -> str:
+    """Validate the xcookies jar for X direct-forward. Returns a human-readable
+    status string suitable for the admin console."""
+    cookies = _x_jar_cookies()
+    if not cookies:
+        return ("❌ **X Connection Test**\n\n"
+                "No xcookies jar found or it is empty.\n"
+                "Upload one via Admin → Cookie Jars → X/Twitter → ✏️ Replace.")
+    missing = [k for k in ("auth_token", "twid") if k not in cookies]
+    if missing:
+        return (f"❌ **X Connection Test**\n\n"
+                f"xcookies jar is missing required cookie(s): "
+                f"`{'`, `'.join(missing)}`.\n"
+                f"Re-export a fresh jar from your logged-in X session.")
+    uid = _x_twid_user_id(cookies)
+    if not uid:
+        return ("❌ **X Connection Test**\n\n"
+                "Could not extract user ID from the `twid` cookie. "
+                "The jar may be corrupted.")
+    return (f"✅ **X Connection Test Passed**\n\n"
+            f"• User ID: `{uid}`\n"
+            f"• Self-DM conversation: `{uid}-{uid}`\n"
+            f"• Required cookies present: `auth_token`, `twid`")
+
+
 def _x_is_tweet_url(url: str) -> bool:
     return bool(re.search(r"(?:x\.com|twitter\.com)/(?:[^/?#]+/)?status(?:es)?/\d+", url, re.I))
 
@@ -1815,8 +1840,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                 except Exception as e:
                     logger.error(f"[DirectForward/X] message {m['id']} failed: {e}")
                 _bump_cursor(state, "x", int(m["id"]))
-            if new_msgs:
-                _save_state(state)
+                _save_state(state)  # persist per-message to survive restarts
         except Exception as e:
             logger.error(f"[DirectForward/X] poll error: {e}")
             await asyncio.sleep(min(600, _poll_interval()))

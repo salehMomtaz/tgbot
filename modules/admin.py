@@ -192,9 +192,14 @@ def get_pot_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_direct_menu_keyboard() -> InlineKeyboardMarkup:
+    ig_label = "🔴 Disable IG" if config.IG_DIRECT_ENABLED else "🟢 Enable IG"
+    x_label = "🔴 Disable X" if config.X_DIRECT_ENABLED else "🟢 Enable X"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Pair Instagram", callback_data="admin_direct_pair_ig"),
-         InlineKeyboardButton("💔 Unpair Instagram", callback_data="admin_direct_unpair_ig")],
+        [InlineKeyboardButton(ig_label, callback_data="admin_direct_toggle_ig"),
+         InlineKeyboardButton("🔗 Pair IG", callback_data="admin_direct_pair_ig")],
+        [InlineKeyboardButton("💔 Unpair IG", callback_data="admin_direct_unpair_ig")],
+        [InlineKeyboardButton(x_label, callback_data="admin_direct_toggle_x"),
+         InlineKeyboardButton("🧪 Test X Cookies", callback_data="admin_direct_test_x")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_direct_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
@@ -1331,6 +1336,34 @@ def register_admin_handlers(app: Client):
         elif data == "admin_direct_menu":
             await _render_direct_menu(callback_query)
 
+        elif data == "admin_direct_toggle_ig":
+            from dotenv import set_key
+            new_state = not config.IG_DIRECT_ENABLED
+            if new_state and not getattr(config, "DIRECT_FORWARD_CHAT_ID", 0):
+                await callback_query.answer(
+                    "Set DIRECT_FORWARD_CHAT_ID in .env first — the relay "
+                    "needs a destination chat.", show_alert=True)
+                return
+            set_key(".env", "IG_DIRECT_ENABLED", str(new_state).lower())
+            config.IG_DIRECT_ENABLED = new_state
+            if new_state:
+                await callback_query.message.edit_text(
+                    "✅ Instagram direct-forward **enabled**.\n\n"
+                    "🔄 **Restarting the bot** to activate — back in a few seconds.\n\n"
+                    "After restart, tap **🔗 Pair IG** to complete the pairing handshake.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** IG direct-forward enabled. Auto-restarting.")
+                await callback_query.answer()
+                from main import schedule_self_restart
+                schedule_self_restart(delay=3.0)
+            else:
+                await callback_query.message.edit_text(
+                    "✅ Instagram direct-forward **disabled**. "
+                    "The worker will stop on next restart.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** IG direct-forward disabled.")
+                await callback_query.answer("IG relay disabled", show_alert=True)
+
         elif data == "admin_direct_pair_ig":
             from modules import direct_forward
             code = direct_forward.request_pair_code("ig", requested_by=user_id)
@@ -1361,6 +1394,40 @@ def register_admin_handlers(app: Client):
             await callback_query.answer("Pairing forgotten" if removed else "Nothing to forget",
                                         show_alert=True)
 
+        elif data == "admin_direct_toggle_x":
+            from dotenv import set_key
+            new_state = not config.X_DIRECT_ENABLED
+            if new_state and not getattr(config, "DIRECT_FORWARD_CHAT_ID", 0):
+                await callback_query.answer(
+                    "Set DIRECT_FORWARD_CHAT_ID in .env first — the relay "
+                    "needs a destination chat.", show_alert=True)
+                return
+            set_key(".env", "X_DIRECT_ENABLED", str(new_state).lower())
+            config.X_DIRECT_ENABLED = new_state
+            if new_state:
+                await callback_query.message.edit_text(
+                    "✅ X/Twitter direct-forward **enabled**.\n\n"
+                    "🔄 **Restarting the bot** to activate — back in a few seconds.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** X direct-forward enabled. Auto-restarting.")
+                await callback_query.answer()
+                from main import schedule_self_restart
+                schedule_self_restart(delay=3.0)
+            else:
+                await callback_query.message.edit_text(
+                    "✅ X/Twitter direct-forward **disabled**. "
+                    "The worker will stop on next restart.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** X direct-forward disabled.")
+                await callback_query.answer("X relay disabled", show_alert=True)
+
+        elif data == "admin_direct_test_x":
+            from modules import direct_forward
+            result = direct_forward.test_x_connection()
+            await callback_query.message.edit_text(result,
+                reply_markup=get_direct_menu_keyboard())
+            await callback_query.answer()
+
     # ------------------------------------------------------------------
     # Direct-forward menu helper (closure over log_event)
     # ------------------------------------------------------------------
@@ -1370,18 +1437,34 @@ def register_admin_handlers(app: Client):
         ig_enabled = "🟢" if config.IG_DIRECT_ENABLED else "⚪"
         x_enabled = "🟢" if config.X_DIRECT_ENABLED else "⚪"
         chat_set = "✅" if getattr(config, "DIRECT_FORWARD_CHAT_ID", 0) else "⚠️ DIRECT_FORWARD_CHAT_ID=0 (relay off)"
+
+        # X cookie health summary
+        x_cookies = direct_forward._x_jar_cookies()
+        if not x_cookies:
+            x_cookie_status = "⚠️ no jar"
+        elif "auth_token" not in x_cookies or "twid" not in x_cookies:
+            x_cookie_status = "⚠️ missing cookies"
+        else:
+            uid = direct_forward._x_twid_user_id(x_cookies)
+            x_cookie_status = f"✅ uid `{uid}`" if uid else "⚠️ bad twid"
+
         try:
             await callback_query.message.edit_text(
                 "📨 **Direct-Forward (DM relay)**\n\n"
                 "The bot relays media you DM to its own Instagram account, or "
                 "send to your OWN X self-DM (Message Yourself).\n\n"
                 f"• Relay chat: {chat_set}\n"
-                f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n"
-                f"• {ig_enabled} Instagram: **{direct_forward.pairing_status('ig', state)}**\n"
-                f"• {x_enabled} X/Twitter: **self-DM** — no pairing needed; send tweet "
-                f"links/photos/videos to your own X self-DM, the bot relays "
-                f"`<self_id>-<self_id>` using the xcookies jar.\n\n"
-                "Instagram pairing handshake: tap **🔗 Pair Instagram**, then send "
+                f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n\n"
+                f"**Instagram**\n"
+                f"• {ig_enabled} Status: **{direct_forward.pairing_status('ig', state)}**\n\n"
+                f"**X / Twitter**\n"
+                f"• {x_enabled} Status: **{'enabled' if config.X_DIRECT_ENABLED else 'disabled'}**\n"
+                f"• Cookies: {x_cookie_status}\n"
+                f"• Method: self-DM — send tweet links/photos/videos to your own X "
+                f"self-DM (Message Yourself).\n\n"
+                "Tap **🧪 Test X Cookies** to validate the jar. "
+                "Use **🟢 Enable X** / **🔴 Disable X** to toggle the relay.\n"
+                "Instagram: tap **🔗 Pair Instagram**, then send "
                 "the code to the bot account via Instagram DM.",
                 reply_markup=get_direct_menu_keyboard()
             )
