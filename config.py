@@ -167,12 +167,14 @@ IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
 IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
 IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
 
-# X / Twitter direct-forward
+# X / Twitter direct-forward (self-DM method). The X worker boots from the
+# shared xcookies jar (config.X_COOKIES) that yt-dlp keeps warm via write-back
+# — no username/password, no separate bot account, no pairing.
 X_DIRECT_ENABLED = os.getenv("X_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
-X_DIRECT_USERNAME = os.getenv("X_DIRECT_USERNAME", "")            # bot account login handle
-X_DIRECT_PASSWORD = os.getenv("X_DIRECT_PASSWORD", "")
-X_DIRECT_EMAIL = os.getenv("X_DIRECT_EMAIL", "")                  # sometimes required by X login
-X_DIRECT_FROM_USER_ID = os.getenv("X_DIRECT_FROM_USER_ID", "")    # YOUR numeric X user id (whose DMs to accept)
+# XChat bridge (cache/xchat_inbox.jsonl) is consumed when present. The Deno
+# sidecar reads the XChat-encrypted self-DM (twikit's legacy DM API cannot);
+# the Python worker relays every canonical line past its own cursor.
+XCHAT_INBOX = os.getenv("XCHAT_INBOX", "cache/xchat_inbox.jsonl")
 
 # =========================================================================
 # System monitor (utils/system_monitor.py) — a lightweight, bot-independent

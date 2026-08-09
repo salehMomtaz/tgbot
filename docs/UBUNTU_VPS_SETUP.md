@@ -385,7 +385,8 @@ your paired account are relayed. See also `docs/DIRECT_FORWARD_SETUP.md` →
    From your **personal** account, open a DM thread with the bot account.
 2. Upload the bot account's cookie jar (`🍪 Cookie Jars → Instagram / X`).
    For Instagram this is usually all the auth you need — the DM client
-   bootstraps from the jar's `sessionid`.
+   bootstraps from the jar's `sessionid`. For X the jar IS the entire DM
+   session (self-DM method — no separate bot account, no pairing).
 3. In `.env`, set:
    ```
    DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
@@ -393,15 +394,13 @@ your paired account are relayed. See also `docs/DIRECT_FORWARD_SETUP.md` →
    IG_DIRECT_ENABLED=true
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
    X_DIRECT_ENABLED=true
-   X_DIRECT_USERNAME=bot_x_handle
-   X_DIRECT_PASSWORD=bot_x_password
-   X_DIRECT_EMAIL=bot_x_email
-   X_DIRECT_FROM_USER_ID=your_personal_numeric_x_user_id
    ```
+   (X needs nothing else — the worker boots from `xcookies.txt`.)
 4. Restart the bot: `sudo systemctl restart tgbot`.
 5. From your **real** account, DM a post / reel / story / photo / video (or
-   paste a link) to the bot account. Within one poll interval the media lands
-   in your Telegram chat with the caption `📥 <Platform> DM from @you`.
+   paste a link) to the bot account; for X, send tweet links/photos/videos to
+   your OWN self-DM ("Message Yourself"). Within one poll interval the media
+   lands in your Telegram chat with the caption `📥 <Platform> DM from @you`.
 
 Per-item errors are skipped, not fatal — a broken DM never crashes the relay.
 State is saved in `direct_forward_state.json` so nothing is sent twice, and

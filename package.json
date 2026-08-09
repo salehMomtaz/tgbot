@@ -1,0 +1,9 @@
+{
+  "name": "tgbot-xchat-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "emusks": "^2.3.6"
+  }
+}

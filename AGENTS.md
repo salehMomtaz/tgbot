@@ -196,12 +196,13 @@ invariants** so you don't have to rediscover them.
     Only `http://`/`https://` count as links (`is_link`) — `file://`, `ftp://`
     etc. are plain text and never downloaded.
 
-13. **Direct-forward = DM relay from the bot's own Instagram/X accounts.**
+13. **Direct-forward = DM relay: Instagram (dedicated bot account) + X (self-DM).**
     `modules/direct_forward.py` (replacing the old saved/liked `auto_forward`)
-    polls the bot account's DM inbox every `DIRECT_FORWARD_POLL_SECONDS`
-    (default 300 s **± `DIRECT_FORWARD_POLL_JITTER_PCT`%**, never a fixed
-    machine cadence — fixed short polling is what got the first IG account
-    flagged "automated behavior"). Anti-detection posture, in order of weight:
+    relays media into `DIRECT_FORWARD_CHAT_ID` on a jittered poll cadence
+    (`DIRECT_FORWARD_POLL_SECONDS`, default 300 s **±
+    `DIRECT_FORWARD_POLL_JITTER_PCT`%**, never a fixed machine cadence — fixed
+    short polling is what got the first IG account flagged "automated
+    behavior"). Instagram anti-detection posture, in order of weight:
     several-minute jittered intervals; `delay_range = [2, 4]` pacing every
     private-API call; **per-thread `last_activity_at` watermarks** so an idle
     cycle costs zero thread-item fetches; a persisted session/device
@@ -232,39 +233,58 @@ invariants** so you don't have to rediscover them.
     re-upload is picked up without a bot restart; only real challenge errors
     trigger the multi-hour freeze. `_ig_login` validates the persisted session
     via `account_info()` (not `login()`, which demands a password).
-    You DM media/links from YOUR account (`IG_DIRECT_FROM_USERNAME` /
-    `X_DIRECT_FROM_USER_ID` whitelist or the pairing handshake) to the bot
-    account; it relays photos, videos, reels, story shares, tweet shares and
-    plain links into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi`
-    (sync → always via `run_in_executor`; bootstraps its login from the
-    `sessionid` in the igcookies jar, falls back to user/pass), X uses `twikit`
-    (native async, logs in once, persists cookies to `direct_x_cookies.json`).
-    Each platform runs in its own contained loop (`try/except` per poll;
-    LoginRequired → re-login once). **No third-party APIs.** Downloads route
-    through the normal yt-dlp pipeline (with cookie jars — write-back keeps
-    them warm) and enqueue on the shared single-worker queue behind
-    interactive downloads (invariant #10). First run primes the cursor and
-    skips backlog. State: `direct_forward_state.json` (+ `thread_activity`
-    watermarks). The worker starts in `main.main_engine()` after the FastAPI
-    server; a misconfiguration must never block the bot.
-    **X pairing = in-chat handshake, same as IG (2026-08-08).** Both platforms
-    pair via Admin Console → 📨 Direct-Forward → 🔗 Pair (one-time 6-digit code
-    you DM to the bot account), plus ⌨️ manual numeric-id entry. twikit has NO
-    inbox-listing API, so the X scan hits X's own
-    `https://x.com/i/api/1.1/dm/inbox_initial_state.json` directly through
-    twikit's v11 client (`client.v11.base.get(..., headers=
-    _base_headers)` with the full `_x_inbox_params` — mirrored from the proven
-    mcp-twikit fork). The snapshot's entries are STALE: each conversation is
-    re-fetched fresh via `client.v11.dm_conversation(conv_id, None)`. First-time
-    DMs land in the **message-requests bucket** (`filter=low_quality`), so the
-    scan checks BOTH inboxes. `X_DIRECT_FROM_USER_ID` is now optional (static
-    pre-pair/fallback; the persisted pairing wins). `unpair_platform` also
-    cancels a pending handshake. **X Chat E2EE caveat:** the 2025 X Chat
-    rollout (4-digit passcode, only when BOTH opt in) is unreadable to twikit's
-    legacy DM API — the handshake conversation MUST stay in the unencrypted
-    inbox (`dm_secret_conversations_enabled=false` keeps the scan pinned to
-    it). The worker re-reads pairing state each poll, so Pair/Unpair/manual-ID
-    take effect without a restart.
+    You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
+    static pre-pair or the pairing handshake) to the IG bot account; the relay
+    sends photos, videos, reels, story shares, tweet shares and plain links
+    into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi` (sync → always
+    via `run_in_executor`; bootstraps its login from the `sessionid` in the
+    igcookies jar, falls back to user/pass). Each platform runs in its own
+    contained loop (`try/except` per poll; LoginRequired → re-login once).
+    **No third-party APIs.** Downloads route through the normal yt-dlp
+    pipeline (with cookie jars — write-back keeps them warm) and enqueue on
+    the shared single-worker queue behind interactive downloads (invariant
+    #10). First run primes the cursor and skips backlog. State:
+    `direct_forward_state.json` (+ `thread_activity` watermarks). The worker
+    starts in `main.main_engine()` after the FastAPI server; a misconfiguration
+    must never block the bot.
+    **X = SELF-DM method, no pairing, no separate bot account (2026-08-08).**
+    You send tweet links / photos / videos to your OWN X self-DM ("Message
+    Yourself"); the worker polls that one conversation `<self_id>-<self_id>`
+    authenticated with the SAME shared `cookies/twitter/xcookies.txt` jar
+    yt-dlp downloads with (`_x_jar_cookies` → `_x_twid_user_id` from the
+    `twid` cookie; `client.set_cookies`, no `client.login`). There is NO
+    twikit session file — `direct_x_cookies.json` no longer exists; jar
+    write-back keeps the session warm. `X_DIRECT_USERNAME`/`X_DIRECT_PASSWORD`/
+    `X_DIRECT_EMAIL`/`X_DIRECT_FROM_USER_ID` are gone from config (removed).
+    Tweet links/shares pick the HIGHEST quality automatically
+    (`_x_deliver_tweet`: `extract_formats` → `videos[0]`, ceiling 2 GB bot /
+    4 GB Premium; over-ceiling posts the format-selection keyboard, not a
+    silent lower quality). Photo-only tweets (no video stream for yt-dlp) are
+    delivered natively from the share's CDN URLs (`_x_share_media` +
+    `_x_deliver_share_photos`). DM photo/video attachments are fetched through
+    the authenticated twikit session (`_x_fetch_auth_bytes`) — the
+    `ton.twitter.com` DM photo URLs 401 without cookies. Two hard-won gotchas:
+    (a) **`_x_fetch_auth_bytes` MUST use a throwaway `httpx.AsyncClient`**
+    (same base headers + a copy of the session cookie jar, closed after the
+    fetch) — never the shared `client.http` with `follow_redirects=True`.
+    ton.twitter.com is Cloudflare-fronted and its `Set-Cookie: __cf_bm` piles
+    duplicate names into the shared jar, then the next `dm_conversation` poll
+    dies with `httpx.CookieConflict: Multiple cookies exist with name=__cf_bm`
+    and the worker goes permanently silent (`_x_fetch_self_messages` swallows
+    the exception → returns `[]`). (b) **`_x_media_payload_ok` validates CDN
+    payloads by MAGIC BYTES, never by size** — X serves legitimately tiny
+    images (a 133-byte solid PNG is a real photo), so a `<500B` guard dropped
+    real media. Only HTML interstitials are rejected.
+    **X Chat E2EE caveat:**
+    the 2025 X Chat rollout (4-digit passcode, only when BOTH opt in) is
+    unreadable to twikit's legacy DM API — the self-DM conversation MUST stay
+    in the unencrypted inbox (`dm_secret_conversations_enabled=false`). The
+    worker reads the jar ONCE at boot (`_x_jar_cookies` in `_twitter_worker`),
+    NOT per poll — a mid-run xcookies re-upload (or switching the relay to a
+    different X account) requires a bot restart. The watched conversation is
+    `<twid-uid>-<twid-uid>`: the account that self-DMs MUST be the one whose
+    session is in the jar, or its messages land in a thread the worker never
+    reads (media silently never arrives).
 
  14. **Interactive responses quote the user's link message.** The format
      keyboard, playlist menus, skip warnings and **every uploaded file part**
@@ -410,8 +430,8 @@ so secrets are never isolated — they sit next to tracked code. The protection 
   real values live only in the machine's `.env`.
 - **Cookie jars, sessions, DB and forward state are ignored by layout and by
   name** (`.gitignore` lines 2–47): `cookies/`, `database.json`, `*.session`,
-  `direct_forward_state.json`, `direct_ig_session.json`, `direct_x_cookies.json`,
-  `*.autobak`. Anything that contains a session token must stay under one of
+  `direct_forward_state.json`, `direct_ig_session.json`, `*.autobak`. Anything
+  that contains a session token must stay under one of
   these paths or names — if you introduce a new secret file, **add it to
   `.gitignore` in the same change**. New per-site jars go under
   `cookies/ytdlp/<site>.txt` (inside the ignored `cookies/` tree).

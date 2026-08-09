@@ -195,9 +195,6 @@ def get_direct_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 Pair Instagram", callback_data="admin_direct_pair_ig"),
          InlineKeyboardButton("💔 Unpair Instagram", callback_data="admin_direct_unpair_ig")],
-        [InlineKeyboardButton("🔗 Pair X/Twitter", callback_data="admin_direct_pair_x"),
-         InlineKeyboardButton("💔 Unpair X/Twitter", callback_data="admin_direct_unpair_x")],
-        [InlineKeyboardButton("⌨️ Set X ID manually", callback_data="admin_direct_set_x_id")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_direct_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
@@ -581,37 +578,6 @@ def register_admin_handlers(app: Client):
                     "login client was cleaned up — please start again from the 👑 Premium menu.",
                     reply_markup=back_markup
                 )
-            message.stop_propagation()
-            return
-
-        # 1d. Manual X/Twitter partner ID entry. X user ids are numeric and up
-        # to ~19 digits — way past the Telegram-id gate below, so it must be
-        # dispatched before it. Digits only.
-        if state == "waiting_for_x_pair_id":
-            from modules import direct_forward
-            raw = input_text.strip()
-            if not raw.isdigit() or not (1 <= len(raw) <= 19):
-                await message.reply_text(
-                    "❌ Invalid X user id. Enter digits only (up to 19 digits), "
-                    "e.g. `44196397`.",
-                    reply_markup=back_markup
-                )
-                message.stop_propagation()
-                return
-            direct_forward.set_platform_pair("x", raw)
-            USER_STATES.pop(user_id, None)
-            if prompt_id:
-                try:
-                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
-                except Exception:
-                    pass
-            await message.reply_text(
-                f"✅ X/Twitter partner set to id **`{raw}`**.\n\n"
-                "DMs from exactly this X user id will be relayed. The worker "
-                "picks this up on its next poll.",
-                reply_markup=get_direct_menu_keyboard()
-            )
-            await log_event(f"📨 **Admin Action:** X/Twitter partner ID set manually to `{raw}`.")
             message.stop_propagation()
             return
 
@@ -1395,55 +1361,6 @@ def register_admin_handlers(app: Client):
             await callback_query.answer("Pairing forgotten" if removed else "Nothing to forget",
                                         show_alert=True)
 
-        elif data == "admin_direct_pair_x":
-            from modules import direct_forward
-            code = direct_forward.request_pair_code("x", requested_by=user_id)
-            await callback_query.message.edit_text(
-                "🔗 **X/Twitter pairing handshake**\n\n"
-                f"Your one-time code: **`{code}`**\n\n"
-                f"1. Open X on your phone or web.\n"
-                f"2. Send this code (just the 6 digits) as a **direct message** "
-                f"to the bot's X account.\n"
-                f"3. Within ~2 poll intervals the bot will confirm here that it "
-                f"found your chat.\n\n"
-                "The code expires in 10 minutes. Only messages in YOUR chat "
-                "with the bot account will ever be relayed.\n\n"
-                "⚠️ The handshake reads X's **legacy DM API** — if X Chat "
-                "(E2EE, 4-digit passcode) is enabled on that conversation, the "
-                "code won't be readable. Keep that chat in the normal inbox.",
-                reply_markup=get_direct_menu_keyboard()
-            )
-            await log_event(f"📨 **Admin Action:** X/Twitter pairing code issued (user {user_id}).")
-            await callback_query.answer()
-
-        elif data == "admin_direct_unpair_x":
-            from modules import direct_forward
-            removed = direct_forward.unpair_platform("x")
-            await callback_query.message.edit_text(
-                "💔 X/Twitter pairing removed. " if removed else "ℹ️ No X/Twitter pairing existed. ",
-                reply_markup=get_direct_menu_keyboard()
-            )
-            await log_event("📨 **Admin Action:** X/Twitter DM pairing removed." if removed else
-                            "📨 **Admin Action:** X/Twitter unpair requested (was unpaired).")
-            await callback_query.answer("Pairing forgotten" if removed else "Nothing to forget",
-                                        show_alert=True)
-
-        elif data == "admin_direct_set_x_id":
-            from modules import direct_forward
-            state = direct_forward._load_state()
-            current = direct_forward._get_pair(state, "x")
-            cur_txt = f" (currently `{current['user_id']}`)" if current else ""
-            USER_STATES[user_id] = "waiting_for_x_pair_id"
-            ACTIVE_PROMPTS[user_id] = callback_query.message.id
-            await callback_query.message.edit_text(
-                "⌨️ **Set X partner ID manually**\n\n"
-                "Type your numeric X user id (e.g. `44196397`), then press send. "
-                "DMs from exactly this user id will be relayed.\n\n"
-                f"Current pair{cur_txt}. A manual ID overrides any prior pairing.",
-                reply_markup=back_markup
-            )
-            await callback_query.answer()
-
     # ------------------------------------------------------------------
     # Direct-forward menu helper (closure over log_event)
     # ------------------------------------------------------------------
@@ -1456,13 +1373,16 @@ def register_admin_handlers(app: Client):
         try:
             await callback_query.message.edit_text(
                 "📨 **Direct-Forward (DM relay)**\n\n"
-                "The bot relays media you DM to its own Instagram / X accounts.\n\n"
+                "The bot relays media you DM to its own Instagram account, or "
+                "send to your OWN X self-DM (Message Yourself).\n\n"
                 f"• Relay chat: {chat_set}\n"
                 f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n"
                 f"• {ig_enabled} Instagram: **{direct_forward.pairing_status('ig', state)}**\n"
-                f"• {x_enabled} X/Twitter: **{direct_forward.pairing_status('x', state)}**\n\n"
-                "Pairing handshake: tap **🔗 Pair Instagram** / **🔗 Pair X/Twitter**, "
-                "then send the code to the bot account via that platform's DM.",
+                f"• {x_enabled} X/Twitter: **self-DM** — no pairing needed; send tweet "
+                f"links/photos/videos to your own X self-DM, the bot relays "
+                f"`<self_id>-<self_id>` using the xcookies jar.\n\n"
+                "Instagram pairing handshake: tap **🔗 Pair Instagram**, then send "
+                "the code to the bot account via Instagram DM.",
                 reply_markup=get_direct_menu_keyboard()
             )
         except Exception:

@@ -1,18 +1,27 @@
 # modules/direct_forward.py
 """
-Direct-forward: relay media you DM to the bot's own Instagram / X accounts
-straight into your Telegram chat.
+Direct-forward: relay media you send to the bot's own Instagram account or to
+YOUR OWN X self-DM straight into your Telegram chat.
 
 How it works
 ------------
-You run DEDICATED bot accounts on Instagram and/or X. From your personal
-account you open the chat with the bot account and share a post / reel / story
-/ photo / video — or just paste a link. The bot polls its own DM inbox and:
+Instagram uses a DEDICATED bot account: from your personal account you open
+the chat with the bot account and share a post / reel / story / photo / video
+— or just paste a link. The bot polls its own DM inbox.
 
-  1. resolves what each new DM contains (media attachment, reel/story share,
-     xma shares, plain link, tweet share, X DM photo/video),
+X/Twitter uses the SELF-DM method: no separate bot account, no pairing. You
+send tweet links / photos / videos to your OWN X self-DM (Message Yourself),
+and the bot — authenticated with the same cookies yt-dlp already uses
+(``cookies/twitter/xcookies.txt``) — polls that one conversation and relays it:
+
+  1. resolves what each new message contains (tweet share, X DM photo/video,
+     plain link),
   2. downloads it (link items go through the normal yt-dlp pipeline WITH your
-     cookie jars — cookie write-back keeps those jars fresh),
+     cookie jars — cookie write-back keeps those jars fresh). Tweet links pick
+     the HIGHEST available quality automatically; when that exceeds the upload
+     ceiling (2 GB bot / 4 GB Premium) the usual format-selection keyboard is
+     posted instead so you can pick a smaller quality. Photo-only tweets (no
+     video stream for yt-dlp) are delivered natively from the share's CDN URLs.
   3. sends the media to DIRECT_FORWARD_CHAT_ID with an info header showing the
      ORIGINAL POST AUTHOR (username + numeric id) and the post link; long
      captions are split: media caption at most 1024 chars, the remainder
@@ -20,10 +29,10 @@ account you open the chat with the bot account and share a post / reel / story
   4. advances a per-platform cursor in direct_forward_state.json so nothing is
      sent twice.
 
-Pairing / protection
---------------------
-Other people can DM the bot account too, so relays only happen from the PAIRED
-partner. Pairing is a handshake:
+Instagram pairing / protection
+------------------------------
+Other people can DM the bot's IG account too, so IG relays only happen from
+the PAIRED partner. Pairing is a handshake:
 
   1. In Telegram: Admin Console → 📨 Direct-Forward → 🔗 Pair Instagram. The
      bot issues a one-time code (TTL 10 min).
@@ -32,13 +41,10 @@ partner. Pairing is a handshake:
      confirms in Telegram.
 
 ``IG_DIRECT_FROM_USERNAME`` in .env also acts as a static pre-pair (resolved to
-a numeric user id once and persisted). X pairing works the same way: Admin
-Console → 📨 Direct-Forward → 🔗 Pair X/Twitter issues a code; you DM it to the
-bot's X account; the worker scans the inbox (trusted + message requests) for
-the code and locks the pair to your numeric X user id. ``X_DIRECT_FROM_USER_ID``
-remains as a static pre-pair / fallback. Note X's E2EE "X Chat" rollout: the
-inbox scan reads the legacy DM API, so the handshake conversation must stay in
-the unencrypted inbox (don't enable the 4-digit passcode on that chat).
+a numeric user id once and persisted). X needs NO pairing — the self-DM
+conversation ``<self_id>-<self_id>`` is only reachable by the account itself,
+so there is nothing to lock down. ``X_DIRECT_USERNAME`` / ``X_DIRECT_PASSWORD``
+are no longer used; the X worker boots from the shared xcookies jar.
 
 Anti-detection posture (Instagram)
 ----------------------------------
@@ -62,9 +68,11 @@ worker always survives a library hiccup. Checkpoint hits now also alert the
 relay chat directly (not just the log channel) with instructions to pass the
 verification in the official app.
 
-Sessions persist to disk (direct_ig_session.json / direct_x_cookies.json).
-First run primes the cursor and skips backlog. Delete direct_forward_state.json
-to re-prime (this also clears the pairing). No third-party APIs.
+Sessions: Instagram persists to direct_ig_session.json; the X worker has NO
+session file — it rides the shared xcookies jar (cookies/twitter/xcookies.txt)
+that yt-dlp keeps warm via write-back. First run primes the cursor and skips
+backlog. Delete direct_forward_state.json to re-prime (this also clears the IG
+pairing). No third-party APIs.
 """
 
 import asyncio
@@ -84,7 +92,6 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = "direct_forward_state.json"
 IG_SESSION_FILE = "direct_ig_session.json"
-X_COOKIES_FILE = "direct_x_cookies.json"
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
 # xma share targets can point at reels/posts (/reel/, /p/, /tv/) OR stories
@@ -390,6 +397,22 @@ def _video_upload_kwargs(file_path: str) -> dict:
         "thumb": extract_video_frame_thumb(file_path),
         "supports_streaming": True,
     }
+
+
+def _x_media_payload_ok(data: bytes, is_photo: bool) -> bool:
+    """Validate a fetched CDN payload by MAGIC BYTES, never by size — X serves
+    legitimately tiny images (a 133-byte solid PNG is a real photo). Reject only
+    when the bytes are neither a real image nor a real mp4, or are an HTML
+    interstitial (login wall / challenge page)."""
+    head = data[:16]
+    img_ok = (head.startswith(b"\x89PNG\r\n\x1a\n") or head.startswith(b"\xff\xd8\xff")
+              or head.startswith(b"GIF87a") or head.startswith(b"GIF89a")
+              or head.startswith(b"RIFF") or head.startswith(b"BM"))
+    mp4_ok = len(data) >= 8 and data[4:8] == b"ftyp"
+    lower = data[:256].lstrip().lower()
+    if lower.startswith(b"<html") or lower.startswith(b"<!doctype"):
+        return False
+    return img_ok if is_photo else (mp4_ok or img_ok)
 
 
 def _header_lines(platform: str, sender_label: str, author_label: str | None,
@@ -1149,8 +1172,60 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
 
 
 # =========================================================================
-# X / Twitter DM worker (twikit)
+# X / Twitter DM worker (twikit) — SELF-DM method
 # =========================================================================
+#
+# No separate bot account, no pairing handshake. The user sends tweet links /
+# photos / videos to their OWN X self-DM ("Message Yourself"), and the worker
+# polls that one conversation (<self_id>-<self_id>). It authenticates with the
+# SAME cookies yt-dlp already uses (cookies/twitter/xcookies.txt), which
+# cookie write-back keeps fresh — there is no twikit-specific session file.
+
+def _x_jar_cookies() -> dict:
+    """Read the shared X cookie jar into a twikit-style {name: value} dict.
+
+    This is the SAME jar yt-dlp downloads with, so the twikit session rides the
+    exact session yt-dlp keeps warm via write-back. Reading the locked 0o444
+    jar directly is safe — nothing here merges cookies back (yt-dlp owns that),
+    and the jar is swapped atomically so a read always sees a complete file."""
+    jar = config.X_COOKIES
+    if not jar or not os.path.exists(jar):
+        return {}
+    out = {}
+    try:
+        with open(jar, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _i, _p, _s, _e, name, value = parts[:7]
+                if "x.com" in domain or "twitter.com" in domain:
+                    out[name] = value
+    except Exception:
+        return {}
+    return out
+
+
+def _x_twid_user_id(cookies: dict) -> str | None:
+    """Extract the account's numeric user id from the `twid` cookie (value is
+    `u%3D<uid>` or `u=<uid>`)."""
+    raw = (cookies.get("twid") or "").strip()
+    if not raw:
+        return None
+    if "%3D" in raw:
+        uid = raw.split("%3D", 1)[1]
+    else:
+        uid = raw.replace("u=", "")
+    uid = uid.strip()
+    return uid if uid.isdigit() else None
+
+
+def _x_is_tweet_url(url: str) -> bool:
+    return bool(re.search(r"(?:x\.com|twitter\.com)/(?:[^/?#]+/)?status(?:es)?/\d+", url, re.I))
+
 
 def _x_deep_find_media_url(node: Any) -> tuple[str | None, bool]:
     """Duck-type an X DM attachment tree into (media_url, is_photo)."""
@@ -1178,17 +1253,28 @@ def _x_deep_find_media_url(node: Any) -> tuple[str | None, bool]:
 
 
 def _x_deep_find_tweet(node: Any) -> tuple[str | None, str]:
-    """Find a shared tweet inside a DM attachment tree → (status URL, text)."""
+    """Find a shared tweet inside a DM attachment tree → (status URL, text).
+
+    Handles the two shapes X actually emits:
+    - GraphQL-style: ``{"rest_id": ..., "legacy": {"full_text": ...}}``
+    - legacy share cards: ``tweet.status.{id_str, text}``, or the card's own
+      ``expanded_url`` when no status object is embedded.
+    ``text`` is best-effort (the URL is what matters for delivery)."""
     if isinstance(node, dict):
         legacy = node.get("legacy") if isinstance(node.get("legacy"), dict) else None
         if "rest_id" in node and legacy is not None:
             return f"https://x.com/i/status/{node['rest_id']}", legacy.get("full_text", "")
-        if "id_str" in node and "full_text" in node:
+        if "id_str" in node and isinstance(node.get("full_text"), str):
             return f"https://x.com/i/status/{node['id_str']}", node.get("full_text", "")
+        if "id_str" in node and isinstance(node.get("text"), str):
+            return f"https://x.com/i/status/{node['id_str']}", node.get("text", "")
         for v in node.values():
             found, txt = _x_deep_find_tweet(v)
             if found:
                 return found, txt
+        expanded = node.get("expanded_url")
+        if isinstance(expanded, str) and _x_is_tweet_url(expanded):
+            return expanded, node.get("text") or ""
     elif isinstance(node, list):
         for v in node:
             found, txt = _x_deep_find_tweet(v)
@@ -1197,208 +1283,453 @@ def _x_deep_find_tweet(node: Any) -> tuple[str | None, str]:
     return None, ""
 
 
-async def _x_process_message(m, queue, chat_id, bot_client, premium_client, sender_label) -> None:
-    data = getattr(m, "data", None) or {}
-    message_data = data.get("message_data", data) if isinstance(data, dict) else {}
+def _x_tweet_share_author(attachment) -> tuple[str | None, str | None]:
+    """Extract the ORIGINAL post author (username, numeric id) from a tweet
+    share's payload wherever the user object sits."""
+    if not isinstance(attachment, dict):
+        return None, None
+    t = attachment.get("tweet")
+    if isinstance(t, dict):
+        status = t.get("status")
+        if isinstance(status, dict):
+            user = status.get("user")
+            if isinstance(user, dict):
+                screen = user.get("screen_name") or user.get("username")
+                uid = user.get("id_str") or user.get("rest_id")
+                return screen, (str(uid) if uid else None)
+    return None, None
 
-    # 1) Tweet shared via DM → route through the yt-dlp pipeline (xcookies jar).
-    tweet_url, tweet_text = _x_deep_find_tweet(message_data.get("attachment"))
+
+def _x_share_media(attachment) -> list[dict]:
+    """Extract media items from a tweet share payload as
+    [{"type": "photo"|"video", "url": ...}]. Photos use the CDN media_url_https;
+    videos use the highest-bitrate mp4 variant."""
+    if not isinstance(attachment, dict):
+        return []
+    t = attachment.get("tweet")
+    if not isinstance(t, dict):
+        return []
+    status = t.get("status")
+    if not isinstance(status, dict):
+        return []
+    out = []
+    media = status.get("media") or (status.get("extended_entities") or {}).get("media") or []
+    for m in media:
+        if not isinstance(m, dict):
+            continue
+        mtype = m.get("type")
+        if mtype == "photo":
+            u = m.get("media_url_https") or m.get("media_url")
+            if u:
+                out.append({"type": "photo", "url": u})
+        elif mtype in ("video", "animated_gif"):
+            variants = (m.get("video_info") or {}).get("variants") or []
+            mp4s = [v for v in variants if isinstance(v, dict)
+                    and str(v.get("content_type", "")).startswith("video") and v.get("url")]
+            mp4s.sort(key=lambda v: int(v.get("bitrate", 0) or 0), reverse=True)
+            if mp4s:
+                out.append({"type": "video", "url": mp4s[0]["url"]})
+    return out
+
+
+async def _x_fetch_auth_bytes(client, url: str) -> bytes:
+    """Fetch *url* through the authenticated twikit session. Uses the session's
+    base headers (Bearer auth + browser UA) and its cookies — exactly how the
+    web client reads protected media (ton.twitter.com DM photos 401 without
+    them). httpx is async, so this runs on the event loop.
+
+    The fetch runs on a THROWAWAY httpx client (same headers + a copy of the
+    session cookie jar) that is closed afterwards. Never reuse ``client.http``
+    for these: ton.twitter.com is Cloudflare-fronted and its ``Set-Cookie``
+    (__cf_bm & co.) would pile duplicate names into the shared session jar,
+    and the next ``dm_conversation`` poll dies with
+    ``httpx.CookieConflict: Multiple cookies exist with name=__cf_bm``."""
+    import httpx
+    headers = dict(client.v11.base._base_headers)
+    cookies = {c.name: c.value for c in client.http.cookies.jar}
+    async with httpx.AsyncClient(headers=headers, cookies=cookies,
+                                 follow_redirects=True, timeout=120) as ac:
+        resp = await ac.get(url)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def _x_fallback_photos(client, url: str) -> list[str]:
+    """For a PASTED (text-only) tweet URL, yt-dlp exposes no media when the
+    tweet is photo-only. Fetch the tweet through twikit and return its photo
+    CDN URLs so it can be delivered natively."""
+    m = re.search(r"status(?:es)?/(\d+)", url)
+    if not m:
+        return []
+    try:
+        t = await client.get_tweet_by_id(m.group(1))
+    except Exception as e:
+        logger.warning(f"[DirectForward/X] tweet {url} photo fallback fetch failed: {e}")
+        return []
+    out = []
+    for med in (getattr(t, "media", None) or []):
+        if str(getattr(med, "type", "")).lower() != "photo":
+            continue
+        u = getattr(med, "media_url", None) or getattr(med, "url", None)
+        if u and str(u).startswith("http"):
+            out.append(str(u))
+    return out
+
+
+async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premium_client, self_uid: str) -> None:
+    """Process one raw self-DM message (dict from _x_fetch_self_messages)."""
+    self_label = f"x-user `{self_uid}`"
+    msg_id = m.get("id", "?")
+
+    # 1) Tweet shared via DM → route through the yt-dlp pipeline, auto-picking
+    #    the highest quality; the format keyboard is posted when the top format
+    #    exceeds the upload ceiling; photo-only tweets deliver natively.
+    tweet_url, tweet_text = _x_deep_find_tweet(m.get("attachment"))
     if tweet_url:
-        header = _header_lines("X", sender_label, None, None, tweet_url)
-        _enqueue_relay(queue, chat_id,
-                       lambda u=tweet_url, h=header, b=tweet_text: _download_and_deliver(
-                           bot_client, premium_client, chat_id, u, h, b))
+        author, author_id = _x_tweet_share_author(m.get("attachment"))
+        media = _x_share_media(m.get("attachment"))
+        header = _header_lines("X", self_label, author, author_id, tweet_url)
+        photos = [mm["url"] for mm in media if mm["type"] == "photo"]
+        has_video = any(mm["type"] == "video" for mm in media)
+        if photos and not has_video:
+            logger.info(f"[DirectForward/X] msg {msg_id}: photo-only tweet share -> {tweet_url}")
+            _enqueue_relay(queue, chat_id,
+                           lambda ph=photos, h=header, b=tweet_text: _x_deliver_share_photos(
+                               client, bot_client, chat_id, ph, h, b))
+        else:
+            logger.info(f"[DirectForward/X] msg {msg_id}: tweet share -> {tweet_url} (by @{author})")
+            share_video = next((mm["url"] for mm in media if mm["type"] == "video"), None)
+            _enqueue_relay(queue, chat_id,
+                           lambda u=tweet_url, h=header, b=tweet_text, sv=share_video:
+                               _x_deliver_tweet(client, bot_client, premium_client, chat_id, u, h, b, sv))
         return
 
-    # 2) Photo / video DM attachment.
-    media_url, is_photo = _x_deep_find_media_url(message_data.get("attachment"))
+    # 2) Photo / video DM attachment → authenticated fetch via the twikit session.
+    media_url, is_photo = _x_deep_find_media_url(m.get("attachment"))
     if media_url:
-        loop = asyncio.get_event_loop()
-        data_bytes = await loop.run_in_executor(None, _fetch_bytes, media_url, "https://x.com/")
-        ext = ".jpg" if is_photo else ".mp4"
-        path = f"cache/df_x_dm_{m.id}{ext}"
-        os.makedirs("cache", exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data_bytes)
-        caption, followups = _compose_caption(
-            _header_lines("X", sender_label, None, None, None), "")
+        header = _header_lines("X", self_label, None, None, None)
+        _enqueue_relay(queue, chat_id,
+                       lambda u=media_url, p=is_photo, h=header: _x_deliver_dm_attachment(
+                           client, bot_client, chat_id, u, p, h))
+        return
+
+    # 3) Plain text with links. Tweet URLs use the highest-quality pipeline;
+    #    other links go through the generic yt-dlp relay.
+    text = m.get("text", "") or ""
+    urls = URL_RE.findall(text)
+    for u in urls:
+        header = _header_lines("X", self_label, None, None, u)
+        if _x_is_tweet_url(u):
+            _enqueue_relay(queue, chat_id,
+                           lambda u=u, h=header: _x_deliver_tweet(
+                               client, bot_client, premium_client, chat_id, u, h, "", None))
+        else:
+            _enqueue_relay(queue, chat_id,
+                           lambda u=u, h=header: _download_and_deliver(
+                               bot_client, premium_client, chat_id, u, h, ""))
+    if not urls:
+        logger.info(f"[DirectForward/X] msg {msg_id}: no relayable media — skipped")
+
+
+async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client, premium_client, self_uid: str) -> None:
+    """Process one canonical line from the XChat bridge's inbox file.
+
+    Schema (see xchat_bridge.mjs):
+      {"id": seq, "at": ms, "kind": "tweet", "url": "...", "text": ""}
+      {"id": seq, "at": ms, "kind": "media", "media_url": "...", "is_photo": true, "text": ""}
+      {"id": seq, "at": ms, "kind": "text", "text": "..."}
+    The XChat sequence id IS the legacy DM id (same id space), so the cursor in
+    direct_forward_state.json applies unchanged — nothing double-relays."""
+    self_label = f"x-user `{self_uid}`"
+    msg_id = line.get("id", "?")
+    kind = line.get("kind")
+
+    if kind == "tweet":
+        url = line.get("url", "")
+        if not url:
+            return
+        header = _header_lines("X", self_label, None, None, url)
+        _enqueue_relay(queue, chat_id,
+                       lambda u=url, h=header, b=line.get("text", ""): _x_deliver_tweet(
+                           client, bot_client, premium_client, chat_id, u, h, b, None))
+        return
+
+    if kind == "media":
+        media_url = line.get("media_url", "")
+        if media_url:
+            header = _header_lines("X", self_label, None, None, None)
+            _enqueue_relay(queue, chat_id,
+                           lambda u=media_url, p=bool(line.get("is_photo")), h=header:
+                               _x_deliver_dm_attachment(client, bot_client, chat_id, u, p, h))
+        else:
+            # Encrypted DM media — the URL requires a media key the bridge does
+            # not extract (yet). Log once and skip; never drop silently forever.
+            logger.info(f"[DirectForward/X] msg {msg_id}: encrypted DM media without a URL — skipped")
+        return
+
+    if kind == "text":
+        text = line.get("text", "") or ""
+        urls = URL_RE.findall(text)
+        for u in urls:
+            header = _header_lines("X", self_label, None, None, u)
+            if _x_is_tweet_url(u):
+                _enqueue_relay(queue, chat_id,
+                               lambda u=u, h=header: _x_deliver_tweet(
+                                   client, bot_client, premium_client, chat_id, u, h, "", None))
+            else:
+                _enqueue_relay(queue, chat_id,
+                               lambda u=u, h=header: _download_and_deliver(
+                                   bot_client, premium_client, chat_id, u, h, ""))
+        if not urls:
+            logger.info(f"[DirectForward/X] msg {msg_id}: bridge text with no links — skipped")
+        return
+
+    logger.info(f"[DirectForward/X] msg {msg_id}: bridge line kind {kind!r} not relayable — skipped")
+
+
+def _x_read_inbox(cursor: int) -> list[dict]:
+    """Parse cache/xchat_inbox.jsonl (created by the Deno XChat bridge). Returns
+    lines whose id is strictly above *cursor*, ascending by id. Missing file →
+    []. Corrupt lines are skipped — a partially written line must not poison the
+    whole batch."""
+    inbox = getattr(config, "XCHAT_INBOX", "cache/xchat_inbox.jsonl")
+    try:
+        with open(inbox, "r", encoding="utf-8") as f:
+            raw = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for rl in raw:
+        rl = rl.strip()
+        if not rl:
+            continue
+        try:
+            line = json.loads(rl)
+        except (ValueError, TypeError):
+            continue
+        try:
+            lid = int(line.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if lid > cursor:
+            line["_id"] = lid
+            out.append(line)
+    out.sort(key=lambda x: x["_id"])
+    return out
+
+
+async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
+    """Fresh messages from the self-DM conversation, newest-first. Each item is
+    the raw ``message_data`` dict plus an ``id`` key (the DM message id, which
+    is the cursor)."""
+    try:
+        response, _ = await client.v11.dm_conversation(conversation_id, None)
+    except Exception as e:
+        logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} fetch failed: {e}")
+        return []
+    timeline = (response.get("conversation_timeline") or {}).get("entries") or []
+    msgs = []
+    for entry in timeline:
+        msg = entry.get("message") or {}
+        m = msg.get("message_data") or {}
+        if m:
+            msgs.append({"id": msg.get("id", ""), **m})
+    msgs.sort(key=lambda x: str(x.get("id", "")), reverse=True)
+    return msgs
+
+
+async def _x_deliver_share_photos(client, bot_client, chat_id, photo_urls, header_lines, body):
+    """Deliver a photo-only tweet's images natively from the share CDN (yt-dlp
+    exposes no video stream for these). Fetched through the authenticated
+    twikit session; group-sent when there is more than one."""
+    caption, followups = _compose_caption(header_lines, body)
+    files = []
+    os.makedirs("cache", exist_ok=True)
+    try:
+        for i, url in enumerate(photo_urls):
+            try:
+                data = await _x_fetch_auth_bytes(client, url)
+                if not _x_media_payload_ok(data, is_photo=True):
+                    raise RuntimeError("empty / interstitial payload")
+            except Exception as e:
+                logger.warning(f"[DirectForward/X] share photo {i} failed: {e} — skipping")
+                continue
+            path = f"cache/df_x_photo_{int(time.time() * 1000)}_{i}.jpg"
+            with open(path, "wb") as f:
+                f.write(data)
+            files.append(path)
+        if not files:
+            raise RuntimeError("no share photos could be fetched")
+        if len(files) == 1:
+            await bot_client.send_photo(chat_id=chat_id, photo=files[0], caption=caption)
+        else:
+            from pyrogram.types import InputMediaPhoto
+            group = [InputMediaPhoto(p, caption=caption if j == 0 else "") for j, p in enumerate(files)]
+            try:
+                await bot_client.send_media_group(chat_id=chat_id, media=group)
+            except Exception:
+                # One corrupt item inside the group can fail the whole call —
+                # send the survivors individually instead of dropping them all.
+                sent_any = False
+                for j, p in enumerate(files):
+                    try:
+                        await bot_client.send_photo(chat_id=chat_id, photo=p,
+                                                    caption=caption if not sent_any else "")
+                        sent_any = True
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/X] photo {j} individual send failed: {e}")
+                if not sent_any:
+                    raise
+        await _send_followups(bot_client, chat_id, followups)
+        logger.info(f"[DirectForward/X] ✅ relayed {len(files)} share photo(s) -> {chat_id}")
+    finally:
+        for p in files:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+async def _x_deliver_dm_attachment(client, bot_client, chat_id, media_url, is_photo, header_lines):
+    """Fetch a photo/video DM attachment through the authenticated twikit
+    session (ton.twitter.com URLs 401 without cookies) and send it."""
+    caption, followups = _compose_caption(header_lines, "")
+    data = await _x_fetch_auth_bytes(client, media_url)
+    if not _x_media_payload_ok(data, is_photo):
+        raise RuntimeError(f"DM attachment invalid payload ({len(data)}B)")
+    ext = ".jpg" if is_photo else ".mp4"
+    path = f"cache/df_x_dm_{int(time.time() * 1000)}{ext}"
+    os.makedirs("cache", exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    try:
         if is_photo:
             await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
             await bot_client.send_video(chat_id=chat_id, video=path,
                                         caption=caption, **_video_upload_kwargs(path))
         await _send_followups(bot_client, chat_id, followups)
+    finally:
         for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
             try:
                 os.remove(candidate)
             except Exception:
                 pass
-        return
-
-    # 3) Plain text with links.
-    text = message_data.get("text", "") if isinstance(message_data, dict) else ""
-    urls = URL_RE.findall(text)
-    for u in urls:
-        header = _header_lines("X", sender_label, None, None, u)
-        _enqueue_relay(queue, chat_id,
-                       lambda u=u, h=header: _download_and_deliver(
-                           bot_client, premium_client, chat_id, u, h, ""))
-    if not urls:
-        logger.info(f"[DirectForward/X] message {m.id}: no relayable media — skipped")
 
 
-# =========================================================================
-# X DM inbox scanning (no third-party API: twikit has no inbox-listing
-# endpoint, so we hit X's own inbox_initial_state.json through twikit's v11
-# client. The snapshot's entries are STALE — any conversation we care about
-# is re-fetched fresh via dm_conversation.)
-# =========================================================================
+async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, header_lines, body, share_video_url=None):
+    """Deliver a tweet link via the yt-dlp pipeline, auto-picking the HIGHEST
+    available quality. When the top format exceeds the upload ceiling (2 GB bot
+    / 4 GB Premium) the format-selection keyboard is posted instead. When
+    yt-dlp exposes no video stream (photo-only tweets) callers deliver the
+    share's images natively before ever reaching here; if yt-dlp itself fails
+    while the share carried a video variant, that mp4 is delivered natively so
+    the message is never dropped."""
+    from utils.downloader import extract_formats, download_media, probe_video_dimensions
+    from utils.uploader_handler import process_split_and_upload, _BOT_HARD, _PREMIUM_HARD
+    from modules.downloader_handler import build_format_keyboard
+    from utils.shared import DOWNLOAD_CACHE
+    import uuid
 
-def _x_inbox_params(cursor: str | None = None, filter_: str | None = None) -> dict:
-    return {
-        "include_profile_interstitial_type": "1",
-        "include_blocking": "1",
-        "include_blocked_by": "1",
-        "include_followed_by": "1",
-        "include_want_retweets": "1",
-        "include_mute_edge": "1",
-        "include_can_dm": "1",
-        "include_can_media_tag": "1",
-        "include_ext_is_blue_verified": "1",
-        "include_ext_verified_type": "1",
-        "include_ext_profile_image_shape": "1",
-        "skip_status": "1",
-        "dm_secret_conversations_enabled": "false",
-        "krs_registration_enabled": "true",
-        "cards_platform": "Web-12",
-        "include_cards": "1",
-        "include_ext_alt_text": "true",
-        "include_ext_limited_action_results": "true",
-        "include_quote_count": "true",
-        "include_reply_count": "1",
-        "tweet_mode": "extended",
-        "include_ext_views": "true",
-        "dm_users": "false",
-        "include_groups": "true",
-        "include_inbox_timelines": "true",
-        "include_ext_media_color": "true",
-        "supports_reactions": "true",
-        "include_ext_edit_control": "true",
-        "include_ext_business_affiliations_label": "true",
-        "ext": "mediaColor,altText,mediaStats,highlightedLabel,voiceInfo,birdwatchPivot,superFollowMetadata,unmentionInfo,editControl",
-        "include_conversation_info": "true",
-        **(  # cursor / low-quality (message-requests) filter
-            {"cursor": cursor} if cursor else {}
-        ) | ({"filter": filter_} if filter_ else {}),
-    }
+    loop = asyncio.get_event_loop()
+    cache_id = f"x_{uuid.uuid4().hex[:8]}"
+    caption, followups = _compose_caption(header_lines, body)
+    task_dirs = set()
 
-
-async def _x_fetch_inbox(client, low_quality: bool = False) -> dict:
-    """Fetch X's DM inbox (trusted, or the low-quality message-requests bucket
-    when *low_quality*). Returns the raw ``inbox_initial_state`` dict, or {}."""
-    from twikit.client.v11 import Endpoint
-    params = _x_inbox_params(filter_="low_quality" if low_quality else None)
-    response, _ = await client.v11.base.get(
-        Endpoint.DM_INBOX, params=params, headers=client.v11.base._base_headers)
-    state = response.get("inbox_initial_state", response)
-    return state if isinstance(state, dict) else {}
-
-
-async def _x_inbox_conversations(client, low_quality: bool = False) -> list[dict]:
-    """List X DM conversations (trusted or message requests). Returns a list of
-    {conversation_id, participants: {uid: screen_name}}. The entries inside are
-    STALE; use _x_conversation_messages for fresh reads."""
-    state = await _x_fetch_inbox(client, low_quality=low_quality)
-    conversations = state.get("conversations", {}) or {}
-    users = state.get("users", {}) or {}
-    out = []
-    for conv_id, conv in conversations.items():
-        participants = {}
-        for p in (conv.get("participants") or []):
-            uid = p.get("user_id")
-            if not uid:
-                continue
-            u = users.get(uid, {}) or {}
-            participants[str(uid)] = u.get("screen_name", "")
-        out.append({
-            "conversation_id": conv_id,
-            "participants": participants,
-        })
-    return out
-
-
-async def _x_conversation_messages(client, conversation_id: str) -> list[dict]:
-    """Fresh messages for one X conversation (the inbox snapshot's entries are
-    stale). Returns newest-first [{id, time, text, sender_id}]."""
     try:
-        response, _ = await client.v11.dm_conversation(conversation_id, None)
-    except Exception as e:
-        logger.warning(f"[DirectForward/X] conversation {conversation_id} fetch failed: {e}")
-        return []
-    timeline = response.get("conversation_timeline", {}) or {}
-    msgs = []
-    for entry in timeline.get("entries") or []:
-        m = (entry.get("message") or {}).get("message_data") or {}
-        if m:
-            msgs.append({
-                "id": (entry.get("message") or {}).get("id", ""),
-                "time": m.get("time", ""),
-                "text": m.get("text", "") or "",
-                "sender_id": str(m.get("sender_id", "")),
-            })
-    msgs.sort(key=lambda x: str(x["time"]), reverse=True)
-    return msgs
-
-
-async def _x_pairing_scan(client, state: dict, bot_client, chat_id: int) -> bool:
-    """Scan the bot account's X DM inboxes (trusted + message requests) for an
-    active pairing code; on match, lock the pair and confirm in Telegram.
-    Returns True when the code was consumed."""
-    pending = _pending_pairs.get("x")
-    if not pending:
-        return False
-    if pending["expires_at"] <= time.time():
-        _pending_pairs.pop("x", None)
-        return False
-    code = pending["code"]
-    for low_quality in (False, True):
         try:
-            convs = await _x_inbox_conversations(client, low_quality=low_quality)
+            data = await loop.run_in_executor(None, extract_formats, url)
         except Exception as e:
-            logger.warning(f"[DirectForward/X] inbox listing failed: {e}")
-            continue
-        for conv in convs:
-            msgs = await _x_conversation_messages(client, conv["conversation_id"])
-            for m in msgs:
-                if code not in m.get("text", ""):
-                    continue
-                sender_uid = m.get("sender_id", "")
-                if not sender_uid:
-                    continue
-                username = (conv.get("participants", {}).get(sender_uid, "") or "").lstrip("@")
-                _set_pair(state, "x", sender_uid, username)
-                # Bump the cursor to the code message so the relay starts from
-                # AFTER the pairing DM (a fresh pair must not replay its whole
-                # pre-pairing backlog).
+            logger.warning(f"[DirectForward/X] tweet {url} extract failed: {e}")
+            data = None
+
+        videos = (data or {}).get("videos") or []
+        if not videos:
+            if share_video_url:
+                logger.info(f"[DirectForward/X] tweet {url}: no yt-dlp video formats "
+                            f"— falling back to the share's own mp4")
+                return await _x_deliver_dm_attachment(client, bot_client, chat_id,
+                                                      share_video_url, False, header_lines)
+            photo_urls = await _x_fallback_photos(client, url)
+            if photo_urls:
+                logger.info(f"[DirectForward/X] tweet {url}: no yt-dlp video formats "
+                            f"— delivering {len(photo_urls)} photo(s) natively")
+                return await _x_deliver_share_photos(client, bot_client, chat_id,
+                                                     photo_urls, header_lines, body)
+            raise RuntimeError(f"tweet {url}: no video formats (photo-only tweet handled natively)")
+
+        audios = (data or {}).get("audios") or []
+        best_audio_id = (data or {}).get("best_audio_format_id")
+        top = videos[0]
+
+        # Upload ceiling: 4 GB via the Premium userbot when available, else the
+        # bot's hard 2 GB cap. The relay always passes premium_allowed=True.
+        ceiling = _PREMIUM_HARD if premium_client else _BOT_HARD
+
+        if top.get("bytes") and top["bytes"] <= ceiling:
+            task_dirs.add(f"cache/{cache_id}")
+            result = await loop.run_in_executor(
+                None, download_media, url, top["format_id"], "v", cache_id, None, None,
+                top.get("height"), best_audio_id, bool(top.get("muxed")), top.get("bytes"),
+            )
+            file_path = result["file_path"]
+            width, height, _dur = probe_video_dimensions(file_path)
+            is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".webp"))
+            if is_photo:
+                await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
+            else:
+                await process_split_and_upload(
+                    bot_client=bot_client,
+                    premium_client=premium_client,
+                    chat_id=chat_id,
+                    file_path=file_path,
+                    action="v",
+                    title=result.get("title", "Media"),
+                    uploader=result.get("uploader", "Unknown"),
+                    duration=result.get("duration", 0),
+                    thumb_path=result.get("thumb_path"),
+                    progress_msg=None,
+                    delete_progress_after=True,
+                    caption=caption,
+                    premium_allowed=True,
+                )
+            await _send_followups(bot_client, chat_id, followups)
+            logger.info(f"[DirectForward/X] ✅ relayed tweet {url} (top {top['quality']}) -> {chat_id}")
+            return
+
+        # Over the ceiling: post the format-selection keyboard so the operator
+        # can pick a smaller quality. The relay chat is the operator's chat, so
+        # a posted keyboard is tappable; the dl: callback handles the download.
+        cache_key = f"x_{uuid.uuid4().hex[:8]}"
+        DOWNLOAD_CACHE[cache_key] = {
+            "url": url,
+            "title": data.get("title", "Media"),
+            "videos": videos,
+            "audios": audios,
+            "thumbnail_url": data.get("thumbnail"),
+            "custom_filename": None,
+            "best_audio_format_id": best_audio_id,
+            "origin_message_id": None,
+        }
+        keyboard = build_format_keyboard(cache_key, videos, audios, premium_allowed=True)
+        header_txt = "\n".join(line for line in header_lines if line)
+        await bot_client.send_message(
+            chat_id=chat_id,
+            text=(f"⚠️ **{data.get('title', 'This tweet')}** is over the upload ceiling "
+                  f"({top['size_str']}) at its best quality. Pick a smaller format:\n\n{header_txt}"),
+            reply_markup=keyboard,
+        )
+        await _send_followups(bot_client, chat_id, followups)
+        logger.info(f"[DirectForward/X] ⚠️ tweet {url} over ceiling — posted format keyboard")
+    finally:
+        for task_dir in task_dirs:
+            if os.path.exists(task_dir):
                 try:
-                    _bump_cursor(state, "x", int(m["id"]) or 0)
+                    import shutil
+                    shutil.rmtree(task_dir)
                 except Exception:
-                    _bump_cursor(state, "x", 0)
-                _save_state(state)
-                _pending_pairs.pop("x", None)
-                try:
-                    await bot_client.send_message(
-                        chat_id=chat_id,
-                        text=(f"✅ **X/Twitter paired!** Found our chat: this bot's account ↔ "
-                              f"@{username or sender_uid} (id `{sender_uid}`).\n"
-                              f"From now on, media you DM to the bot's X account will "
-                              f"be relayed here automatically. Other people's DMs are ignored."),
-                    )
-                except Exception as e:
-                    logger.warning(f"[DirectForward/X] pairing confirmation failed: {e}")
-                logger.info(f"[DirectForward/X] paired with @{username} (id {sender_uid}) via handshake code")
-                return True
-    return False
+                    pass
 
 
 async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> None:
@@ -1409,10 +1740,16 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                      "(pip install twikit) — X direct-forward disabled.")
         return
 
-    if not (config.X_DIRECT_USERNAME and config.X_DIRECT_PASSWORD):
-        logger.error("[DirectForward/X] need X_DIRECT_USERNAME and X_DIRECT_PASSWORD "
-                     "— X direct-forward disabled.")
+    # Boot from the shared xcookies jar — the same session yt-dlp uses and
+    # keeps warm via write-back. No username/password, no separate bot account.
+    cookies = _x_jar_cookies()
+    uid = _x_twid_user_id(cookies)
+    if not uid or not cookies.get("auth_token"):
+        logger.error("[DirectForward/X] no usable session in the xcookies jar "
+                     "(need auth_token + twid cookies). Upload a fresh jar via "
+                     "Admin → Cookies — X direct-forward disabled.")
         return
+    conv_id = f"{uid}-{uid}"
 
     x_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
     try:
@@ -1421,96 +1758,63 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
         logger.warning("[DirectForward/X] twikit has no proxy support — DIRECT_FORWARD_PROXY ignored for X")
         client = XClient(language="en-US")
     try:
-        if os.path.exists(X_COOKIES_FILE) and os.path.getsize(X_COOKIES_FILE) > 0:
-            client.load_cookies(X_COOKIES_FILE)
-        else:
-            await client.login(
-                auth_info_1=config.X_DIRECT_USERNAME,
-                auth_info_2=config.X_DIRECT_EMAIL or config.X_DIRECT_USERNAME,
-                password=config.X_DIRECT_PASSWORD,
-                cookies_file=X_COOKIES_FILE,
-            )
+        client.set_cookies(cookies)
     except Exception as e:
-        logger.error(f"[DirectForward/X] login failed: {e}. "
-                     f"X aggressively locks fresh automation logins — if this repeats, "
-                     f"log in once in a browser on the VPS IP or warm the xcookies.txt jar.")
+        logger.error(f"[DirectForward/X] could not apply xcookies: {e} — X direct-forward disabled.")
         return
 
     state = _load_state()
-    if "x" not in state:
-        state["x"] = {"last_id": "0"}
-        _save_state(state)
-
-    # Effective relay partner: the persisted pairing wins over the .env value
-    # (which doubles as a static pre-pair). First run only primes when we
-    # already know a partner; otherwise we wait for a pairing handshake.
-    pair = _get_pair(state, "x")
-    env_uid = config.X_DIRECT_FROM_USER_ID
-    partner_uid = (pair or {}).get("user_id") or env_uid
-
     if "x" not in state or "last_id" not in state.get("x", {}):
-        if partner_uid:
-            logger.info("[DirectForward/X] first run — priming cursor, backlog is skipped.")
-            try:
-                history = await client.get_dm_history(user_id=partner_uid)
-                if history:
-                    _bump_cursor(state, "x", int(history[0].id))
-                    _save_state(state)
-            except Exception as e:
-                logger.warning(f"[DirectForward/X] priming peek failed: {e}")
-        else:
-            logger.info("[DirectForward/X] no partner yet — waiting for a pairing "
-                        "handshake (Admin Console → Direct-Forward → Pair X/Twitter) "
-                        "or an X_DIRECT_FROM_USER_ID.")
+        state.setdefault("x", {"last_id": "0"})
+        _save_state(state)
+        logger.info("[DirectForward/X] first run — priming cursor, backlog is skipped.")
+        try:
+            msgs = await _x_fetch_self_messages(client, conv_id)
+            if msgs:
+                _bump_cursor(state, "x", int(msgs[0]["id"]))
+                _save_state(state)
+        except Exception as e:
+            logger.warning(f"[DirectForward/X] priming peek failed: {e}")
 
     poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
-    if partner_uid:
-        logger.info(f"[DirectForward/X] polling DM history from x-user `{partner_uid}` "
-                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
-    else:
-        logger.info(f"[DirectForward/X] polling DM inbox for a pairing handshake "
-                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
-    _warned_no_partner = False
+    logger.info(f"[DirectForward/X] polling your X self-DM "
+                f"(conversation `{conv_id}`, your account id `{uid}`) "
+                f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
 
     while True:
         try:
-            # Re-read the pairing state each cycle: an admin Pair/Unpair or a
-            # manual ID set takes effect on the next poll without a restart.
             state = _load_state()
-            pair = _get_pair(state, "x")
-            partner_uid = (pair or {}).get("user_id") or env_uid
+            last_seen = _cursor(state, "x")
 
-            # While a pairing code is pending, scan the whole inbox (trusted +
-            # message requests) for it and bind the sender when it arrives.
-            if "x" in _pending_pairs:
-                await _x_pairing_scan(client, state, bot_client, chat_id)
-                state = _load_state()
-                pair = _get_pair(state, "x")
-                partner_uid = (pair or {}).get("user_id") or env_uid
-
-            if not partner_uid:
-                if not _warned_no_partner:
-                    logger.info("[DirectForward/X] no partner yet — waiting for a pairing "
-                                "handshake (Admin Console → Direct-Forward → Pair X/Twitter).")
-                    _warned_no_partner = True
+            # Primary source: the XChat bridge's inbox file. The Deno sidecar
+            # reads the XChat-encrypted self-DM that twikit's legacy DM API
+            # cannot; its sequence ids live in the same id space as the legacy
+            # DM ids, so the shared cursor dedupes. Fall back to the twikit
+            # poll only when the bridge has never produced a file.
+            bridge_lines = _x_read_inbox(last_seen)
+            if bridge_lines:
+                for line in bridge_lines:
+                    try:
+                        await _x_process_bridge_line(line, client, queue, chat_id,
+                                                     bot_client, premium_client, uid)
+                    except Exception as e:
+                        logger.error(f"[DirectForward/X] bridge message {line.get('id')} failed: {e}")
+                    _bump_cursor(state, "x", line["_id"])
+                _save_state(state)
                 await asyncio.sleep(_poll_interval())
                 continue
-            _warned_no_partner = False
 
-            sender_label = f"x-user `{partner_uid}`"
-            history = await client.get_dm_history(user_id=partner_uid)
-            last_seen = _cursor(state, "x")
+            msgs = await _x_fetch_self_messages(client, conv_id)
             new_msgs = sorted(
-                (m for m in history
-                 if int(m.id) > last_seen and str(m.sender_id) == str(partner_uid)),
-                key=lambda m: int(m.id),
+                (m for m in msgs if int(m.get("id") or 0) > last_seen),
+                key=lambda m: int(m["id"]),
             )
             for m in new_msgs:
                 try:
-                    await _x_process_message(m, queue, chat_id, bot_client, premium_client, sender_label)
+                    await _x_process_message(client, m, queue, chat_id, bot_client, premium_client, uid)
                 except Exception as e:
-                    logger.error(f"[DirectForward/X] message {m.id} failed: {e}")
-                _bump_cursor(state, "x", int(m.id))
+                    logger.error(f"[DirectForward/X] message {m['id']} failed: {e}")
+                _bump_cursor(state, "x", int(m["id"]))
             if new_msgs:
                 _save_state(state)
         except Exception as e:

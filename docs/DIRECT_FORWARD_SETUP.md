@@ -1,41 +1,49 @@
 # Direct-forward setup (Instagram / X DM → Telegram)
 
-The bot relays whatever you **DM to its own Instagram or X account** into your
-Telegram chat. Photos, videos, reels, story shares, tweet shares, and plain
-links are all supported. No third-party APIs — the bot logs in as the bot
-account directly with local libraries (`instagrapi` for Instagram, `twikit`
-for X).
+The bot relays media into your Telegram chat from two very different setups:
+
+- **Instagram** uses a dedicated bot account: you DM posts/reels/stories/links
+  from your personal account to the bot's IG account.
+- **X/Twitter** uses the **self-DM method**: no separate bot account, no
+  pairing. You send tweet links / photos / videos to your OWN X self-DM
+  ("Message Yourself"); the bot — authenticated with the same `xcookies.txt`
+  jar yt-dlp already uses — polls that one conversation and relays it.
+
+No third-party APIs — `instagrapi` for Instagram, `twikit` for X.
 
 ```
-You (personal account)  ──DM: "look at this reel"──▶  Bot's IG/X account
-                                                         │ poll every N sec
-                                                         ▼
-                                            tgbot downloads + sends to
-                                              DIRECT_FORWARD_CHAT_ID
+IG:  You ──DM──▶ Bot's IG account          X:  You ──DM to YOURSELF──▶
+     (paired)                                  "Message Yourself"
+                       │ poll every N sec                       │
+                       ▼                                        ▼
+                       tgbot downloads + sends to DIRECT_FORWARD_CHAT_ID
 ```
 
-Only DMs from **your paired account** are processed — strangers who message the
-bot account are ignored. The first run primes the cursor and skips the existing
-backlog. Pair in one of two ways:
+Instagram only processes DMs from **your paired account** — strangers who
+message the bot account are ignored. X needs no pairing: the self-DM
+conversation `<self_id>-<self_id>` is only reachable by the account itself.
+The first run primes the cursor and skips the existing backlog.
+
+Instagram pairs in one of two ways:
 
 - **Interactive handshake (recommended):** Telegram → Admin Console → 📨
-  Direct-Forward → 🔗 Pair Instagram (or 🔗 Pair X/Twitter). The bot issues a
-  one-time 6-digit code (valid 10 min). Send it via DM to the bot account; the
-  bot confirms the pair in your Telegram chat and locks relays to your
-  platform user id.
-- **Static pre-pair:** `IG_DIRECT_FROM_USERNAME` / `X_DIRECT_FROM_USER_ID` in
-  `.env` (IG resolves to a numeric id at startup and persists; X keeps the id
-  as-is).
+  Direct-Forward → 🔗 Pair Instagram. The bot issues a one-time 6-digit code
+  (valid 10 min). Send it via DM to the bot account; the bot confirms the pair
+  in your Telegram chat and locks relays to your platform user id.
+- **Static pre-pair:** `IG_DIRECT_FROM_USERNAME` in `.env` (resolved to a
+  numeric id at startup and persisted).
 
-Unpair any time via the Direct-Forward menu. Deleting `direct_forward_state.json`
-clears both the cursor and the pairing.
+Unpair Instagram any time via the Direct-Forward menu. Deleting
+`direct_forward_state.json` clears the cursor and the IG pairing.
 
 ## What you need first
 
 1. A **dedicated Instagram account** for the bot (not your personal one).
-2. Optionally a **dedicated X account** for the bot.
-3. From your *personal* account, open a DM thread with the bot account on each
-   platform so the thread exists.
+2. For X: **no separate account** — just a working `xcookies.txt` (the same
+   jar the downloader uses).
+3. From your *personal* account, open a DM thread with the IG bot account so
+   the thread exists; for X, make sure your self-DM ("Message Yourself") thread
+   exists.
 
 ## Instagram
 
@@ -119,41 +127,49 @@ community best practices):
 4. **Challenged? Pass it in the app**, then restart. Fresh jars + restart in a
    loop looks like account sharing.
 
-## X / Twitter
+## X / Twitter (self-DM)
 
-`twikit` logs in with the bot account's username/password (+email) once and
-persists cookies to `direct_x_cookies.json`:
+No separate bot account, no username/password, no pairing. The worker reads the
+**shared `xcookies.txt` jar** (`cookies/twitter/xcookies.txt`) that yt-dlp
+already downloads with, extracts the account's numeric id from the `twid`
+cookie, and polls the self-DM conversation `<self_id>-<self_id>`. Cookie
+write-back keeps the jar warm, so there is **no twikit-specific session file**
+(`direct_x_cookies.json` no longer exists).
 
 ```
 X_DIRECT_ENABLED=true
-X_DIRECT_USERNAME=bot_x_handle
-X_DIRECT_PASSWORD=bot_x_password
-X_DIRECT_EMAIL=bot_x_email
-X_DIRECT_FROM_USER_ID=0123456789        # YOUR numeric X user id (OPTIONAL)
 ```
 
-Finding your numeric X user id: any "what's my user id" service/bot, or check
-the `profile_id` for your handle. DMs from any other sender are ignored.
+That's the only X setting. To use it:
 
-**`X_DIRECT_FROM_USER_ID` is now optional.** Since the 2026-08-08 pairing
-feature, you can pair entirely in chat: Admin Console → 📨 Direct-Forward →
-**🔗 Pair X/Twitter** issues a one-time 6-digit code; send it as a DM from your
-account to the bot's X account; the worker scans the bot's inbox (trusted +
-message requests) and binds your numeric X user id automatically. The env var
-remains a static pre-pair / fallback — the persisted pairing wins over it.
-There's also **⌨️ Set X ID manually** if you already know your numeric id.
+1. Upload a working Twitter jar: **Telegram → Admin Console → 🍪 Cookie Jars →
+   Twitter → ✏️ Replace** (export with a "Get cookies.txt LOCALLY" browser
+   extension while logged in to the account you will DM from).
+2. In X, open **Message Yourself** and send tweet links, photos, or videos.
 
-**X Chat / E2EE caveat:** the pairing scan (and DM relay) read X's **legacy DM
-API**. If X Chat (the 2025 E2EE rollout with the 4-digit passcode) is enabled
-on the conversation with the bot account, its messages are encrypted and the
-forwarder cannot read them. Keep that chat in the normal (unencrypted) inbox —
-never enable the passcode on it.
+**How each DM type is handled:**
 
-**Warning:** X aggressively locks accounts on fresh automation logins from
-datacenter IPs. If login fails repeatedly, warm the account first: log in once
-in a browser (a mobile/residential IP helps), complete any verification, then
-retry. `xcookies.txt` (Admin → Cookies) also warms yt-dlp downloads but twikit
-keeps its own cookie jar.
+- **Tweet link / tweet share** → the yt-dlp pipeline (with your X cookies),
+  auto-picking the **highest available quality**. When the top format exceeds
+  the upload ceiling (2 GB bot / 4 GB Premium) the format-selection keyboard is
+  posted instead so you can pick a smaller quality.
+- **Photo-only tweet** (no video stream for yt-dlp) → delivered natively from
+  the share's CDN URLs, grouped when there is more than one.
+- **DM photo / video attachment** → fetched through the authenticated twikit
+  session (ton.twitter.com URLs 401 without cookies).
+- **Plain link** → generic download pipeline.
+
+**X Chat / E2EE caveat:** the relay reads X's **legacy DM API**. If X Chat (the
+2025 E2EE rollout with the 4-digit passcode) is enabled on your self-DM
+conversation, its messages are encrypted and the forwarder cannot read them.
+Keep that conversation in the normal (unencrypted) inbox — never enable the
+passcode on it.
+
+**Warning:** a fresh `xcookies.txt` export from a datacenter IP can be
+challenged by X on first use. Warm the account first: log in once in a browser
+(a mobile/residential IP helps), complete any verification, then export the
+jar. Because the worker boots from the jar, a mid-run re-upload (Admin →
+Cookies → Replace) is picked up on the next poll without a bot restart.
 
 ## How each DM type is handled
 
@@ -163,7 +179,8 @@ keeps its own cookie jar.
 | Share a photo post / album / story | **Instagram-native delivery** through the DM session's CDN (yt-dlp's extractor reliably breaks on these). A carousel with an empty/invalid CDN resource is degraded to its healthy items instead of failing the whole send |
 | Share a reel / clip            | resolves the shortcode → yt-dlp pipeline (with your IG cookies) |
 | Paste any link                 | routes through the standard download pipeline (all sites) |
-| Share a tweet (X)              | builds the status URL → yt-dlp pipeline (with your X cookies) |
+| Share a tweet / tweet link (X) | **highest-quality auto-download** via the yt-dlp pipeline (with your X cookies); the format keyboard is posted when it exceeds the upload ceiling |
+| Photo-only tweet (X)           | delivered natively from the share's CDN URLs (grouped when > 1) |
 
 Downloads enqueue on the **same single-worker queue** as your interactive
 downloads, so a DM relay never starves you out of the bot.
@@ -172,5 +189,5 @@ downloads, so a DM relay never starves you out of the bot.
 
 - `direct_forward_state.json` — per-platform cursors. Delete to re-prime
   (backlog will be skipped again on the next boot).
-- `direct_ig_session.json`, `direct_x_cookies.json` — live sessions. Delete to
-  force re-login.
+- `direct_ig_session.json` — Instagram's live session. Delete to force
+  re-login. (X has no session file — it rides the shared `xcookies.txt` jar.)

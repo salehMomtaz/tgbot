@@ -238,13 +238,17 @@ misread the requirement.)
 
 **How to use it:**
 
-1. **Set up dedicated accounts.** Create separate accounts on Instagram and X
-   used *only* as bot accounts (e.g. `@mybot_ig`), and open a DM thread with
-   them from your personal account.
-2. **Provide cookies for the bot account.** Upload `igcookies.txt` /
+1. **Set up the accounts.** Instagram uses a **dedicated bot account**
+   (e.g. `@mybot_ig`); open a DM thread with it from your personal account. X
+   uses the **self-DM method**: no bot account — you send tweets/photos/videos
+   to your OWN "Message Yourself" conversation, and the worker polls that one
+   thread authenticated with the shared `xcookies.txt` jar.
+2. **Provide cookies for the account(s).** Upload `igcookies.txt` /
    `xcookies.txt` via the Admin Console — the same jars used for manual
-   downloads. The Instagram DM client even bootstraps its login directly from
-   the jar's `sessionid`, so usually **no password login is needed**.
+   downloads. The Instagram DM client bootstraps its login directly from the
+   jar's `sessionid` (usually **no password login is needed**); the X worker
+   rides `auth_token`+`twid` from the xcookies jar, so that jar must hold a
+   live session (yt-dlp write-back keeps it warm).
 3. **Configure `.env`:**
    ```
    DIRECT_FORWARD_CHAT_ID=YOUR_NUMERIC_TELEGRAM_ID
@@ -252,17 +256,16 @@ misread the requirement.)
    IG_DIRECT_ENABLED=true
    IG_DIRECT_FROM_USERNAME=your_personal_ig_handle   # only your DMs are relayed
    X_DIRECT_ENABLED=true
-   X_DIRECT_USERNAME=bot_x_handle
-   X_DIRECT_PASSWORD=bot_x_password
-   X_DIRECT_EMAIL=bot_x_email
-   X_DIRECT_FROM_USER_ID=your_numeric_x_user_id
    ```
 4. **Restart the bot:** `sudo systemctl restart tgbot`. Look for
    `[DirectForward] started -> chat ...` in the logs. Unconfigured pieces log
    a clear reason and never block the bot.
-5. **DM the bot account.** Share a reel, story, post, photo, video or paste a
-   link. Within one poll interval it lands in your Telegram chat with the
-   caption `📥 <Platform> DM from @you`.
+5. **DM the relay.** On Instagram, share a reel, story, post, photo, video or
+   paste a link into the DM thread with the bot account. On X, send tweet
+   links, photos or videos to your own "Message Yourself" conversation (keep it
+   out of X Chat encrypted mode — twikit can't read those). Within one poll
+   interval it lands in your Telegram chat with the caption
+   `📥 <Platform> DM from @you`.
 
 **What it supports:** DM photo/video attachments (sent directly as Telegram
 photo/video), post/reel/clip shares, story shares, tweet shares, and plain
