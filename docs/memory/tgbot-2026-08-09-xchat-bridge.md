@@ -148,3 +148,39 @@ change the ceiling check to compare against a video-only `filesize`.
   declares `Project-URL: Source, https://codeberg.org/Lonami/Telethon`
   (GitHub is only a mirror and may be deleted — see their README). pip resolves
   to codeberg automatically.
+
+## 2026-08-10 follow-up — X relay fully activatable in-chat, no SSH
+
+The admin console now covers the whole X self-DM lifecycle, closing the two
+gaps that previously forced SSH:
+
+1. **In-chat PIN entry.** `Admin → 📨 Direct-Forward → 🔑 Set X Chat PIN`
+   (`admin_direct_set_x_pin`) sets `USER_STATES = "waiting_for_x_pin"` (a
+   free-form text state, dispatched before the `is_valid_telegram_id` gate in
+   `admin_state_message_handler`, alongside the premium states). The operator
+   sends the 4-digit passcode; the handler validates `\d{4}`, writes it with
+   `dotenv.set_key(".env", "XCHAT_PIN", pin)` and refreshes `config.XCHAT_PIN`
+   so the menu status updates without a restart. `config.py` now reads
+   `XCHAT_PIN` (before, only the bridge wrapper did).
+
+2. **Bridge self-activates/reloads — no `systemctl`.** `tools/start_xchat_bridge.sh`
+   is now a **resident supervisor** instead of an exit-0-when-unconfigured
+   wrapper: it re-parses `.env` every ~5 s and (re)spawns the Deno sidecar as
+   soon as `X_DIRECT_ENABLED` + `XCHAT_PIN` + the xcookies jar all hold, and
+   stops it when a gate drops. It restarts the sidecar when the PIN or jar
+   mtime changes (the sidecar reads those at startup). The sidecar runs under
+   `setsid` so a group `kill -- -$PID` tears down deno AND its cycletls Go
+   child together (no orphaned port 19220 holder). Because it re-reads `.env`,
+   the toggle-X/PIN-set flows need no ssh/systemctl: the wrapper picks the
+   change up within ~5 s. The unit stays `Restart=on-failure`; the supervisor
+   never exits on its own, so only a crash triggers a unit-level restart, and
+   `KillMode=control-group` handles `systemctl stop` teardown.
+
+3. **Menu status.** The Direct-Forward menu now shows `X Chat PIN: ✅ set
+   (hidden) / ⚠️ not set — E2EE self-DM can't be read`.
+
+**Verified live (2026-08-10):** after an accidental `pkill -f xchat_bridge.mjs`,
+systemd `Restart=on-failure` relaunched the unit, which ran the NEW supervisor,
+re-read `.env`, re-spawned the sidecar (deno PID restarted, logged in as
+`@therabenschwarz` 1743868576920928256), and cycletls re-attached to port
+19220 — proving the resident-supervisor path end-to-end on the production box.

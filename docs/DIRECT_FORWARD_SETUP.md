@@ -159,11 +159,17 @@ worker reads that file first, and only falls back to the twikit poll when no
 bridge output exists. So you **may** enable the passcode on your self-DM; the
 bridge handles it. To use it:
 
-1. Set `XCHAT_PIN=<your 4-digit passcode>` in `.env`.
-2. `install.sh` installs and **enables** the `tgbot-xchat-bridge` systemd unit
-   (wrapper: `tools/start_xchat_bridge.sh`, logs to
-   `sudo journalctl -u tgbot-xchat-bridge -f`). It auto-starts on boot and is a
-   harmless no-op until both `X_DIRECT_ENABLED` and `XCHAT_PIN` are set.
+1. **No SSH needed.** In the bot console: **Admin → 📨 Direct-Forward →
+   🔑 Set X Chat PIN**, then send your 4-digit passcode as a message. The bot
+   writes it to `.env` (`XCHAT_PIN`) automatically.
+2. The `tgbot-xchat-bridge` systemd unit (enabled by `install.sh`, wrapper:
+   `tools/start_xchat_bridge.sh`, logs to
+   `sudo journalctl -u tgbot-xchat-bridge -f`) is a **resident supervisor**: it
+   re-reads `.env` every ~5 s and (re)spawns the Deno sidecar as soon as
+   `X_DIRECT_ENABLED` + `XCHAT_PIN` + the xcookies jar all hold — so the relay
+   comes up on its own a few seconds after you enter the PIN, with no
+   `systemctl` and no shell access. It is a harmless sleeping no-op until
+   configured.
 3. The bridge needs the project's npm deps (`emusks` → `cycletls`); install.sh
    runs `npm install` for you. Runtime is Deno (already installed).
 

@@ -23,3 +23,7 @@ instagrapi
 # rode plain Python requests TLS — an easy "this is a script" signal.
 curl-adapter>=1.2.1
 twikit
+# Async WebSocket client for the TikTok IM push channel
+# (_tiktok_worker in modules/direct_forward.py). Also pulled in by
+# yt-dlp[default], but declared here because we import it directly.
+websockets

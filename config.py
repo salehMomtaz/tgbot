@@ -173,8 +173,24 @@ IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
 X_DIRECT_ENABLED = os.getenv("X_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
 # XChat bridge (cache/xchat_inbox.jsonl) is consumed when present. The Deno
 # sidecar reads the XChat-encrypted self-DM (twikit's legacy DM API cannot);
-# the Python worker relays every canonical line past its own cursor.
+# the Python worker relays every canonical line past its own cursor. The PIN
+# (the passcode set in the X app) is only meaningful to the Deno sidecar, but
+# the admin console reads it here to report set/unset status and writes it via
+# dotenv.set_key when the operator enters it in-chat.
+XCHAT_PIN = os.getenv("XCHAT_PIN", "")
 XCHAT_INBOX = os.getenv("XCHAT_INBOX", "cache/xchat_inbox.jsonl")
+
+# TikTok direct-forward (web IM self-DM). The worker holds a persistent WS to
+# the TikTok IM store (im-ws-sg.tiktok.com) and ingests cmd 500 NEW_MSG_NOTIFY
+# pushes for the OWN self-DM conversation (0:1:{uid}:{uid}); every video share
+# is resolved to @author/video/<itemId> via oEmbed and relayed through the
+# normal yt-dlp pipeline with a fresh cookie snapshot. There is no pairing and
+# no separate bot account — the session is the same web login as the ttcookies
+# jar yt-dlp downloads with. Anti-detection is the same as X: a RANDOM poll
+# window, never a fixed short cadence (that is what flags accounts).
+TIKTOK_DIRECT_ENABLED = os.getenv("TIKTOK_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
+TIKTOK_DIRECT_POLL_SECONDS = get_env_int("TIKTOK_DIRECT_POLL_SECONDS", 300)
+TIKTOK_DIRECT_POLL_JITTER_PCT = get_env_int("TIKTOK_DIRECT_POLL_JITTER_PCT", 40)
 
 # =========================================================================
 # System monitor (utils/system_monitor.py) — a lightweight, bot-independent

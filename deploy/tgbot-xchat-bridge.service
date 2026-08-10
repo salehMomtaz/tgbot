@@ -13,8 +13,13 @@
 # The wrapper (tools/start_xchat_bridge.sh) parses .env itself (dotenv-style)
 # for X_DIRECT_ENABLED / XCHAT_PIN — there is deliberately NO EnvironmentFile,
 # for the same reason tgbot.service has none (systemd would mangle dotenv
-# values; see tgbot.service notes). When X relay is disabled or XCHAT_PIN is
-# unset, the wrapper exits 0 and this unit simply stays down — no crash loop.
+# values; see tgbot.service notes). The wrapper is a RESIDENT SUPERVISOR: it
+# re-reads .env every ~5 s and (re)spawns the Deno sidecar when X relay is
+# enabled + XCHAT_PIN is set + the jar exists, and stops it when any gate
+# drops. That is what lets the admin activate X self-DM entirely from the bot
+# console (toggle X + enter the PIN) with no ssh/systemctl — the wrapper picks
+# up the .env change on its own. When unconfigured it simply sleeps — no crash
+# loop, no restart churn.
 #
 # It is installed (and ENABLED — unlike tgbot.service) by install.sh, because
 # it is harmless when unconfigured and only ever helps when X is on.

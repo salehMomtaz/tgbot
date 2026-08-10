@@ -284,8 +284,39 @@ invariants** so you don't have to rediscover them.
     to the twikit poll only when no bridge output exists. The bridge runs as
     its own `tgbot-xchat-bridge.service` systemd unit (wrapper
     `tools/start_xchat_bridge.sh`, which parses `.env` dotenv-style — never
-    `source` — and gates on `X_DIRECT_ENABLED` + `XCHAT_PIN`; install.sh
-    installs AND enables it, and it is a harmless no-op until configured).
+    `source` — and is a **resident supervisor** that re-reads `.env` every ~5 s,
+    (re)spawning the Deno sidecar whenever `X_DIRECT_ENABLED` + `XCHAT_PIN` +
+    the xcookies jar all hold; install.sh installs AND enables it, and it is a
+    harmless sleeping no-op until configured). Because the wrapper self-reloads,
+    X self-DM is fully activatable in-chat (Admin → 📨 Direct-Forward →
+    🔑 Set X Chat PIN) with no ssh/systemctl.
+    **TikTok = the same self-DM trick over the IM WebSocket (2026-08-10).**
+    The worker (`modules/direct_forward.py::_tiktok_worker`) holds a persistent
+    async WS (`wss://im-ws-sg.tiktok.com/ws/v2`, library `websockets`) to the
+    account's own IM store, authenticated by the SAME `cookies/tiktok/ttcookies.txt`
+    jar yt-dlp downloads with (no separate bot account, no pairing — the self-DM
+    conversation `0:1:{uid}:{uid}` is only reachable by the account itself).
+    Connect = send a cmd-1001 `get_stranger_conversation_list` Frame (encoder:
+    `_tt_connect_frame`); the server acks and pushes pending unread + live new
+    messages as **cmd-500 NEW_MSG_NOTIFY** protobuf frames. Access key:
+    `_tt_access_key(wid)` = md5 of `9{APP_KEY}{wid}f8a69f1719916z` where `wid`
+    comes from the web-cookie-privacy config endpoint and `APP_KEY =
+    e1bd35ec9db7b8d846de66ed140b1ad9`. Two hard-won gotchas: (a) the jar stores
+    `ttwid` **URL-encoded** — unquote it before `urlencode` in the WS query or
+    the socket is rejected with HTTP 400; (b) the pushed MessageBody carries
+    **group wire types that proto3 rejects** — `_tt_parse_push` uses a tolerant
+    byte-walker (`_tt_walk`) and only reads the wanted fields, never recursing
+    into the JSON at field 8. Dedupe on `server_message_id` (field 3), not the
+    ext `s:client_message_id`. **First run primes and skips backlog** (a 15 s
+    `prime=True` connect consumes pushes without relaying, then the relay loop
+    takes over) — mirroring X. Shares resolve the author via the public oEmbed
+    endpoint (`tiktok.com/oembed?url=.../video/<itemId>` → `author_url`) and
+    download through the normal yt-dlp pipeline, whose fresh-cookie retry
+    ladder already handles TikTok's stochastic anti-bot challenge — **no
+    headless browser is needed** (see the doc's headless-browser analysis).
+    The bot's poll cadence is WS-push-driven, but reconnects still respect the
+    jittered `TIKTOK_DIRECT_POLL_SECONDS` interval, never a fixed cadence.
+    Full protocol + decode details: `docs/memory/tgbot-tiktok-direct-dm.md`.
     Bridge cursor semantics: its `last_seq` (in `cache/xchat_bridge_state.json`)
     lives in the SAME id space as the legacy DM ids, so the shared `x.last_id`
     cursor dedupes; first boot primes and skips backlog. The worker reads the
@@ -483,10 +514,16 @@ code bug. `Restart=always` means an enabled service also self-heals on crash.
 enabled unit — leave it running.
 
 `tgbot-xchat-bridge.service` (the XChat E2EE sidecar) is the one unit
-`install.sh` DOES enable automatically — its wrapper exits 0 cleanly when X
-relay or the PIN is unconfigured, so an enabled-but-unused unit is a harmless
-no-op instead of a crash loop, and it "just works" the moment `XCHAT_PIN` is
-set. Don't disable it. `tgbot-monitor.service` is installed but disabled by
+`install.sh` DOES enable automatically. Its wrapper
+(`tools/start_xchat_bridge.sh`) is a **resident supervisor**: it re-reads `.env`
+every ~5 s and (re)spawns the Deno sidecar when the gates pass (X relay enabled
++ `XCHAT_PIN` set + xcookies jar present), and stops it when any gate drops.
+This is what makes X self-DM fully activatable from the bot console — the admin
+toggles X and enters the PIN in-chat (Admin → 📨 Direct-Forward → 🔑 Set X Chat
+PIN, a `waiting_for_x_pin` free-form state that `dotenv.set_key`s the value), and
+the wrapper picks up the `.env` change with **no ssh/systemctl**. When
+unconfigured it simply sleeps — a harmless no-op instead of a crash loop — and
+it "just works" the moment `XCHAT_PIN` is set. Don't disable it. `tgbot-monitor.service` is installed but disabled by
 default (the bot spawns a detached monitor at startup); enabling it makes the
 monitor survive reboots unconditionally.
 

@@ -194,12 +194,16 @@ def get_pot_menu_keyboard() -> InlineKeyboardMarkup:
 def get_direct_menu_keyboard() -> InlineKeyboardMarkup:
     ig_label = "🔴 Disable IG" if config.IG_DIRECT_ENABLED else "🟢 Enable IG"
     x_label = "🔴 Disable X" if config.X_DIRECT_ENABLED else "🟢 Enable X"
+    tt_label = "🔴 Disable TikTok" if getattr(config, "TIKTOK_DIRECT_ENABLED", False) else "🟢 Enable TikTok"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(ig_label, callback_data="admin_direct_toggle_ig"),
          InlineKeyboardButton("🔗 Pair IG", callback_data="admin_direct_pair_ig")],
         [InlineKeyboardButton("💔 Unpair IG", callback_data="admin_direct_unpair_ig")],
         [InlineKeyboardButton(x_label, callback_data="admin_direct_toggle_x"),
          InlineKeyboardButton("🧪 Test X Cookies", callback_data="admin_direct_test_x")],
+        [InlineKeyboardButton(tt_label, callback_data="admin_direct_toggle_tiktok"),
+         InlineKeyboardButton("🧪 Test TikTok", callback_data="admin_direct_test_tiktok")],
+        [InlineKeyboardButton("🔑 Set X Chat PIN", callback_data="admin_direct_set_x_pin")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_direct_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")]
     ])
@@ -583,6 +587,43 @@ def register_admin_handlers(app: Client):
                     "login client was cleaned up — please start again from the 👑 Premium menu.",
                     reply_markup=back_markup
                 )
+            message.stop_propagation()
+            return
+
+        # 1d. X Chat PIN entry (free-form text). Validates the 4-digit passcode,
+        # writes it to .env via dotenv.set_key (dotenv-style quoting — safe for
+        # run.sh's parser and the bridge wrapper), refreshes config.XCHAT_PIN so
+        # the menu status updates, and tells the operator the bridge will pick it
+        # up on its own (tools/start_xchat_bridge.sh re-reads .env every ~5 s).
+        if state == "waiting_for_x_pin":
+            from dotenv import set_key
+            import re as _re
+            pin = input_text.strip()
+            if not _re.fullmatch(r"\d{4}", pin):
+                await message.reply_text(
+                    "❌ X Chat passcodes are **4 digits** (e.g. `0421`).\n\n"
+                    "Send the correct PIN, or tap ◀️ Back to Console to cancel.",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+            set_key(".env", "XCHAT_PIN", pin)
+            config.XCHAT_PIN = pin
+            USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            await message.reply_text(
+                f"✅ X Chat PIN saved to `.env` (written as `XCHAT_PIN='{pin}'`).\n\n"
+                "🔄 The bridge supervisor re-reads `.env` every few seconds and "
+                "restarts the sidecar automatically — **no SSH, no restart needed**.\n\n"
+                "If X relay is enabled, encrypted self-DM messages will start "
+                "arriving within a minute. Tap **🔄 Refresh** to re-check status.",
+                reply_markup=get_direct_menu_keyboard()
+            )
+            await log_event("🔑 **Admin Action:** X Chat PIN updated in-chat.")
             message.stop_propagation()
             return
 
@@ -1428,6 +1469,64 @@ def register_admin_handlers(app: Client):
                 reply_markup=get_direct_menu_keyboard())
             await callback_query.answer()
 
+        elif data == "admin_direct_toggle_tiktok":
+            from dotenv import set_key
+            new_state = not getattr(config, "TIKTOK_DIRECT_ENABLED", False)
+            if new_state and not getattr(config, "DIRECT_FORWARD_CHAT_ID", 0):
+                await callback_query.answer(
+                    "Set DIRECT_FORWARD_CHAT_ID in .env first — the relay "
+                    "needs a destination chat.", show_alert=True)
+                return
+            set_key(".env", "TIKTOK_DIRECT_ENABLED", str(new_state).lower())
+            config.TIKTOK_DIRECT_ENABLED = new_state
+            if new_state:
+                await callback_query.message.edit_text(
+                    "✅ TikTok direct-forward **enabled**.\n\n"
+                    "🔄 **Restarting the bot** to activate — back in a few seconds.\n\n"
+                    "Send videos to your own TikTok **self-DM** (Message Yourself) "
+                    "and the bot relays them here.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** TikTok direct-forward enabled. Auto-restarting.")
+                await callback_query.answer()
+                from main import schedule_self_restart
+                schedule_self_restart(delay=3.0)
+            else:
+                await callback_query.message.edit_text(
+                    "✅ TikTok direct-forward **disabled**. "
+                    "The worker will stop on next restart.",
+                    reply_markup=get_direct_menu_keyboard())
+                await log_event("📨 **Admin Action:** TikTok direct-forward disabled.")
+                await callback_query.answer("TikTok relay disabled", show_alert=True)
+
+        elif data == "admin_direct_test_tiktok":
+            from modules import direct_forward
+            result = direct_forward.test_tiktok_connection()
+            await callback_query.message.edit_text(result,
+                reply_markup=get_direct_menu_keyboard())
+            await callback_query.answer()
+
+        elif data == "admin_direct_set_x_pin":
+            # In-chat X Chat PIN entry (free-form text, NOT a telegram ID, so it
+            # is dispatched before the is_valid_telegram_id gate in
+            # admin_state_message_handler, like the premium session states).
+            if getattr(config, "XCHAT_PIN", ""):
+                cur = "set (hidden)" if config.XCHAT_PIN else "empty"
+            else:
+                cur = "empty"
+            USER_STATES[user_id] = "waiting_for_x_pin"
+            step_msg = await callback_query.message.edit_text(
+                "🔑 **Set the X Chat PIN**\n\n"
+                "The XChat-encrypted self-DM needs your **4-digit passcode** "
+                "(the one you set in X Chat, NOT a Telegram code).\n\n"
+                f"Current: `{cur}`\n\n"
+                "Send the **4-digit PIN** as a message now — it is written to "
+                "`.env` and the bridge picks it up automatically. No SSH needed.\n\n"
+                "_(Tap ◀️ Back to Console to cancel.)_",
+                reply_markup=back_markup
+            )
+            ACTIVE_PROMPTS[user_id] = step_msg.id
+            await callback_query.answer()
+
     # ------------------------------------------------------------------
     # Direct-forward menu helper (closure over log_event)
     # ------------------------------------------------------------------
@@ -1436,6 +1535,7 @@ def register_admin_handlers(app: Client):
         state = direct_forward._load_state()
         ig_enabled = "🟢" if config.IG_DIRECT_ENABLED else "⚪"
         x_enabled = "🟢" if config.X_DIRECT_ENABLED else "⚪"
+        tt_enabled = "🟢" if getattr(config, "TIKTOK_DIRECT_ENABLED", False) else "⚪"
         chat_set = "✅" if getattr(config, "DIRECT_FORWARD_CHAT_ID", 0) else "⚠️ DIRECT_FORWARD_CHAT_ID=0 (relay off)"
 
         # X cookie health summary
@@ -1448,11 +1548,27 @@ def register_admin_handlers(app: Client):
             uid = direct_forward._x_twid_user_id(x_cookies)
             x_cookie_status = f"✅ uid `{uid}`" if uid else "⚠️ bad twid"
 
+        # X Chat PIN status (the E2EE passcode the bridge needs).
+        if getattr(config, "XCHAT_PIN", ""):
+            pin_status = "✅ set (hidden)"
+        else:
+            pin_status = "⚠️ not set — E2EE self-DM can't be read"
+
+        # TikTok cookie health summary
+        tt_cookies = direct_forward._tt_jar_cookies()
+        if not tt_cookies:
+            tt_cookie_status = "⚠️ no jar"
+        elif not tt_cookies.get("sessionid"):
+            tt_cookie_status = "⚠️ missing sessionid"
+        else:
+            tt_cookie_status = "✅ sessionid present"
+
         try:
             await callback_query.message.edit_text(
                 "📨 **Direct-Forward (DM relay)**\n\n"
-                "The bot relays media you DM to its own Instagram account, or "
-                "send to your OWN X self-DM (Message Yourself).\n\n"
+                "The bot relays media you DM to its own Instagram account, "
+                "send to your OWN X self-DM (Message Yourself), or send to "
+                "your OWN TikTok self-DM (Message Yourself).\n\n"
                 f"• Relay chat: {chat_set}\n"
                 f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n\n"
                 f"**Instagram**\n"
@@ -1460,10 +1576,17 @@ def register_admin_handlers(app: Client):
                 f"**X / Twitter**\n"
                 f"• {x_enabled} Status: **{'enabled' if config.X_DIRECT_ENABLED else 'disabled'}**\n"
                 f"• Cookies: {x_cookie_status}\n"
+                f"• X Chat PIN: {pin_status}\n"
                 f"• Method: self-DM — send tweet links/photos/videos to your own X "
                 f"self-DM (Message Yourself).\n\n"
-                "Tap **🧪 Test X Cookies** to validate the jar. "
-                "Use **🟢 Enable X** / **🔴 Disable X** to toggle the relay.\n"
+                f"**TikTok**\n"
+                f"• {tt_enabled} Status: **{'enabled' if tt_enabled == '🟢' else 'disabled'}**\n"
+                f"• Cookies: {tt_cookie_status}\n"
+                f"• Method: self-DM — send videos to your own TikTok self-DM "
+                f"(Message Yourself); the bot watches the IM WebSocket.\n\n"
+                "Tap **🧪 Test X Cookies** / **🧪 Test TikTok** to validate the "
+                "jars, **🔑 Set X Chat PIN** to enter the E2EE passcode, and the "
+                "**🟢 Enable …** / **🔴 Disable …** buttons to toggle each relay.\n"
                 "Instagram: tap **🔗 Pair Instagram**, then send "
                 "the code to the bot account via Instagram DM.",
                 reply_markup=get_direct_menu_keyboard()
