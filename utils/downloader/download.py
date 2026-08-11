@@ -64,8 +64,10 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     # proved no-auth works; stale/expired sessions trigger HTTP 400 even when
     # downloading, not just during metadata extraction. Only retry with
     # cookies when yt-dlp returns HTTP 400 on a no-auth attempt (login-wall).
+    # TikTok embed URLs (yt-dlp#17403): embed page doesn't need cookies
     is_instagram = "instagram.com" in url.lower()
-    use_cookies_now = bool(site_jar) and not is_instagram
+    is_tiktok_embed = "tiktok.com/embed/" in url.lower()
+    use_cookies_now = bool(site_jar) and not is_instagram and not is_tiktok_embed
     cookie_path = cookie_manager.acquire(site_jar) if use_cookies_now else None
 
     # Conservative disk check: reserve the 2x-merge peak headroom for the

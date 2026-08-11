@@ -8,6 +8,7 @@ import asyncio
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from main import log_event
 from .state import PREMIUM_GEN, USER_STATES, ACTIVE_PROMPTS, _PREMIUM_GEN_TTL
 from .keyboards import _gen_abort_markup, _gen_dial_pad_markup
 

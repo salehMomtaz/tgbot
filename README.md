@@ -247,7 +247,7 @@ crawlers, or not?** The two branches share almost nothing.
 | `youtube.com` / `youtu.be` | social → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
 | `youtube.com/playlist?list=…` (or `watch?v=…&list=…`) | social → **YouTube playlist** | flat-extract list → **tier keyboard** (3 video + 3 audio: low/med/high) → download & upload each video |
 | `instagram.com` | social → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
-| `tiktok.com` | social → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · format keyboard |
+| `tiktok.com` | social → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · URL rewritten to `/embed/<id>` (yt-dlp#17403 hedge) · format keyboard |
 | `twitter.com` / `x.com` | social → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
 | **any other URL** | **direct file** | raw HTTP download — **no yt-dlp, no cookies, no format choice** |
 

@@ -45,7 +45,7 @@ invariants** so you don't have to rediscover them.
 | Want to… | Edit |
 |---|---|
 | Cookie resolution & YouTube diagnosis | `utils/downloader/cookies.py` |
-| URL normalization (TikTok shortlinks, IG highlights) | `utils/downloader/url_normalize.py` |
+| URL normalization (TikTok shortlinks + `/embed/` rewrite, IG highlights) | `utils/downloader/url_normalize.py` |
 | Size estimation, CDN probes, disk space | `utils/downloader/sizing.py` |
 | yt-dlp error classification | `utils/downloader/errors.py` |
 | Format extraction & sorting | `utils/downloader/formats.py` |
@@ -647,6 +647,7 @@ Don't port it to Go.
   commit the mode change — don't just chmod the VPS copy (it won't survive the
   next pull).
 - **TikTok shortlinks are pre-resolved by us, not yt-dlp.** `vt./vm./vn.tiktok.com/<code>` expands to the canonical `tiktok.com/@user/video/<id>` inside `normalize_url` (browser UA + 1 h TTL cache) because yt-dlp's own short-link extractor uses a bare `facebookexternalhit/1.1` HEAD and hits TikTok's stochastic anti-bot interstitial — surfacing as "The site changed its layout or the URL is malformed". `curl-cffi` must stay installed for yt-dlp's proof-of-work webpage solver; TikTok extractions/downloads also get one extra no-auth retry. Don't feed shortlinks straight to yt-dlp again.
+- **TikTok video URLs are rewritten to the `/embed/<id>` page (yt-dlp#17403).** Since the anti-bot challenge started intercepting the main `www.tiktok.com/@user/video/<id>` webpage fetch ("Unexpected response from webpage request"), `normalize_url` additionally converts canonical TikTok video URLs to `https://www.tiktok.com/embed/<id>` via `_to_tiktok_embed_url`, which serves challenge-free JSON. `_apply_pot_options` sets a Chrome 140 `User-Agent` via `http_headers` for embed URLs (never `user_agent`, the Python API ignores it), and `download_media` skips cookies for embed URLs (`not is_tiktok_embed`). This mirrors the direct-forward fix already shipped in commit `e48b060`. Do NOT add further workaround layers — if TikTok hardens the embed page too, wait for the upstream yt-dlp fix; the embed rewrite is a hedge, not a guarantee. Full writeup: `docs/memory/tgbot-2026-08-11-startup-crash-loop-and-tiktok-embed.md`.
 - **pyrogram `Peer id invalid`** is monkey-patched in `main.py`
   (`get_peer_type_patched`) and the log channel peer is resolved at startup
   (`app.get_chat`). Don't remove either.

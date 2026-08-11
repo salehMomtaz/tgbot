@@ -36,6 +36,7 @@ from .state import USER_STATES, ACTIVE_PROMPTS, PREMIUM_GEN
 from .keyboards import (
     build_console_keyboard,
     back_markup as _back_markup,
+    get_direct_menu_keyboard,
     _gen_abort_markup,
     _gen_dial_pad_markup,
 )
@@ -48,6 +49,7 @@ from .premium_gen import (
 from .cookies import COOKIE_MAP, _write_cookie_jar
 from .cookie_test import _test_cookie_jar
 from .pot_menu import _handle_pot_action
+from modules import direct_forward
 from .direct_menu import _render_direct_menu
 
 logger = logging.getLogger(__name__)

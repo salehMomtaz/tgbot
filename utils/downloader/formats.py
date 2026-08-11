@@ -4,9 +4,10 @@ Format extraction logic — the core of format detection and sorting.
 Mirrors the original utils/downloader.py extract_formats function exactly.
 """
 
+import os
 import utils.shared as shared
 from .cookies import _resolve_jar_path, get_cookies_for_url
-from .url_normalize import normalize_url, _is_youtube
+from .url_normalize import normalize_url, _is_youtube, _apply_pot_options
 from .sizing import (
     estimate_format_size,
     _sane_filesize,
@@ -31,7 +32,6 @@ def extract_formats(url: str) -> dict:
     if cookie_path and not cookie_manager.has_real_cookie_lines(cookie_path):
         cookie_path = None
 
-    import os
     base_opts = {
         'quiet': True,
         'no_warnings': True,

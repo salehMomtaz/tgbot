@@ -8,6 +8,7 @@ import asyncio
 import logging
 import config
 import yt_dlp
+from main import log_event
 from utils.downloader import get_cookies_for_url, _apply_pot_options
 from utils import cookie_manager
 import utils.shared as shared

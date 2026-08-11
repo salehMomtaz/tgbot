@@ -9,16 +9,20 @@ import asyncio
 import logging
 import config
 from pyrogram import Client, filters, ContinuePropagation
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import set_key
 from main import log_event
 from utils.gate import (
     load_database,
     add_user,
     remove_user,
+    blacklist_user,
     unblacklist_user,
     is_blacklisted,
     is_authorized,
+    is_premium_user,
+    add_premium_user,
+    remove_premium_user,
     toggle_document_mode,
 )
 from utils.id_validator import is_valid_telegram_id

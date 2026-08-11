@@ -9,6 +9,7 @@ import urllib.parse
 import config
 import utils.shared as shared
 from utils import cookie_manager
+from .url_normalize import _apply_pot_options
 
 
 def _purge_cookie_snapshots(original_path: str | None = None) -> None:

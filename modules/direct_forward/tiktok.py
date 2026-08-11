@@ -21,9 +21,9 @@ from .state import (
     _get_pair, _cursor, _bump_cursor,
 )
 from .common import (
-    URL_RE, _poll_interval, _chunk_text, _compose_caption, _send_followups,
-    _download_and_deliver, _enqueue_relay, _fetch_bytes, _video_upload_kwargs,
-    _x_media_payload_ok, _header_lines,
+    URL_RE, _poll_interval, _tt_poll_interval, _chunk_text, _compose_caption,
+    _send_followups, _download_and_deliver, _enqueue_relay, _fetch_bytes,
+    _video_upload_kwargs, _x_media_payload_ok, _header_lines,
 )
 
 logger = logging.getLogger(__name__)

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from typing import Any
@@ -19,7 +20,7 @@ from utils import ig_anti_detect
 from .state import (
     _load_state, _merge_state_save, _state_save_owned,
     _get_pair, _set_pair, _pending_pairs, request_pair_code,
-    _activity_stamp,
+    _activity_stamp, _cursor, _bump_cursor,
 )
 from .common import (
     URL_RE, IG_POST_RE, TELEGRAM_CAPTION_LIMIT, TELEGRAM_TEXT_LIMIT,

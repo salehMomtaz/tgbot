@@ -18,6 +18,12 @@ def _is_youtube(url: str) -> bool:
     return "youtube.com" in lower or "youtu.be" in lower
 
 
+# TikTok embed URL workaround (yt-dlp issue #17403)
+# The embed page bypasses the challenge page. Requires Chrome 140 user agent.
+_TIKTOK_EMBED_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+_TIKTOK_VIDEO_RE = re.compile(r"https?://(?:www\.)?tiktok\.com/@[^/]+/video/(\d+)", re.IGNORECASE)
+
+
 def normalize_url(url: str) -> str:
     """Canonicalize URLs that yt-dlp does not understand natively.
 
@@ -28,6 +34,7 @@ def normalize_url(url: str) -> str:
       ``/stories/highlights/<id>/`` form.
     * TikTok share shortlinks ``vt./vm./vn.tiktok.com/<code>`` → the canonical
       ``www.tiktok.com/@user/video/<id>`` URL (see :func:`_resolve_tiktok_short_url`).
+    * TikTok video URLs → embed URLs to bypass challenge page (see :func:`_to_tiktok_embed_url`).
     """
     m = re.match(r"^https?://(?:www\.)?instagram\.com/s/([A-Za-z0-9\-_+/=]+)", url or "")
     if m:
@@ -40,7 +47,25 @@ def normalize_url(url: str) -> str:
                 return f"https://www.instagram.com/stories/highlights/{hm.group(1)}/"
         except Exception:
             pass
-    return _resolve_tiktok_short_url(url)
+    url = _resolve_tiktok_short_url(url)
+    url = _to_tiktok_embed_url(url)
+    return url
+
+
+def _to_tiktok_embed_url(url: str) -> str:
+    """Convert TikTok video URL to embed URL to bypass challenge page (yt-dlp#17403).
+
+    The embed page (www.tiktok.com/embed/<video_id>) doesn't serve the
+    anti-bot challenge, allowing yt-dlp to extract video data directly.
+    Requires Chrome 140 user agent which is set in _apply_pot_options for TikTok.
+    """
+    if not url:
+        return url
+    m = _TIKTOK_VIDEO_RE.match(url)
+    if m:
+        video_id = m.group(1)
+        return f"https://www.tiktok.com/embed/{video_id}"
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -116,28 +141,35 @@ def _apply_pot_options(ydl_opts: dict, url: str) -> dict:
     fallback. If the provider is not running, this raises an actionable error so
     the caller surfaces it instead of silently degrading. Non-YouTube URLs are
     returned unchanged (they never use PO tokens).
+
+    For TikTok embed URLs, set the Chrome 140 user agent to bypass challenge page.
     """
     import utils.shared as shared
-    if not _is_youtube(url):
-        return ydl_opts
+    if _is_youtube(url):
+        if not getattr(shared, "POT_AVAILABLE", False):
+            raise RuntimeError(
+                "YouTube downloads require the PO-token provider, which is not running. "
+                "Restart the bot with ./run.sh, or start it from Admin Console -> PO Token."
+            )
 
-    if not getattr(shared, "POT_AVAILABLE", False):
-        raise RuntimeError(
-            "YouTube downloads require the PO-token provider, which is not running. "
-            "Restart the bot with ./run.sh, or start it from Admin Console -> PO Token."
-        )
+        opts = dict(ydl_opts)
+        opts.setdefault("extractor_args", {})
+        opts["extractor_args"]["youtubepot-bgutilhttp"] = {
+            "base_url": [f"http://127.0.0.1:{config.YTDLP_POT_PORT}"]
+        }
+        player_client = getattr(config, "YTDLP_POT_PLAYER_CLIENT", "mweb") or "mweb"
+        opts["extractor_args"]["youtube"] = {
+            "player_client": [player_client]
+        }
+        opts["js_runtimes"] = {"deno": {}}
+        return opts
 
-    opts = dict(ydl_opts)
-    opts.setdefault("extractor_args", {})
-    opts["extractor_args"]["youtubepot-bgutilhttp"] = {
-        "base_url": [f"http://127.0.0.1:{config.YTDLP_POT_PORT}"]
-    }
-    player_client = getattr(config, "YTDLP_POT_PLAYER_CLIENT", "mweb") or "mweb"
-    opts["extractor_args"]["youtube"] = {
-        "player_client": [player_client]
-    }
-    # yt-dlp solves YouTube's BotGuard/ nsig challenges via this JS runtime.
-    # We install Deno for the provider, so use it for yt-dlp's JS too. (yt-dlp
-    # already defaults to {'deno': {}}, but set it explicitly for robustness.)
-    opts["js_runtimes"] = {"deno": {}}
-    return opts
+    # TikTok embed URL workaround (yt-dlp issue #17403)
+    # Set Chrome 140 user agent via http_headers for embed page to bypass challenge
+    # Using http_headers instead of user_agent param works with Python API
+    if "tiktok.com/embed/" in url:
+        opts = dict(ydl_opts)
+        opts["http_headers"] = {"User-Agent": _TIKTOK_EMBED_UA}
+        return opts
+
+    return ydl_opts
