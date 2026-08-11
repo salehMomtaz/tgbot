@@ -66,6 +66,12 @@ code or the git log alone. Last updated: 2026-08-11.
   routed to the format flow, HLS fragment-size artifact guard, silent
   `MESSAGE_NOT_MODIFIED`, SSRF guard on the direct-file path, secret file
   perms `600`.
+- [2026-08-11 health pass — package-split regression sweep](tgbot-2026-08-11-health-pass.md)
+  — full admin-console button sweep via Telethon after the `modules/admin.py` /
+  `modules/direct_forward.py` → sub-packages split (commit `81a5139`); found + fixed
+  one silent dispatch regression (`admin_pot_menu` no-op), confirmed X photo-paste
+  fix live in production, tightened `database.json` perms, documented the iptables
+  `INPUT ACCEPT` exposure of the 8080 streamer for the operator.
 - [X photo-paste fix](tgbot-2026-08-11-x-photo-paste-fix.md) — photo-only
   pasted tweet URLs silently failed ("No downloadable media") because twikit
   2.3.3's `User.__init__` raises `KeyError('urls')` on some authors, aborting

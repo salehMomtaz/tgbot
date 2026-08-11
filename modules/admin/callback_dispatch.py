@@ -535,7 +535,15 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
     # =========================================================================
     elif data == "admin_pot_menu":
         USER_STATES.pop(user_id, None)
-        await _handle_pot_action(client, callback_query, "render")
+        # NOTE: this calls _render_pot_menu DIRECTLY, not _handle_pot_action
+        # with a "render" action — _handle_pot_action only handles
+        # start/stop/diagnose/test, so a "render" action would silently fall
+        # through and the PO menu would never open. (Regression from the
+        # package-split refactor: pre-split admin.py called _render_pot_menu
+        # directly here.) Calling the renderer directly is the original,
+        # correct behaviour.
+        from .pot_menu import _render_pot_menu
+        await _render_pot_menu(callback_query)
 
     elif data.startswith("admin_pot_action:"):
         await _handle_pot_action(client, callback_query, data.split(":")[1])

@@ -9,6 +9,12 @@ to it — piped straight from Telegram's servers with zero local buffering.
 Built on **pyrogram**. Provisioned with a one-shot `./install.sh` (no Docker
 required). Runs as a `systemd` service that survives reboots.
 
+> **Last verified:** 2026-08-11 — full admin-console + security sweep after the
+> `modules/admin` & `modules/direct_forward` → sub-packages refactor (commit
+> `81a5139`). One regression (`admin_pot_menu` silent no-op) found, fixed, and
+> live-verified; the X photo-tweet paste fix from that morning confirmed working
+> in production. See [`docs/memory/tgbot-2026-08-11-health-pass.md`](docs/memory/tgbot-2026-08-11-health-pass.md).
+
 > **New to this?** The complete, beginner-friendly walkthrough — from "I just
 > bought a VPS" to "the bot is live" — lives in
 > [`docs/UBUNTU_VPS_SETUP.md`](docs/UBUNTU_VPS_SETUP.md). This README is the
