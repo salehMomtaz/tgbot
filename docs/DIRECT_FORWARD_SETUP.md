@@ -232,3 +232,29 @@ skip-list). Deleting the bridge state while the bridge is running makes it
 re-prime `last_seq` to newest and silently skip older messages — a data-loss
 window, hence the exemption. If you reset the X relay by hand, delete the
 state file intentionally, not via the cleaner.
+
+## TikTok (self-DM via WebSocket IM)
+
+**⚠️ CURRENTLY BROKEN — Known upstream issue (Aug 2026)**
+
+TikTok direct forward uses the same self-DM concept as X: you send video shares to your own TikTok self-DM, and the bot relays them via a persistent WebSocket connection to TikTok's IM service (`im-ws-sg.tiktok.com/ws/v2`).
+
+**Status**: The WebSocket connection and message reception work correctly. However, **video downloads fail** due to a known yt-dlp issue ([#17403](https://github.com/yt-dlp/yt-dlp/issues/17403)) where TikTok changed their anti-bot challenge format and yt-dlp's solver cannot parse it.
+
+```
+TIKTOK_DIRECT_ENABLED=true
+TIKTOK_DIRECT_POLL_SECONDS=300
+TIKTOK_DIRECT_POLL_JITTER_PCT=40
+```
+
+**To use (when fixed):**
+1. Upload a working TikTok jar: **Telegram → Admin Console → 🍪 Cookie Jars → TikTok → ✏️ Replace** (export cookies while logged into your TikTok account)
+2. In TikTok, open **Messages** (your self-DM) and share videos to yourself
+3. The bot receives pushes via WebSocket and downloads via yt-dlp
+
+**Workaround until fixed:**
+- Send TikTok links directly to the bot (interactive download)
+- Use the TikTok app to save videos, then send files to the bot
+- Monitor yt-dlp issue #17403 for the fix
+
+The admin console test (`Admin → 📨 Direct-Forward → 🧪 Test TikTok`) shows the WebSocket authentication status and warns about the download issue.

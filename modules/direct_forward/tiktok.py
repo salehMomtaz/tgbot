@@ -430,5 +430,10 @@ async def test_tiktok_connection() -> str:
         return ("❌ **TikTok**: could not fetch `wid` from the web-cookie-privacy "
                 "endpoint — the session may be stale. Re-upload the jar.")
     ak = _tt_access_key(wid)
+    # Note: TikTok video download via yt-dlp currently has a known upstream issue
+    # (yt-dlp#17403) where the challenge solver fails. The WebSocket connection works,
+    # but video downloads may fail until yt-dlp releases a fix.
     return (f"✅ **TikTok**: jar OK, `sessionid` present, wid `{wid}`, "
-            f"access_key `{ak}`. The IM WebSocket can authenticate.")
+            f"access_key `{ak}`. The IM WebSocket can authenticate.\n"
+            f"⚠️ **Note**: Video downloads may fail due to a known yt-dlp issue "
+            f"(github.com/yt-dlp/yt-dlp/issues/17403). This is a temporary upstream problem.")

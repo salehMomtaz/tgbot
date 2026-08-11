@@ -216,6 +216,8 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
         # — two retries (no-auth, then cookies again) convert most transient
         # failures. Sensitive/NSFW content requires cookies, so the no-auth
         # retry alone is not enough.
+        # NOTE: As of Aug 2026, TikTok's challenge solver in yt-dlp is broken
+        # (issue #17403). Retries may not help if the challenge format changed.
         if info is None and "tiktok.com" in url.lower():
             if snap_in_play:
                 cookie_manager.commit(snap_in_play, success=False)
@@ -230,6 +232,9 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 last_attempt_error = str(e2)
             # Retry 2: fresh cookie snapshot (for login-walled sensitive content)
             if info is None and site_jar:
+                # Add delay before retry to avoid rate limiting
+                import time
+                time.sleep(2)
                 snap_in_play = cookie_manager.acquire(site_jar)
                 retry_opts2 = dict(ydl_opts)
                 if snap_in_play:

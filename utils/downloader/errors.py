@@ -35,6 +35,13 @@ def _classify_ytdl_error(exc: Exception, url: str) -> str:
             f"Please send a fresh `{jar}` jar via Admin Console → Cookies."
         )
 
+    if "unexpected response from webpage request" in text and "tiktok.com" in url.lower():
+        return (
+            "TikTok's anti-bot challenge has changed and yt-dlp cannot solve it (known issue: "
+            "https://github.com/yt-dlp/yt-dlp/issues/17403). This is a temporary upstream problem. "
+            "Try again later, or use the interactive download (send link to bot) which may work better."
+        )
+
     if "no video formats found" in text or "requested format" in text:
         return (
             "The video has no playable formats available. "
