@@ -216,8 +216,18 @@ def initialize_cookie_jars():
     print("[Cookies] Locked primary jars read-only at rest (write-back merge keeps them fresh).")
 
 async def auto_clean_cache_directory():
-    """Periodically sweeps the cache directory every hour to purge orphaned files older than the configured age."""
+    """Periodically sweeps the cache directory every hour to purge orphaned files older than the configured age.
+
+    Persistent state files the bot depends on are exempted from the sweep:
+    ``cache/xchat_bridge_state.json`` is the Deno XChat bridge's cursor (deleting
+    it makes the bridge re-prime ``last_seq`` to the newest message and silently
+    SKIP everything older — a data-loss window), and ``cache/xchat_inbox.jsonl``
+    is the bridge's canonical line inbox the X direct-forward worker consumes.
+    The direct-forward platform state lives at the repo root
+    (``direct_forward_state.json``), outside ``cache/``, so it is already safe.
+    """
     from utils.shared import RUNTIME_SETTINGS
+    protected_files = {"xchat_bridge_state.json", "xchat_inbox.jsonl"}
     while True:
         print("[Cleaner] Running periodic cache sweep...")
         cache_dir = "cache"
@@ -227,6 +237,8 @@ async def auto_clean_cache_directory():
             threshold = now - (max_age_hours * 3600)
             try:
                 for entry in os.scandir(cache_dir):
+                    if entry.is_file() and entry.name in protected_files:
+                        continue
                     mtime = entry.stat().st_mtime
                     if mtime < threshold:
                         if entry.is_dir():

@@ -1500,7 +1500,7 @@ def register_admin_handlers(app: Client):
 
         elif data == "admin_direct_test_tiktok":
             from modules import direct_forward
-            result = direct_forward.test_tiktok_connection()
+            result = await direct_forward.test_tiktok_connection()
             await callback_query.message.edit_text(result,
                 reply_markup=get_direct_menu_keyboard())
             await callback_query.answer()

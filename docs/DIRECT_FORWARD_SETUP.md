@@ -193,8 +193,10 @@ invisible.
 **Warning:** a fresh `xcookies.txt` export from a datacenter IP can be
 challenged by X on first use. Warm the account first: log in once in a browser
 (a mobile/residential IP helps), complete any verification, then export the
-jar. Because the worker boots from the jar, a mid-run re-upload (Admin →
-Cookies → Replace) is picked up on the next poll without a bot restart.
+jar. The worker **live-reloads the jar every poll** (hash-compare in
+`_twitter_worker`), so a mid-run re-upload (Admin → Cookies → Replace) is
+picked up on the next poll without a bot restart; if the `twid` changes it
+rebuilds the client and re-primes the cursor.
 
 ## How each DM type is handled
 
@@ -223,3 +225,10 @@ downloads, so a DM relay never starves you out of the bot.
   filters by cursor, so it is safe to truncate).
 - `cache/xchat_bridge_state.json` — the bridge's own `last_seq`. Delete to
   re-prime (the bridge then skips backlog, same as the worker).
+
+**Both `cache/xchat_bridge_state.json` and `cache/xchat_inbox.jsonl` are
+exempt from the hourly cache cleaner** (`main.py::auto_clean_cache_directory`
+skip-list). Deleting the bridge state while the bridge is running makes it
+re-prime `last_seq` to newest and silently skip older messages — a data-loss
+window, hence the exemption. If you reset the X relay by hand, delete the
+state file intentionally, not via the cleaner.

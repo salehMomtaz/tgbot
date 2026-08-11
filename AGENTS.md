@@ -315,17 +315,35 @@ invariants** so you don't have to rediscover them.
     ladder already handles TikTok's stochastic anti-bot challenge — **no
     headless browser is needed** (see the doc's headless-browser analysis).
     The bot's poll cadence is WS-push-driven, but reconnects still respect the
-    jittered `TIKTOK_DIRECT_POLL_SECONDS` interval, never a fixed cadence.
+    jittered `TIKTOK_DIRECT_POLL_SECONDS` interval (via `_tt_poll_interval`),
+    never a fixed cadence. `_tt_wid` and
+    `_tt_oembed_author` are SYNC `requests.get` calls — they must always run
+    through `loop.run_in_executor`, never inline on the event loop (a slow
+    TikTok endpoint would freeze pyrogram + the IG/X workers). The reconnect
+    knob is `_tt_poll_interval()` (TIKTOK_DIRECT_POLL_SECONDS/JITTER), NOT the
+    shared `_poll_interval()` (DIRECT_FORWARD_*) used by IG/X — keep them
+    separate.
     Full protocol + decode details: `docs/memory/tgbot-tiktok-direct-dm.md`.
     Bridge cursor semantics: its `last_seq` (in `cache/xchat_bridge_state.json`)
     lives in the SAME id space as the legacy DM ids, so the shared `x.last_id`
-    cursor dedupes; first boot primes and skips backlog. The worker reads the
-    jar ONCE at boot (`_x_jar_cookies` in `_twitter_worker`), NOT per poll — a
-    mid-run xcookies re-upload (or switching the relay to a different X
-    account) requires a bot restart. The watched conversation is
-    `<twid-uid>-<twid-uid>`: the account that self-DMs MUST be the one whose
-    session is in the jar, or its messages land in a thread the worker never
-    reads (media silently never arrives).
+    cursor dedupes; first boot primes and skips backlog. **The worker live-
+    reloads the jar every poll** (`_x_cookies_signature` hash-compare in
+    `_twitter_worker`): a mid-run xcookies re-upload is re-applied via
+    `client.set_cookies` on the next poll — no restart; if the `twid` changed
+    (different account), it rebuilds the X client and re-primes the cursor.
+    The watched conversation is `<twid-uid>-<twid-uid>`: the account that
+    self-DMs MUST be the one whose session is in the jar, or its messages land
+    in a thread the worker never reads (media silently never arrives).
+    **`cache/xchat_bridge_state.json` + `cache/xchat_inbox.jsonl` are
+    protected from the hourly cache cleaner** (`main.py::auto_clean_cache_directory`
+    skip-list) — deleting the bridge state mid-run would make the bridge re-prime
+    `last_seq` to newest and SKIP older messages (data-loss window). A photo-only
+    pasted tweet (no video stream) is delivered natively from `_x_fallback_photos`
+    (walks `getattr(t,"media")` AND a raw `t._data['legacy']`
+    `extended_entities`/`entities` walk — twikit 2.3.3 `User.__init__` raises
+    `KeyError: 'urls'` on some authors, aborting `get_tweet_by_id`); if even
+    that finds nothing, `_x_deliver_tweet` sends a text-only note instead of
+    failing the queue task. See `docs/memory/tgbot-2026-08-11-selfdm-audit.md`.
 
     **State file = shared across the three direct-forward workers; save
     merge-only (2026-08-11).** `direct_forward_state.json` is written by

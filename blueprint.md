@@ -278,7 +278,20 @@ processed. The first run primes the cursor and skips backlog; state lives in
 and write it **merge-only per platform** (`_state_save_owned`), never a
 full-dict overwrite, so one worker can't clobber another's cursor (a stale
 full-dict save used to reset the X cursor and re-relay the whole self-DM
-backlog — fixed 2026-08-11). The IG worker never exits on a login failure — it
+backlog — fixed 2026-08-11). A 2026-08-11 audit hardened the mechanisms
+further: `cache/xchat_bridge_state.json` + `cache/xchat_inbox.jsonl` are
+exempt from the hourly cache cleaner (deleting the bridge cursor re-primes
+`last_seq` to newest and silently skips older messages); photo-only pasted
+tweets are delivered natively via a hardened `_x_fallback_photos` (raw
+`t._data` legacy `extended_entities` walk, tolerating twikit 2.3.3's
+`KeyError('urls')`) or a text-only note — never a failed queue task; the
+TikTok worker's `_tt_wid`/`_tt_oembed_author` network calls run through
+`run_in_executor` so a slow endpoint can't freeze the event loop, and its
+reconnect cadence honours `TIKTOK_DIRECT_POLL_SECONDS` via `_tt_poll_interval`
+(no longer the shared `_poll_interval`); the X worker live-reloads the
+xcookies jar every poll (hash-compare + re-apply, rebuild client + re-prime
+cursor on `twid` change) so a jar re-upload needs no restart. See
+`docs/memory/tgbot-2026-08-11-selfdm-audit.md`. The IG worker never exits on a login failure — it
 retries each poll, so a mid-run `igcookies.txt` replace is picked up without a
 bot restart (only real checkpoint challenges freeze it for 3–5 h). Post/reel
 shares are delivered via the Instagram-native path; a carousel containing an

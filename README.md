@@ -378,6 +378,12 @@ delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
   and write it **merge-only per platform** — a worker can never clobber another
   platform's cursor, so each DM is delivered exactly once (see the
   [state-race postmortem](docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md)).
+- A 2026-08-11 audit of the three self-DM mechanisms hardened edge cases: the
+  XChat bridge cursor + inbox are protected from the hourly cache cleaner, the
+  X worker live-reloads its cookie jar (no restart on re-upload), photo-only
+  pasted tweets are delivered natively instead of silently failing, and the
+  TikTok worker's network calls no longer block the event loop (see the
+  [self-DM audit](docs/memory/tgbot-2026-08-11-selfdm-audit.md)).
 
 ---
 

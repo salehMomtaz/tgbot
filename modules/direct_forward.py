@@ -122,6 +122,18 @@ def _poll_interval() -> float:
     return base
 
 
+def _tt_poll_interval() -> float:
+    """Reconnect cadence for the TikTok IM WebSocket, honoring the TikTok
+    dedicated knobs (TIKTOK_DIRECT_POLL_SECONDS / TIKTOK_DIRECT_POLL_JITTER_PCT).
+    Kept separate from _poll_interval so Instagram/X and TikTok can be tuned
+    independently; both stay humanized with the same ±jitter discipline."""
+    base = max(60, getattr(config, "TIKTOK_DIRECT_POLL_SECONDS", config.DIRECT_FORWARD_POLL_SECONDS))
+    jitter_pct = max(0, min(90, getattr(config, "TIKTOK_DIRECT_POLL_JITTER_PCT", 40)))
+    if jitter_pct:
+        base *= random.uniform(1 - jitter_pct / 100, 1 + jitter_pct / 100)
+    return base
+
+
 def _activity_stamp(thread) -> str:
     """Serialize a thread's last_activity_at for the state watermark map."""
     last_act = getattr(thread, "last_activity_at", None)
@@ -1251,6 +1263,12 @@ def _x_jar_cookies() -> dict:
     return out
 
 
+def _x_cookies_signature(cookies: dict) -> tuple:
+    """Lightweight content signature of a cookie dict, used to detect jar
+    changes between polls without carrying the full jar around."""
+    return tuple(sorted(cookies.items()))
+
+
 def _x_twid_user_id(cookies: dict) -> str | None:
     """Extract the account's numeric user id from the `twid` cookie (value is
     `u%3D<uid>` or `u=<uid>`)."""
@@ -1424,22 +1442,49 @@ async def _x_fetch_auth_bytes(client, url: str) -> bytes:
 async def _x_fallback_photos(client, url: str) -> list[str]:
     """For a PASTED (text-only) tweet URL, yt-dlp exposes no media when the
     tweet is photo-only. Fetch the tweet through twikit and return its photo
-    CDN URLs so it can be delivered natively."""
+    CDN URLs so it can be delivered natively.
+
+    NOTE: twikit 2.3.3's ``User.__init__`` (user.py:102) does
+    ``legacy['entities']['description']['urls']`` without a ``.get`` — any
+    author whose description entity lacks a ``urls`` key makes the WHOLE
+    ``get_tweet_by_id`` raise ``KeyError('urls')`` before the tweet is usable.
+    That is a twikit bug, so besides catching it we also walk the raw
+    ``_data`` tree as a fallback so photo-only pasted tweets still deliver.
+    """
     m = re.search(r"status(?:es)?/(\d+)", url)
     if not m:
         return []
+
+    def _photo_from_media_dict(d):
+        u = d.get("media_url") or d.get("media_url_https") or d.get("url")
+        if u and str(u).startswith("http"):
+            return str(u)
+        return None
+
+    t = None
     try:
         t = await client.get_tweet_by_id(m.group(1))
     except Exception as e:
         logger.warning(f"[DirectForward/X] tweet {url} photo fallback fetch failed: {e}")
-        return []
     out = []
-    for med in (getattr(t, "media", None) or []):
-        if str(getattr(med, "type", "")).lower() != "photo":
-            continue
-        u = getattr(med, "media_url", None) or getattr(med, "url", None)
-        if u and str(u).startswith("http"):
-            out.append(str(u))
+    # 1) Normal twikit property path.
+    if t is not None:
+        for med in (getattr(t, "media", None) or []):
+            if str(getattr(med, "type", "")).lower() != "photo":
+                continue
+            u = getattr(med, "media_url", None) or getattr(med, "url", None)
+            if u and str(u).startswith("http"):
+                out.append(str(u))
+    # 2) Raw _data walk (works even when the .media property is quirky or
+    #    get_tweet_by_id failed mid-parse but returned something).
+    data = getattr(t, "_data", None)
+    if not out and isinstance(data, dict):
+        legacy = data.get("legacy") or {}
+        for section in ("extended_entities", "entities"):
+            for med in (legacy.get(section, {}) or {}).get("media", []) or []:
+                u = _photo_from_media_dict(med)
+                if u and u not in out:
+                    out.append(u)
     return out
 
 
@@ -1723,7 +1768,18 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                             f"— delivering {len(photo_urls)} photo(s) natively")
                 return await _x_deliver_share_photos(client, bot_client, chat_id,
                                                      photo_urls, header_lines, body)
-            raise RuntimeError(f"tweet {url}: no video formats (photo-only tweet handled natively)")
+            # Neither yt-dlp nor the twikit fallback produced media. Never drop
+            # the share silently and never let the queue task crash — relay a
+            # text-only notice so the operator still gets the tweet.
+            logger.warning(f"[DirectForward/X] tweet {url}: no video and no photo fallback "
+                           f"— relaying text-only")
+            note = (f"{caption}\n\n"
+                    f"⚠️ *No downloadable media* — this tweet exposes no video "
+                    f"stream to yt-dlp and the photo fallback failed.")
+            await bot_client.send_message(chat_id=chat_id, text=note)
+            for chunk in followups:
+                await bot_client.send_message(chat_id=chat_id, text=chunk)
+            return
 
         audios = (data or {}).get("audios") or []
         best_audio_id = (data or {}).get("best_audio_format_id")
@@ -1843,6 +1899,12 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
         except Exception as e:
             logger.warning(f"[DirectForward/X] priming peek failed: {e}")
 
+    # Track the applied cookie set so a mid-run xcookies re-upload (Admin →
+    # Cookies → X/Twitter → Replace, or write-back rotation) is picked up on
+    # the NEXT poll with no bot restart. The jar stays locked 0o444 — we only
+    # read it; yt-dlp owns the write-back merge.
+    applied_sig = _x_cookies_signature(cookies)
+
     poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
     logger.info(f"[DirectForward/X] polling your X self-DM "
                 f"(conversation `{conv_id}`, your account id `{uid}`) "
@@ -1850,6 +1912,37 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
 
     while True:
         try:
+            # Live jar reload: pick up a mid-run cookie re-upload (admin
+            # replace or yt-dlp write-back rotation) on the next poll. If the
+            # twid changes, the account itself changed → rebuild the client and
+            # re-prime so the watched conversation tracks the new account.
+            fresh = _x_jar_cookies()
+            if fresh and _x_cookies_signature(fresh) != applied_sig:
+                new_uid = _x_twid_user_id(fresh)
+                if new_uid and new_uid != uid:
+                    logger.info(f"[DirectForward/X] xcookies switched account "
+                                f"({uid} -> {new_uid}) — rebuilding client")
+                    uid, conv_id = new_uid, f"{new_uid}-{new_uid}"
+                    client = XClient(language="en-US", proxy=x_proxy) if x_proxy else XClient(language="en-US")
+                    client.set_cookies(fresh)
+                    state = _load_state()
+                    state.setdefault("x", {"last_id": "0"})
+                    await _state_save_owned(state, {"x"})
+                    try:
+                        msgs = await _x_fetch_self_messages(client, conv_id)
+                        if msgs:
+                            _bump_cursor(state, "x", int(msgs[0]["id"]))
+                            await _state_save_owned(state, {"x"})
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/X] re-prime peek failed: {e}")
+                else:
+                    try:
+                        client.set_cookies(fresh)
+                        logger.info("[DirectForward/X] xcookies jar changed — re-applied session")
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/X] could not re-apply new xcookies: {e}")
+                cookies, applied_sig = fresh, _x_cookies_signature(fresh)
+
             state = _load_state()
             last_seen = _cursor(state, "x")
 
@@ -2191,7 +2284,8 @@ async def _tt_process_message(m: dict, queue, chat_id, bot_client, premium_clien
     if not item_id:
         logger.info(f"[DirectForward/TT] msg {m.get('server_message_id')}: no itemId in share — skipped")
         return
-    author = _tt_oembed_author(item_id)
+    author = await asyncio.get_event_loop().run_in_executor(
+        None, _tt_oembed_author, item_id)
     if not author:
         logger.warning(f"[DirectForward/TT] could not resolve author for itemId {item_id} — skipped")
         return
@@ -2218,7 +2312,7 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
                      "(need a sessionid cookie). Upload a fresh jar via "
                      "Admin → Cookies — TikTok direct-forward disabled.")
         return
-    wid = _tt_wid(cookies)
+    wid = await asyncio.get_event_loop().run_in_executor(None, _tt_wid, cookies)
     if not wid:
         logger.error("[DirectForward/TT] could not fetch wid — TikTok direct-forward disabled.")
         return
@@ -2293,10 +2387,10 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
             await _tt_run_ws(bot_client, premium_client, chat_id, queue, seen)
         except Exception as e:
             logger.error(f"[DirectForward/TT] WS error: {e}")
-        await asyncio.sleep(_poll_interval())
+        await asyncio.sleep(_tt_poll_interval())
 
 
-def test_tiktok_connection() -> str:
+async def test_tiktok_connection() -> str:
     """Admin-console self-test: jar presence, sessionid, wid + access_key."""
     cookies = _tt_jar_cookies()
     if not cookies:
@@ -2305,7 +2399,7 @@ def test_tiktok_connection() -> str:
     missing = [k for k in ("sessionid", "ttwid", "msToken") if not cookies.get(k)]
     if missing:
         return f"❌ **TikTok**: jar present but missing cookies: `{', '.join(missing)}`. Re-upload."
-    wid = _tt_wid(cookies)
+    wid = await asyncio.get_event_loop().run_in_executor(None, _tt_wid, cookies)
     if not wid:
         return ("❌ **TikTok**: could not fetch `wid` from the web-cookie-privacy "
                 "endpoint — the session may be stale. Re-upload the jar.")
