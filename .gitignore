@@ -47,7 +47,10 @@ direct_x_cookies.json
 direct_forward_state.json
 
 # OpenCode session export in markdown
-session-ses_0438.md
+session-ses_*.md
+
+# OpenCode runtime state (session memory transcripts may contain secrets)
+.opencode/memory/
 
 # XChat bridge (emusks npm package + runtime state; the PIN lives in .env)
 node_modules/

@@ -374,6 +374,10 @@ delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
   [`docs/DIRECT_FORWARD_SETUP.md`](docs/DIRECT_FORWARD_SETUP.md)); unconfigured,
   the feature self-disables. Pair / unpair the Instagram account from the Admin
   Console → 📨 Direct-Forward.
+- All three relay workers (IG/X/TikTok) share one `direct_forward_state.json`
+  and write it **merge-only per platform** — a worker can never clobber another
+  platform's cursor, so each DM is delivered exactly once (see the
+  [state-race postmortem](docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md)).
 
 ---
 

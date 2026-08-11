@@ -213,7 +213,10 @@ downloads, so a DM relay never starves you out of the bot.
 ## State / reset
 
 - `direct_forward_state.json` — per-platform cursors. Delete to re-prime
-  (backlog will be skipped again on the next boot).
+  (backlog will be skipped again on the next boot). The file is SHARED by the
+  IG, X and TikTok workers; the code always writes it merge-only per platform
+  (see `_state_save_owned`), so deleting/resetting it re-primes every
+  platform, not just the one you were editing.
 - `direct_ig_session.json` — Instagram's live session. Delete to force
   re-login. (X has no session file — it rides the shared `xcookies.txt` jar.)
 - `cache/xchat_inbox.jsonl` — the bridge's canonical message lines (the worker

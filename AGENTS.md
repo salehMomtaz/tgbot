@@ -327,6 +327,26 @@ invariants** so you don't have to rediscover them.
     session is in the jar, or its messages land in a thread the worker never
     reads (media silently never arrives).
 
+    **State file = shared across the three direct-forward workers; save
+    merge-only (2026-08-11).** `direct_forward_state.json` is written by
+    three concurrent coroutines (IG `_instagram_worker`, X `_twitter_worker`,
+    TikTok `_tt_run_ws`/`_tiktok_worker`), each doing read-modify-write of the
+    WHOLE dict. A full-dict `_save_state(state)` from any worker lets a stale
+    in-memory snapshot clobber another platform's `last_id` — the IG worker
+    once held its boot-time copy for the whole process and reverted X's
+    cursor on every save, so the entire X self-DM backlog re-relayed in waves
+    after each IG poll (the "X posts received 2× then 4×" incident; see
+    `docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md`).
+    Therefore: **never call `_save_state(state)` from a worker.** Always
+    persist through `_state_save_owned(state, {own_platform})` (async workers)
+    or `_merge_state_save(state, {own_platform})` (sync admin pairing helpers)
+    — both re-read the freshest on-disk state and apply ONLY the caller's own
+    platform section, then refresh the caller's in-memory dict. The helpers
+    are deliberately synchronous (cannot be interleaved on the event loop)
+    and serialized by `_STATE_LOCK` in the async variant. Keep all cursor
+    bumps inside the owned write. The only remaining `_save_state` caller is
+    inside `_merge_state_save` itself — keep it that way.
+
  14. **Interactive responses quote the user's link message.** The format
      keyboard, playlist menus, skip warnings and **every uploaded file part**
      sent on behalf of a link quote-reply to that link's message

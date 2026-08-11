@@ -274,7 +274,11 @@ photo/video), post/reel/clip shares, story shares, tweet shares, and plain
 links in any DM text (routed through the standard yt-dlp pipeline with cookie
 jars, so login-walled content works). Only your whitelisted account's DMs are
 processed. The first run primes the cursor and skips backlog; state lives in
-`direct_forward_state.json`. The IG worker never exits on a login failure — it
+`direct_forward_state.json`. All three workers (IG/X/TikTok) share that one file
+and write it **merge-only per platform** (`_state_save_owned`), never a
+full-dict overwrite, so one worker can't clobber another's cursor (a stale
+full-dict save used to reset the X cursor and re-relay the whole self-DM
+backlog — fixed 2026-08-11). The IG worker never exits on a login failure — it
 retries each poll, so a mid-run `igcookies.txt` replace is picked up without a
 bot restart (only real checkpoint challenges freeze it for 3–5 h). Post/reel
 shares are delivered via the Instagram-native path; a carousel containing an

@@ -28,7 +28,11 @@ and the bot — authenticated with the same cookies yt-dlp already uses
      captions are split: media caption at most 1024 chars, the remainder
      follows as separate text messages,
   4. advances a per-platform cursor in direct_forward_state.json so nothing is
-     sent twice.
+     sent twice. The state file is SHARED by the IG, X and TikTok workers, so
+     every save must be MERGE-ONLY for the caller's own platform section
+     (_state_save_owned / _merge_state_save) — never a full-dict _save_state,
+     or a stale snapshot reverts another platform's cursor and its whole
+     backlog re-relays (see docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md).
 
 Instagram pairing / protection
 ------------------------------
@@ -160,6 +164,42 @@ def _bump_cursor(state: dict, platform: str, new_id: int) -> None:
     state.setdefault(platform, {})["last_id"] = str(new_id)
 
 
+# The three workers (IG/X/TikTok) share ONE state file. Writing the whole
+# in-memory dict on every save lets a stale snapshot clobber another
+# platform's cursor — the race that made X self-DM posts relay repeatedly
+# (the IG worker loaded state once and each of its saves reverted the X
+# cursor, so the whole X backlog re-relayed on every IG poll). Every worker
+# must persist via _merge_state_save / _state_save_owned: merge ONLY its own
+# platform section over the freshest on-disk state, never a full-dict write.
+_STATE_LOCK = asyncio.Lock()
+
+
+def _merge_state_save(state: dict[str, Any], owned: set[str]) -> dict[str, Any]:
+    """Merge only the caller's *owned* platform sections over the freshest
+    on-disk state and write it back atomically (tmp+rename). Refreshes
+    *state* in place with the merged result so later reads see other
+    workers' cursor advances. Fully synchronous, so it cannot be
+    interleaved by other coroutines on the event-loop thread."""
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            disk = json.load(f)
+    except Exception:
+        disk = {}
+    for plat in owned:
+        if plat in state:
+            disk[plat] = state[plat]
+    _save_state(disk)
+    state.clear()
+    state.update(disk)
+    return state
+
+
+async def _state_save_owned(state: dict[str, Any], owned: set[str]) -> dict[str, Any]:
+    """Async variant of _merge_state_save, serialized by _STATE_LOCK."""
+    async with _STATE_LOCK:
+        return _merge_state_save(state, owned)
+
+
 def _get_pair(state: dict, platform: str) -> dict | None:
     pair = state.get(platform, {}).get("paired")
     return pair if isinstance(pair, dict) and pair.get("user_id") else None
@@ -206,7 +246,7 @@ def unpair_platform(platform: str) -> bool:
     _pending_pairs.pop(platform, None)
     if _get_pair(state, platform):
         state.get(platform, {}).pop("paired", None)
-        _save_state(state)
+        _merge_state_save(state, {platform})
         return True
     return False
 
@@ -217,7 +257,7 @@ def set_platform_pair(platform: str, user_id: str | int, username: str = "") -> 
     up on its next poll."""
     state = _load_state()
     _set_pair(state, platform, user_id, username)
-    _save_state(state)
+    _merge_state_save(state, {platform})
 
 
 def pairing_status(platform: str, state: dict) -> str:
@@ -896,7 +936,7 @@ async def _ig_pairing_scan(item: dict, thread_users: dict, state: dict,
     if not sender_uid:
         return False
     _set_pair(state, "ig", sender_uid, username)
-    _save_state(state)
+    await _state_save_owned(state, {"ig"})
     _pending_pairs.pop("ig", None)
     try:
         await bot_client.send_message(
@@ -1024,12 +1064,12 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         uid = await loop.run_in_executor(None, _ig_resolve_user_id, cl, config.IG_DIRECT_FROM_USERNAME)
         if uid:
             _set_pair(state, "ig", uid, config.IG_DIRECT_FROM_USERNAME)
-            _save_state(state)
+            await _state_save_owned(state, {"ig"})
             logger.info(f"[DirectForward/IG] pre-paired with @{config.IG_DIRECT_FROM_USERNAME} (id {uid}) from .env")
 
     if "ig" not in state or "last_id" not in state.get("ig", {}):
         state.setdefault("ig", {"last_id": "0"})
-        _save_state(state)
+        await _state_save_owned(state, {"ig"})
         logger.info("[DirectForward/IG] first run — priming cursor, backlog is skipped.")
         try:
             threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
@@ -1045,7 +1085,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         pass
             if last:
                 _bump_cursor(state, "ig", last)
-                _save_state(state)
+                await _state_save_owned(state, {"ig"})
         except Exception as e:
             logger.warning(f"[DirectForward/IG] priming peek failed: {e}")
 
@@ -1059,6 +1099,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
 
     while True:
+        state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
         state_dirty = False
         try:
             threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
@@ -1127,9 +1168,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     except Exception:
                         pass
                 if new_msgs:
-                    _save_state(state)
+                    await _state_save_owned(state, {"ig"})
             if state_dirty:
-                _save_state(state)
+                await _state_save_owned(state, {"ig"})
             cl.dump_settings(IG_SESSION_FILE)
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
             # Do NOT hammer a challenged session: re-trying hourly only deepens
@@ -1792,13 +1833,13 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
     state = _load_state()
     if "x" not in state or "last_id" not in state.get("x", {}):
         state.setdefault("x", {"last_id": "0"})
-        _save_state(state)
+        await _state_save_owned(state, {"x"})
         logger.info("[DirectForward/X] first run — priming cursor, backlog is skipped.")
         try:
             msgs = await _x_fetch_self_messages(client, conv_id)
             if msgs:
                 _bump_cursor(state, "x", int(msgs[0]["id"]))
-                _save_state(state)
+                await _state_save_owned(state, {"x"})
         except Exception as e:
             logger.warning(f"[DirectForward/X] priming peek failed: {e}")
 
@@ -1826,7 +1867,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                     except Exception as e:
                         logger.error(f"[DirectForward/X] bridge message {line.get('id')} failed: {e}")
                     _bump_cursor(state, "x", line["_id"])
-                _save_state(state)
+                await _state_save_owned(state, {"x"})
                 await asyncio.sleep(_poll_interval())
                 continue
 
@@ -1841,7 +1882,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                 except Exception as e:
                     logger.error(f"[DirectForward/X] message {m['id']} failed: {e}")
                 _bump_cursor(state, "x", int(m["id"]))
-                _save_state(state)  # persist per-message to survive restarts
+                await _state_save_owned(state, {"x"})  # merge-only: never clobber IG/TikTok cursors
         except Exception as e:
             logger.error(f"[DirectForward/X] poll error: {e}")
             await asyncio.sleep(min(600, _poll_interval()))
@@ -2218,7 +2259,7 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
             state = _load_state()
             state.setdefault("tiktok", {"seen_msg_ids": []})
             state["tiktok"]["seen_msg_ids"] = sorted(seen)[-2000:]
-            _save_state(state)
+            await _state_save_owned(state, {"tiktok"})
             if prime:
                 logger.info(f"[DirectForward/TT] prime: swallowed backlog msg {msg_id}")
                 continue
@@ -2237,7 +2278,7 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
         logger.info("[DirectForward/TT] first run — priming backlog, nothing relayed "
                     "for the first connect.")
         state.setdefault("tiktok", {})["primed"] = True
-        _save_state(state)
+        await _state_save_owned(state, {"tiktok"})
         try:
             await _tt_run_ws(bot_client, premium_client, chat_id, queue, seen,
                              prime=True)
