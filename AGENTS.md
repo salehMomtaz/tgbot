@@ -28,17 +28,56 @@ invariants** so you don't have to rediscover them.
 | Want to… | Edit |
 |---|---|
 | Add/change a config value | `config.py` + `.env.example` (+ blueprint) |
-| Change download/extract logic | `utils/downloader.py` |
+| Change download/extract logic | `utils/downloader/` (see sub-modules below) |
 | Change upload/splitting | `utils/uploader_handler.py` |
 | Change the PO-token provider lifecycle | `utils/pot_provider.py` |
-| Add an admin-console feature | `modules/admin.py` (+ keyboard helpers there) |
+| Add an admin-console feature | `modules/admin/` (see sub-modules below) |
 | Change how links/messages are handled | `modules/downloader_handler.py` |
-| Change playlist tiers / detection / per-video download | `utils/downloader.py` (`PLAYLIST_TIERS`, `is_playlist_url`, `extract_playlist_meta`, `download_media(format_selector=...)`) |
-| Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader.py`) |
+| Change playlist tiers / detection / per-video download | `utils/downloader/playlists.py` (`PLAYLIST_TIERS`), `utils/downloader/url_normalize.py` (`is_playlist_url`), `utils/downloader/playlists.py` (`extract_playlist_meta`), `utils/downloader/download.py` (`download_media(format_selector=...)`) |
+| Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader/cookies.py`, `utils/downloader/download.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
-| Change DM relay (IG/X → Telegram) | `modules/direct_forward.py` + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
+| Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
+
+### `utils/downloader/` package (replaces `utils/downloader.py`)
+
+| Want to… | Edit |
+|---|---|
+| Cookie resolution & YouTube diagnosis | `utils/downloader/cookies.py` |
+| URL normalization (TikTok shortlinks, IG highlights) | `utils/downloader/url_normalize.py` |
+| Size estimation, CDN probes, disk space | `utils/downloader/sizing.py` |
+| yt-dlp error classification | `utils/downloader/errors.py` |
+| Format extraction & sorting | `utils/downloader/formats.py` |
+| Playlist metadata & tier selectors | `utils/downloader/playlists.py` |
+| Thumbnails, ffmpeg metadata, video probing | `utils/downloader/thumbnails.py` |
+| Single-media download pipeline | `utils/downloader/download.py` |
+| Binary & video splitting generators | `utils/downloader/split.py` |
+
+### `modules/admin/` package (replaces `modules/admin.py`)
+
+| Want to… | Edit |
+|---|---|
+| Keyboard builders (console, premium, cookies, PO, direct) | `modules/admin/keyboards.py` |
+| In-chat Premium session generation flow | `modules/admin/premium_gen.py` |
+| Cookie jar validation & atomic write | `modules/admin/cookies.py` |
+| Live cookie-jar test (yt-dlp probe) | `modules/admin/cookie_test.py` |
+| PO Token Provider menu & actions | `modules/admin/pot_menu.py` |
+| Direct-Forward menu rendering | `modules/admin/direct_menu.py` |
+| Callback query dispatcher (admin UI) | `modules/admin/callback_dispatch.py` |
+| Handler registration & text/command routing | `modules/admin/register.py` |
+| Module-level state (USER_STATES, PREMIUM_GEN, etc.) | `modules/admin/state.py` |
+
+### `modules/direct_forward/` package (replaces `modules/direct_forward.py`)
+
+| Want to… | Edit |
+|---|---|
+| State management (cursors, pairing, merge-only saves) | `modules/direct_forward/state.py` |
+| Shared constants & delivery helpers | `modules/direct_forward/common.py` |
+| Instagram DM worker (instagrapi) | `modules/direct_forward/instagram.py` |
+| X/Twitter self-DM worker (twikit) | `modules/direct_forward/twitter.py` |
+| TikTok IM WebSocket push worker | `modules/direct_forward/tiktok.py` |
+| Supervisor (starts all enabled workers) | `modules/direct_forward/supervisor.py` |
 
 ## Critical invariants (do not break these)
 

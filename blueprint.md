@@ -205,17 +205,35 @@ tgbot/
 ├── cookies.txt               # Global fallback cookie jar
 ├── bgutil-provider/          # PO-token provider source (cloned by install.sh, git-ignored)
 ├── utils/
-│   ├── pot_provider.py       # PotProviderManager: install/patch/start/supervise the Deno server
-│   ├── downloader.py         # Strategy ladder, PO injection, snapshots, diagnosis, splitters
-│   ├── uploader_handler.py   # On-demand sequential splitter + 2 GB / 4 GB uploader
-│   ├── logger.py             # TelegramChannelHandler + local rotating file mirror
-│   ├── updater.py            # 6-hour yt-dlp nightly updater (preserves [default] extras)
-│   ├── shared.py             # In-memory registries: queue, caches, PO state, runtime settings
-│   ├── queue_manager.py      # Non-blocking serializing task queue
-│   ├── gate.py               # Security access control + settings registry
-│   └── id_validator.py       # Telegram ID format checks
+    ├── pot_provider.py       # PotProviderManager: install/patch/start/supervise the Deno server
+    ├── downloader/           # Strategy ladder, PO injection, snapshots, diagnosis, splitters
+    │   ├── cookies.py        # Cookie resolution, YouTube diagnosis, site context
+    │   ├── url_normalize.py  # TikTok shortlinks, IG highlights, PO options
+    │   ├── sizing.py         # Size estimation, CDN probes, disk space
+    │   ├── errors.py         # yt-dlp error classification
+    │   ├── formats.py        # Format extraction & sorting (extract_formats)
+    │   ├── playlists.py      # Playlist metadata & tier selectors
+    │   ├── thumbnails.py     # Thumbnails, ffmpeg metadata, video probing
+    │   ├── download.py       # Single-media download pipeline (download_media)
+    │   └── split.py          # Binary & video splitting generators
+    ├── uploader_handler.py   # On-demand sequential splitter + 2 GB / 4 GB uploader
+    ├── logger.py             # TelegramChannelHandler + local rotating file mirror
+    ├── updater.py            # 6-hour yt-dlp nightly updater (preserves [default] extras)
+    ├── shared.py             # In-memory registries: queue, caches, PO state, runtime settings
+    ├── queue_manager.py      # Non-blocking serializing task queue
+    ├── gate.py               # Security access control + settings registry
+    └── id_validator.py       # Telegram ID format checks
 └── modules/
-    ├── admin.py              # Admin Console: users, cookies (test/backup/restore), PO Token menu
+    ├── admin/                # Admin Console: users, cookies (test/backup/restore), PO Token menu
+    │   ├── keyboards.py      # Console/premium/cookies/PO/direct keyboards
+    │   ├── state.py          # Module-level state (USER_STATES, PREMIUM_GEN, etc.)
+    │   ├── premium_gen.py    # In-chat Premium session generation flow
+    │   ├── cookies.py        # Cookie jar validation & atomic write
+    │   ├── cookie_test.py    # Live cookie-jar test (yt-dlp probe)
+    │   ├── pot_menu.py       # PO Token Provider menu & actions
+    │   ├── direct_menu.py    # Direct-Forward menu rendering
+    │   ├── callback_dispatch.py  # Callback query dispatcher (admin UI)
+    │   └── register.py       # Handler registration & text/command routing
     ├── downloader_handler.py # Link & direct-URL queue worker + format grid selector
     ├── stream_interceptor.py # Forwarded-file → stream-link generator (24h validity)
     └── stream_handler.py     # FastAPI stream bridge (24h token check)
@@ -225,7 +243,7 @@ tgbot/
 
 ## 🔄 Direct-forward feature (Instagram / X DM relay)
 
-**What it is:** A background worker (`modules/direct_forward.py`) that polls
+**What it is:** A background worker (`modules/direct_forward/`) that polls
 the **DM inbox** of the bot's own Instagram and/or X account and relays
 anything you DM it — photos, videos, reels, story shares, tweet shares, or
 plain links — into your Telegram chat.

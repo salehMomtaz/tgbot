@@ -15,7 +15,7 @@ python-dotenv
 # yt-dlp plugin that talks to the bgutil PO-token HTTP provider (Deno server).
 # Auto-discovered by yt-dlp; the provider server itself is cloned by ./install.sh.
 bgutil-ytdlp-pot-provider
-# Direct-forward DM relay (modules/direct_forward.py). Local libraries speaking
+# Direct-forward DM relay (modules/direct_forward/). Local libraries speaking
 # the platforms' own private APIs — no third-party relay services.
 instagrapi
 # curl-backed requests adapter giving instagrapi's PRIVATE session a real
@@ -24,6 +24,6 @@ instagrapi
 curl-adapter>=1.2.1
 twikit
 # Async WebSocket client for the TikTok IM push channel
-# (_tiktok_worker in modules/direct_forward.py). Also pulled in by
+# (_tiktok_worker in modules/direct_forward/). Also pulled in by
 # yt-dlp[default], but declared here because we import it directly.
 websockets
