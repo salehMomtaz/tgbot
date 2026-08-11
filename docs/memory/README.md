@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-08-04.
+code or the git log alone. Last updated: 2026-08-11.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -66,3 +66,9 @@ code or the git log alone. Last updated: 2026-08-04.
   routed to the format flow, HLS fragment-size artifact guard, silent
   `MESSAGE_NOT_MODIFIED`, SSRF guard on the direct-file path, secret file
   perms `600`.
+- [X photo-paste fix](tgbot-2026-08-11-x-photo-paste-fix.md) — photo-only
+  pasted tweet URLs silently failed ("No downloadable media") because twikit
+  2.3.3's `User.__init__` raises `KeyError('urls')` on some authors, aborting
+  `get_tweet_by_id`. Fixed by switching `_x_fallback_photos` to a raw
+  `client.gql.tweet_detail` GraphQL walk scoped to the focal `tweet-<id>`
+  entry (no model building, so the bug cannot fire).

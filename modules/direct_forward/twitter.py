@@ -235,34 +235,89 @@ async def _x_fetch_auth_bytes(client, url: str) -> bytes:
 
 
 async def _x_fallback_photos(client, url: str) -> list[str]:
-    """For a PASTED (text-only) tweet URL, yt-dlp exposes no media when the
+    """For a PASTED (text-only) tweet URL, yt-dlp exposes no video when the
     tweet is photo-only. Fetch the tweet through twikit and return its photo
     CDN URLs so it can be delivered natively.
 
-    NOTE: twikit 2.3.3's ``User.__init__`` (user.py:102) does
-    ``legacy['entities']['description']['urls']`` without a ``.get`` — any
-    author whose description entity lacks a ``urls`` key makes the WHOLE
-    ``get_tweet_by_id`` raise ``KeyError('urls')`` before the tweet is usable.
-    That is a twikit bug, so besides catching it we also walk the raw
-    ``_data`` tree as a fallback so photo-only pasted tweets still deliver.
+    PRIMARY PATH IS THE RAW GRAPHQL WALK, not ``get_tweet_by_id``: twikit
+    2.3.3's ``User.__init__`` (user.py) reads ``legacy['entities']
+    ['description']['urls']`` and ``legacy['pinned_tweet_ids_str']`` without a
+    ``.get`` — any author missing those keys makes the WHOLE model parse raise
+    ``KeyError``, so ``get_tweet_by_id`` can never return a usable Tweet for
+    them (this is the recurring 'photo fallback fetch failed: urls' /
+    'pinned_tweet_ids_str' log line). ``client.gql.tweet_detail`` returns the
+    raw GraphQL JSON with NO model building, so the bug cannot fire; we walk
+    the media entities ourselves. The model path is kept only as a secondary
+    fallback for tweets the raw walk misses.
     """
     m = re.search(r"status(?:es)?/(\d+)", url)
     if not m:
         return []
 
     def _photo_from_media_dict(d):
-        u = d.get("media_url") or d.get("media_url_https") or d.get("url")
+        u = d.get("media_url_https") or d.get("media_url")
         if u and str(u).startswith("http"):
             return str(u)
         return None
 
+    out: list[str] = []
+    target_id = m.group(1)
+
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "photo" and (
+                    "media_url_https" in node or "media_url" in node):
+                u = _photo_from_media_dict(node)
+                if u and u not in out:
+                    out.append(u)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    def _focal_subtree(node):
+        """Return the subtree of the entry whose entryId is the focal tweet
+        (``tweet-<id>``), mirroring twikit's ``get_tweet_by_id`` matching. The
+        tweet_detail response also contains the thread's other tweets (replies,
+        related/quote tweets) — a global media walk would over-collect photos
+        that do NOT belong to the shared tweet."""
+        if isinstance(node, dict):
+            if node.get("entryId") == f"tweet-{target_id}":
+                return node
+            for v in node.values():
+                found = _focal_subtree(v)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for v in node:
+                found = _focal_subtree(v)
+                if found:
+                    return found
+        return None
+
+    # 1) Raw GraphQL walk — no Tweet/User models are built, so the twikit
+    #    User.__init__ KeyError bug cannot abort the fetch.
+    response = None
+    try:
+        response, _ = await client.gql.tweet_detail(target_id, None)
+    except Exception as e:
+        logger.warning(f"[DirectForward/X] tweet {url} gql detail failed: {e}")
+    if response:
+        if isinstance(response, dict) and response.get("errors"):
+            logger.warning(f"[DirectForward/X] tweet {url} gql detail errors: {response['errors']}")
+        subtree = _focal_subtree(response)
+        _walk(subtree or response)
+        if out:
+            return out
+
+    # 2) Secondary fallback: the normal twikit model path (works for most
+    #    authors; only authors with missing entity keys crash it).
     t = None
     try:
         t = await client.get_tweet_by_id(m.group(1))
     except Exception as e:
-        logger.warning(f"[DirectForward/X] tweet {url} photo fallback fetch failed: {e}")
-    out = []
-    # 1) Normal twikit property path.
+        logger.warning(f"[DirectForward/X] tweet {url} model fallback fetch failed: {e}")
     if t is not None:
         for med in (getattr(t, "media", None) or []):
             if str(getattr(med, "type", "")).lower() != "photo":
@@ -270,8 +325,8 @@ async def _x_fallback_photos(client, url: str) -> list[str]:
             u = getattr(med, "media_url", None) or getattr(med, "url", None)
             if u and str(u).startswith("http"):
                 out.append(str(u))
-    # 2) Raw _data walk (works even when the .media property is quirky or
-    #    get_tweet_by_id failed mid-parse but returned something).
+    # Raw _data walk (works even when the .media property is quirky or
+    # get_tweet_by_id failed mid-parse but returned something).
     data = getattr(t, "_data", None)
     if not out and isinstance(data, dict):
         legacy = data.get("legacy") or {}

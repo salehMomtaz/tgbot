@@ -383,7 +383,8 @@ delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
   X worker live-reloads its cookie jar (no restart on re-upload), photo-only
   pasted tweets are delivered natively instead of silently failing, and the
   TikTok worker's network calls no longer block the event loop (see the
-  [self-DM audit](docs/memory/tgbot-2026-08-11-selfdm-audit.md)).
+  [self-DM audit](docs/memory/tgbot-2026-08-11-selfdm-audit.md) and the
+  [X photo-paste fix](docs/memory/tgbot-2026-08-11-x-photo-paste-fix.md)).
 
 ---
 

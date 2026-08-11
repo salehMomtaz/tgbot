@@ -378,11 +378,18 @@ invariants** so you don't have to rediscover them.
     skip-list) — deleting the bridge state mid-run would make the bridge re-prime
     `last_seq` to newest and SKIP older messages (data-loss window). A photo-only
     pasted tweet (no video stream) is delivered natively from `_x_fallback_photos`
-    (walks `getattr(t,"media")` AND a raw `t._data['legacy']`
-    `extended_entities`/`entities` walk — twikit 2.3.3 `User.__init__` raises
-    `KeyError: 'urls'` on some authors, aborting `get_tweet_by_id`); if even
-    that finds nothing, `_x_deliver_tweet` sends a text-only note instead of
-    failing the queue task. See `docs/memory/tgbot-2026-08-11-selfdm-audit.md`.
+    — its PRIMARY path is a **raw `client.gql.tweet_detail` GraphQL walk** scoped
+    to the focal `tweet-<id>` entry (`_focal_subtree`, mirroring twikit's own
+    `get_tweet_by_id` matching), collecting `type == "photo"` media nodes via
+    `media_url_https`/`media_url`. This bypasses twikit 2.3.3's `User.__init__`
+    (reads `legacy['entities']['description']['urls']` /
+    `legacy['pinned_tweet_ids_str']` WITHOUT `.get`, so `get_tweet_by_id` raises
+    `KeyError('urls')` on some authors and aborts the whole call); the old model
+    path is kept only as a secondary fallback. Focal scoping is REQUIRED — the
+    tweet_detail response also contains thread replies/quote tweets, and a global
+    walk over-collects photos that don't belong to the shared tweet. If even that
+    finds nothing, `_x_deliver_tweet` sends a text-only note instead of failing
+    the queue task. See `docs/memory/tgbot-2026-08-11-x-photo-paste-fix.md`.
 
     **State file = shared across the three direct-forward workers; save
     merge-only (2026-08-11).** `direct_forward_state.json` is written by

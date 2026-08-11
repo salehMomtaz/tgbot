@@ -184,7 +184,9 @@ invisible.
   the upload ceiling (2 GB bot / 4 GB Premium) the format-selection keyboard is
   posted instead so you can pick a smaller quality.
 - **Photo-only tweet** (no video stream for yt-dlp) → delivered natively from
-  the share's CDN URLs, grouped when there is more than one.
+  the tweet's CDN URLs, grouped when there is more than one. Pasting a photo-only
+  tweet URL works too: the bot reads the tweet via twikit's raw GraphQL
+  (`gql.tweet_detail`, scoped to the focal tweet) and delivers the photos.
 - **DM photo / video attachment** → fetched through the authenticated twikit
   session (ton.twitter.com URLs 401 without cookies).
 - **Plain link** → generic download pipeline.
@@ -207,7 +209,7 @@ rebuilds the client and re-primes the cursor.
 | Share a reel / clip            | resolves the shortcode → yt-dlp pipeline (with your IG cookies) |
 | Paste any link                 | routes through the standard download pipeline (all sites) |
 | Share a tweet / tweet link (X) | **highest-quality auto-download** via the yt-dlp pipeline (with your X cookies); the format keyboard is posted when it exceeds the upload ceiling |
-| Photo-only tweet (X)           | delivered natively from the share's CDN URLs (grouped when > 1) |
+| Photo-only tweet (X)           | delivered natively from the tweet's CDN URLs (grouped when > 1); pasted links resolved via twikit's raw GraphQL walk |
 
 Downloads enqueue on the **same single-worker queue** as your interactive
 downloads, so a DM relay never starves you out of the bot.
