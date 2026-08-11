@@ -68,9 +68,36 @@ The challenge page HTML contains the video data (`playAddr`, `desc`, `author`) b
 
 A temporary workaround was attempted (direct CDN download via extracted `playAddr`), but TikTok serves CAPTCHA pages for direct HTTP requests, making it unreliable.
 
-## Related Files
+### Headless Browser Analysis (Aug 11, 2026)
 
-- `utils/downloader/download.py` - TikTok retry logic with improved error messages
-- `utils/downloader/errors.py` - Error classification for TikTok challenge failures
-- `modules/direct_forward/tiktok.py` - Direct forward worker with connection test warning
-- `docs/memory/tgbot-tiktok-direct-dm.md` - Original implementation design
+**Old Challenge Format (what yt-dlp expects):**
+- Element with `id="cs"` containing base64-encoded challenge JSON
+- Elements with `id="wci"`, `id="rci"`, `id="rs"` for cookie names/values  
+- yt-dlp's `_solve_challenge_and_set_cookies()` parses this and solves the SHA256 challenge in pure Python
+
+**New Challenge Format (current TikTok):**
+- **No `id="cs"`, `id="wci"`, `id="rci"`, or `id="rs"` elements exist**
+- Page loads full React app with `webmssdk.js` (Mouse/Security SDK v1.0.0.388) and `secsdk.js` (SecSDK)
+- Challenge implemented in **JavaScript** requiring a full JS engine to execute
+- Uses sophisticated browser fingerprinting (canvas, WebGL, audio context, etc.)
+
+**Why yt-dlp fails:**
+```python
+# yt-dlp/extractor/tiktok.py _solve_challenge_and_set_cookies():
+challenge_data = traverse_obj(webpage, (
+    {find_element(id='cs', html=True)}, {extract_attributes}, 'class',
+    filter, {lambda x: f'{x}==='}, {base64.b64decode}, {json.loads}))
+
+if not challenge_data:
+    raise ExtractorError('Unexpected response from webpage request')  # FAILS HERE
+```
+The `find_element(id='cs', html=True)` returns `None` because the element doesn't exist in the new challenge page.
+
+**Working Page (with valid cookies):**
+- Contains `__UNIVERSAL_DATA_FOR_REHYDRATION__` script with full video data
+- Video URLs (`playAddr`, `downloadAddr`) embedded in the JSON
+- Video plays normally via blob URLs
+
+**Root Cause**: TikTok moved from a simple HTML-based challenge to a sophisticated JavaScript-based fingerprinting system (MSSDK/SecSDK). yt-dlp's Python-based solver cannot execute the required JavaScript.
+
+**Solution Path**: yt-dlp will likely add headless browser support (Playwright) for the TikTok extractor, similar to how they handle other sites with JS challenges.
