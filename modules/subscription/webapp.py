@@ -1,18 +1,21 @@
 """Subscription webapp — mounted on the existing FastAPI (direct TLS https://tgbot.southpark.ir:8080).
 
 Routes:
+  GET  /                               -> Landing (auto-redirect via Telegram WebApp)
   GET  /admin/subscription           -> Admin HTML panel (Telegram WebApp, admin only)
   GET  /admin/subscription/api       -> JSON settings + tiers + subs (GET: admin auth; POST: admin write)
   POST /admin/subscription/api       -> update settings (admin auth)
   GET  /app                          -> User portal HTML (any Telegram user via WebApp)
   GET  /api/user/status              -> JSON for user portal (requires valid initData, any user)
   GET  /api/tiers                    -> public tier list
+  GET  /api/botinfo                  -> bot username + domain
 
 Auth: X-Admin-Token == HMAC(BOT_TOKEN, "admin-sub") or valid Telegram initData signed by BOT_TOKEN.
   - Admin write requires X-Admin-Token OR initData where user.id == SYSTEM_CREATOR_ID.
   - User status requires any valid initData (identifies the user).
 
 Telegram Mini App docs: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+Professional UI: native tg.showPopup/showAlert + fallback modal/toast, safe-area aware (fullscreen), haptics.
 """
 from __future__ import annotations
 
@@ -42,11 +45,9 @@ def _verify_init_data(init_data: str):
         calc = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calc, recv_hash):
             return None
-        # optional freshness check: auth_date within 24h
         try:
             auth_date = int(params.get("auth_date", "0"))
             if auth_date and abs(int(time.time()) - auth_date) > 86400 * 2:
-                # allow 2 days skew, not strict
                 pass
         except Exception:
             pass
@@ -61,7 +62,6 @@ def _is_admin_auth(request: Request) -> bool:
     if tok and hmac.compare_digest(tok, _admin_token()):
         return True
     init_data = request.headers.get("X-Telegram-Init-Data", "") or request.query_params.get("tgWebAppData", "") or ""
-    # Telegram WebApp also sends initData via header; fallback to query
     user = _verify_init_data(init_data) if init_data else None
     if user:
         try:
@@ -75,15 +75,12 @@ def _is_admin_auth(request: Request) -> bool:
 
 def _parse_user_from_request(request: Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "") or request.headers.get("X-Telegram-Initdata", "") or request.query_params.get("tgWebAppData", "") or ""
-    # WebApp JS sends via X-Telegram-Init-Data header; fallback to query
     if not init_data:
-        # try to get from referer? fallback: allow header case-insensitive via starlette
         init_data = request.headers.get("x-telegram-init-data", "") or ""
     if init_data:
         u = _verify_init_data(init_data)
         if u:
             return u
-    # also try raw query string for /app?tgWebAppData=...
     qs = str(request.query_params.get("tgWebAppData", "") or "")
     if qs:
         u = _verify_init_data(qs)
@@ -92,33 +89,50 @@ def _parse_user_from_request(request: Request):
     return None
 
 
-HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Subscription Admin — tgbot</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+# --- Shared UI helpers (injected into each page) ---
+_SHARED_UI = r"""
 <style>
- :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; --tg-content-top:0px; color-scheme: dark; }
- *{box-sizing:border-box}
- html,body{margin:0;min-height:100%}
- body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
- header{position:sticky;top:0;z-index:10; background:rgba(15,17,21,0.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); padding:10px 0 12px; margin:-12px -16px 12px; padding-left:16px; padding-right:56px; padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top)); border-bottom:1px solid #22262f}
- header h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.2px;line-height:1.2}
- header p{margin:4px 0 0;font-size:12px;opacity:.6}
- .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0; border:1px solid #232735; box-shadow:0 1px 0 rgba(0,0,0,.3)}
- label{display:flex;justify-content:space-between;align-items:center;margin:10px 0;gap:12px}
- label input[type="checkbox"]{width:18px;height:18px;flex:0 0 auto}
- input,textarea,select{padding:9px 10px;border-radius:10px;border:1px solid #2a2e38;background:#0f1115;color:#fff;flex:1; font:inherit}
- textarea{resize:vertical;min-height:84px}
- button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:700}
- button:active{transform:scale(.98)} button:disabled{opacity:.5}
- table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid #232735;text-align:left;font-size:13px;word-break:break-word}
- th{opacity:.7;font-weight:600}
- .ok{color:#6f6} .warn{color:#fa0} .muted{opacity:.6;font-size:12px}
- .pill{display:inline-block;background:#242836;border-radius:999px;padding:3px 9px;font-size:12px;margin:3px;border:1px solid #2a2e38}
- .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
- @media(max-width:560px){ .grid2{grid-template-columns:1fr} }
+ :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; --bg:#0f1115; --card:#1a1d24; --card-b:#232735; --text:#e6e6e6; --muted:#9aa0b3; --accent:#2ea6ff; --ok:#30d158; --warn:#ff9f0a; --err:#ff453a; color-scheme: dark; }
+ *{box-sizing:border-box} html,body{margin:0;min-height:100%} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;background:var(--bg);color:var(--text);line-height:1.45}
+ a{color:var(--accent)}
+ /* safe-area aware */
+ .page{max-width:760px;margin:0 auto;padding:16px;padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top));padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom))}
+ /* header */
+ .hdr{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.86);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);margin:-12px -16px 16px;padding:12px 16px 12px;border-bottom:1px solid #22262f;padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top));padding-right:56px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+ .hdr h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.2px}
+ .hdr small{opacity:.6;font-size:12px}
+ .card{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 1px 0 rgba(0,0,0,.28)}
+ .muted{color:var(--muted);font-size:12px}
+ .row{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
+ .btn{appearance:none;border:0;background:var(--accent);color:#fff;padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none}
+ .btn:active{transform:scale(.98)} .btn:disabled{opacity:.5}
+ .btn-alt{background:#242836;color:var(--text);border:1px solid var(--card-b)}
+ .btn-ghost{background:transparent;border:1px solid var(--card-b);color:var(--text)}
+ input,textarea,select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #2a2e38;background:#0f1115;color:#fff;font:inherit}
+ textarea{resize:vertical;min-height:96px}
+ table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid var(--card-b);text-align:left;font-size:13px} th{opacity:.7}
+ .pill{display:inline-block;background:#242836;border:1px solid #2a2e38;border-radius:999px;padding:3px 9px;font-size:12px;margin:3px}
+ .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid var(--card-b)}
+ .badge-free{background:#2a2e38;color:#aaa} .badge-basic{background:#1b3a5a} .badge-plus{background:#3a2e1b} .badge-pro{background:#3a1b3a}
+ /* toast stack */
+ #toast-stack{position:fixed;left:50%;bottom:calc(16px + var(--tg-safe-bottom) + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:100;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;max-width:min(92vw,560px);width:100%}
+ .toast{pointer-events:auto;background:#1e232f;border:1px solid #2a2e38;color:var(--text);padding:12px 14px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.4);display:flex;gap:10px;align-items:flex-start;animation:toastIn .22s ease}
+ .toast.ok{border-color:rgba(48,209,88,.35)} .toast.err{border-color:rgba(255,69,58,.35)} .toast.warn{border-color:rgba(255,159,10,.35)}
+ .toast .t-ic{font-size:16px;flex:0 0 auto;margin-top:1px}
+ .toast .t-msg{flex:1;font-size:13px;line-height:1.35}
+ @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+ /* modal */
+ #tg-modal{position:fixed;inset:0;z-index:90;display:none}
+ #tg-modal.open{display:block}
+ .modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+ .modal-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(92vw,420px);background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:18px;box-shadow:0 18px 48px rgba(0,0,0,.5);max-height:min(80vh,600px);overflow:auto}
+ .modal-card h3{margin:0 0 8px;font-size:16px;display:flex;align-items:center;gap:8px}
+ .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+ .skeleton{background:linear-gradient(90deg,#1a1d24 25%,#232735 37%,#1a1d24 63%);background-size:400% 100%;animation:shimmer 1.2s ease infinite;border-radius:10px;height:14px}
+ @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
 </style>
-<header><h1>💳 Subscription Admin</h1><p>Manage plans, free tier & force-join channels</p></header>
-<div id="app">Loading…</div>
+<div id="toast-stack" aria-live="polite"></div>
+<div id="tg-modal" aria-hidden="true"><div class="modal-backdrop" onclick="UI.closeModal()"></div><div class="modal-card" role="dialog" aria-modal="true"><h3 id="modal-title"></h3><div id="modal-body" style="font-size:13px;opacity:.9"></div><div class="modal-actions" id="modal-actions"></div></div></div>
 <script>
 const tg = window.Telegram?.WebApp;
 (function(){
@@ -126,19 +140,92 @@ const tg = window.Telegram?.WebApp;
   try{ tg.ready(); tg.expand(); }catch(e){}
   function applySafe(){
     try{
-      const sa = tg.safeAreaInset || {top:0,bottom:0};
-      const cs = tg.contentSafeAreaInset || {top:0,bottom:0};
-      document.documentElement.style.setProperty('--tg-safe-top', (sa.top||0)+'px');
-      document.documentElement.style.setProperty('--tg-safe-bottom', (sa.bottom||0)+'px');
-      document.documentElement.style.setProperty('--tg-content-top', (cs.top||0)+'px');
-      // also use viewport height for fullscreen
-      const vh = tg.viewportStableHeight || tg.viewportHeight;
-      if(vh) document.documentElement.style.setProperty('--tg-vh', vh+'px');
+      const sa=tg.safeAreaInset||{top:0,bottom:0};
+      const cs=tg.contentSafeAreaInset||{top:0,bottom:0};
+      document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px');
+      document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px');
+      // Telegram theme
+      const tp=tg.themeParams||{};
+      if(tp.bg_color) document.documentElement.style.setProperty('--bg',tp.bg_color);
+      if(tp.secondary_bg_color) document.documentElement.style.setProperty('--card',tp.secondary_bg_color);
+      if(tp.text_color) document.documentElement.style.setProperty('--text',tp.text_color);
+      if(tp.hint_color) document.documentElement.style.setProperty('--muted',tp.hint_color);
+      if(tp.button_color) document.documentElement.style.setProperty('--accent',tp.button_color);
     }catch(e){}
   }
   applySafe();
-  try{ tg.onEvent('viewportChanged', applySafe); tg.onEvent('safeAreaChanged', applySafe); tg.onEvent('contentSafeAreaChanged', applySafe); }catch(e){}
+  try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe); tg.onEvent('themeChanged',applySafe);}catch(e){}
 })();
+const UI = {
+  toast(msg,type="info",ms=3200){
+    const stack=document.getElementById('toast-stack');
+    if(!stack) return;
+    const el=document.createElement('div');
+    el.className='toast '+(type==='ok'?'ok':type==='err'?'err':type==='warn'?'warn':'');
+    const ic = type==='ok'?'✅':type==='err'?'⛔':type==='warn'?'⚠️':'ℹ️';
+    el.innerHTML=`<span class="t-ic">${ic}</span><span class="t-msg"></span>`;
+    el.querySelector('.t-msg').textContent=msg;
+    stack.appendChild(el);
+    try{ tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(type==='err'?'error':type==='warn'?'warning':'success'); }catch(e){}
+    setTimeout(()=>{ el.style.opacity='0'; el.style.transform='translateY(4px)'; el.style.transition='all .2s'; setTimeout(()=>el.remove(),220); },ms);
+  },
+  showPopup(title,message,buttons){
+    // Prefer native Telegram popup (authoritative, themed) when inside TG
+    try{
+      if(tg && tg.showPopup){
+        const ps = {title: title||"", message: message||"", buttons: buttons||[{id:"ok",type:"default",text:"OK"}]};
+        tg.showPopup(ps);
+        return;
+      }
+      if(tg && tg.showAlert){
+        tg.showAlert((title? title+": ":"")+message);
+        return;
+      }
+    }catch(e){}
+    this.openModal(title,message,buttons);
+  },
+  openModal(title,message,buttons){
+    const m=document.getElementById('tg-modal');
+    if(!m) return alert((title?title+": ":"")+message);
+    document.getElementById('modal-title').textContent=title||"Notice";
+    const body=document.getElementById('modal-body');
+    // allow HTML for our own formatted messages, but plain text for external errors
+    if(String(message).includes('<') && String(message).includes('>')) body.innerHTML=message;
+    else body.textContent=message;
+    const acts=document.getElementById('modal-actions');
+    acts.innerHTML='';
+    (buttons||[{id:"ok",type:"default",text:"OK"}]).forEach(b=>{
+      const btn=document.createElement('button');
+      btn.className = b.type==='destructive'?'btn':b.type==='default'?'btn':'btn-alt';
+      btn.textContent=b.text||b.id;
+      btn.onclick=()=>{ UI.closeModal(); if(b.onClick) b.onClick(b.id); };
+      acts.appendChild(btn);
+    });
+    m.classList.add('open'); m.setAttribute('aria-hidden','false');
+  },
+  closeModal(){
+    const m=document.getElementById('tg-modal');
+    if(m){ m.classList.remove('open'); m.setAttribute('aria-hidden','true'); }
+  },
+  parseDetail(raw){
+    try{
+      const j=JSON.parse(raw);
+      return j.detail||j.error||raw;
+    }catch(e){ return raw; }
+  }
+};
+</script>
+"""
+
+HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Subscription Admin — tgbot</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+""" + _SHARED_UI + r"""
+<div class="page">
+<header><div><h1>💳 Subscription Admin</h1><small>Manage plans, free tier & force-join</small></div><a href="/" style="font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap">← Home</a></header>
+<div id="app"><div class="card"><div class="skeleton" style="height:18px;width:60%"></div><div class="skeleton" style="height:12px;width:90%;margin-top:10px"></div><div class="skeleton" style="height:12px;width:70%;margin-top:8px"></div></div></div>
+</div>
+<script>
 let token = localStorage.getItem('admin_token')||'';
 async function api(method, body){
   const h={'Content-Type':'application/json'};
@@ -146,7 +233,11 @@ async function api(method, body){
   const initData = tg?.initData||'';
   if(initData) h['X-Telegram-Init-Data']=initData;
   const r = await fetch('/admin/subscription/api', {method, headers:h, body: body? JSON.stringify(body):undefined});
-  if(!r.ok) throw new Error(await r.text());
+  if(!r.ok){
+    const raw = await r.text();
+    const detail = UI.parseDetail(raw);
+    throw new Error(detail||`HTTP ${r.status}`);
+  }
   return r.json();
 }
 async function load(){
@@ -156,28 +247,35 @@ async function load(){
   const chTxt = chans.length ? chans.map(c=> c.username || c.id).join(', ') : '— (none)';
   document.getElementById('app').innerHTML = `
   <div class=card>
-    <h3>Settings</h3>
+    <h3 style="margin:0 0 10px">Settings</h3>
     <label>Subscription mode <input type=checkbox id=en ${s.enabled?'checked':''}></label>
     <label>Free tier <input type=checkbox id=free ${s.free_enabled?'checked':''}></label>
-    <label style="flex-direction:column;align-items:stretch">Force-join channels (multi, comma or one per line)
-      <textarea id=chans rows=3 style="width:100%;padding:8px;border-radius:8px;border:1px solid #333;background:#0f1115;color:#fff">${chans.map(c=> c.username || c.id).join('\n')}</textarea>
-      <span class=muted>Examples: @mychannel, @other, -100123...  One per line. Members of ALL are required for free tier. Leave empty for no requirement.</span>
+    <label style="flex-direction:column;align-items:stretch">Force-join channels (one per line or comma)
+      <textarea id=chans placeholder="@mychannel or -100123...">${chans.map(c=> c.username || c.id).join('\n')}</textarea>
+      <span class=muted>Members of <b>all</b> listed channels are required for free tier. Leave empty for no requirement. Example: <code>@mychannel</code></span>
     </label>
-    <button onclick="save()">💾 Save</button> <span id=msg></span>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+      <button onclick="save()">💾 Save</button> <span id=msg class=muted></span>
+    </div>
     <p class=muted>Current: <code>${chTxt}</code></p>
   </div>
-  <div class=card><h3>Tiers</h3><table><tr><th>Tier</th><th>Daily</th><th>Stars</th><th>TON</th><th>Priority</th></tr>
-    ${Object.entries(tiers).map(([k,v])=>`<tr><td>${v.label} (${k})</td><td>${v.daily_limit}</td><td>${v.price_stars}</td><td>${v.price_ton||'-'}</td><td>${v.priority}</td></tr>`).join('')}
-  </table><p class=muted>Free priority 0 (last in queue), Basic 1, Plus 2, Pro 3. Edit tiers in utils/subscription/tiers.py</p></div>
-  <div class=card><h3>Active subscriptions (${Object.keys(d.subscriptions).length})</h3>
+  <div class=card><h3 style="margin-top:0">Tiers</h3><table><tr><th>Tier</th><th>Daily</th><th>Stars</th><th>TON</th><th>Priority</th></tr>
+    ${Object.entries(tiers).map(([k,v])=>`<tr><td><b>${v.label}</b> <span class=muted>(${k})</span></td><td>${v.daily_limit}</td><td>${v.price_stars}</td><td>${v.price_ton||'-'}</td><td>${v.priority}</td></tr>`).join('')}
+  </table><p class=muted>Free priority 0 (last in queue). Edit in <code>utils/subscription/tiers.py</code></p></div>
+  <div class=card><h3 style="margin-top:0">Active subscriptions (${Object.keys(d.subscriptions).length})</h3>
     <table><tr><th>User</th><th>Tier</th><th>Until</th><th>By</th></tr>
-    ${Object.entries(d.subscriptions).map(([uid,sub])=>`<tr><td><code>${uid}</code></td><td>${sub.tier}</td><td>${new Date(sub.until*1000).toLocaleString()}</td><td>${sub.granted_by}</td></tr>`).join('') || '<tr><td colspan=4 style="opacity:.6">none</td></tr>'}
+    ${Object.entries(d.subscriptions).map(([uid,sub])=>`<tr><td><code>${uid}</code></td><td>${sub.tier}</td><td>${new Date(sub.until*1000).toLocaleString()}</td><td><span class=pill>${sub.granted_by}</span></td></tr>`).join('') || '<tr><td colspan=4 style="opacity:.6;text-align:center;padding:16px">No active subscriptions</td></tr>'}
     </table>
   </div>
-  <div class=card style="opacity:.8;font-size:12px">
-    <b>Auth:</b> paste admin token from bot <code>/admin_token</code> if Telegram WebApp initData not available. Token is stored locally.
-    <br><input id=tok placeholder="admin token" value="${token}" style="width:260px;margin-top:8px"> <button onclick="setTok()">Set</button>
-    <p class=muted>Admin write requires token or Telegram initData from creator. This page is only reachable via <code>https://tgbot.southpark.ir:8080/admin/subscription</code> (wildcard *.southpark.ir, direct TLS on 8080). For user status, open <a href="/app" style="color:#2ea6ff">/app</a> inside Telegram.</p>
+  <div class=card>
+    <h3 style="margin-top:0">Admin auth</h3>
+    <p class=muted>Paste token from bot <code>/admin_token</code> to use this page outside Telegram. Inside Telegram, creator <code>initData</code> authenticates automatically.</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id=tok placeholder="admin token (16 hex)" value="${token}" style="max-width:260px">
+      <button class="btn-alt" onclick="setTok()">Set token</button>
+      <button class="btn-ghost" onclick="clearTok()">Clear</button>
+    </div>
+    <p class=muted>Token stored locally (<code>localStorage</code>). Admin write requires it or creator WebApp. Page is <code>https://tgbot.southpark.ir:8080/admin/subscription</code>.</p>
   </div>`;
 }
 async function save(){
@@ -191,93 +289,83 @@ async function save(){
     return null;
   }).filter(Boolean);
   const body={enabled: document.getElementById('en').checked, free_enabled: document.getElementById('free').checked, channels};
-  // keep legacy fields in sync for backwards compat
   if(channels.length){ body.channel_id = channels[0].id||0; body.channel_username = channels[0].username||''; } else { body.channel_id=0; body.channel_username=''; }
-  try{ await api('POST', body); document.getElementById('msg').textContent=' ✓ saved'; load(); }catch(e){ document.getElementById('msg').textContent=' ✗ '+e.message; }
+  const btn=document.querySelector('button[onclick="save()"]');
+  if(btn) btn.disabled=true;
+  try{
+    await api('POST', body);
+    UI.toast('Settings saved','ok');
+    document.getElementById('msg').textContent=' ✓ saved';
+    load();
+  }catch(e){
+    const msg = e.message||"Save failed";
+    UI.showPopup("Save failed", msg, [{id:"ok",type:"default",text:"OK"}]);
+    document.getElementById('msg').textContent=' ✗ '+msg;
+  } finally { if(btn) btn.disabled=false; }
 }
-function setTok(){ token=document.getElementById('tok').value.trim(); localStorage.setItem('admin_token',token); alert('saved'); load(); }
-load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'+e.message+'</p><p>Tip: open this page inside Telegram (Admin → Subscription → 🌐 WebApp) or set token via /admin_token.</p>' );
+function setTok(){ token=document.getElementById('tok').value.trim(); localStorage.setItem('admin_token',token); UI.toast('Token saved','ok'); load(); }
+function clearTok(){ localStorage.removeItem('admin_token'); token=''; const el=document.getElementById('tok'); if(el) el.value=''; UI.toast('Token cleared','warn'); }
+load().catch(e=>{
+  const raw = e.message||String(e);
+  const detail = UI.parseDetail(raw);
+  const isAuth = detail.includes('Forbidden') || detail.includes('admin auth');
+  document.getElementById('app').innerHTML = `
+    <div class=card style="border-color:rgba(255,69,58,.35)">
+      <h3 style="margin:0;display:flex;gap:8px;align-items:center">⛔ ${isAuth ? 'Admin access required' : 'Failed to load'}</h3>
+      <p style="margin:8px 0 0;opacity:.9">${detail}</p>
+      ${isAuth ? `<div style="background:#1e1515;border:1px solid #3a2a2a;border-radius:10px;padding:12px;margin-top:12px"><p class=muted style="margin:0 0 8px"><b>How to open correctly:</b></p><ol style="margin:0 0 0 18px;font-size:13px;opacity:.9"><li>In Telegram: bot → <code>/start</code> → <code>🛠 Console</code> → <code>💳 Subscriptions</code> → <code>🌐 WebApp</code> (passes creator <code>initData</code>)</li><li>Or set Menu Button to <code>https://tgbot.southpark.ir:8080/</code> — root auto-redirects</li><li>Or outside Telegram: send <code>/admin_token</code> in bot, copy token, paste above and <b>Set token</b></li></ol></div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <a class=btn href="/">← Home</a>
+        <button class="btn-alt" onclick="location.reload()">🔄 Retry</button>
+      </div>
+    </div>
+    <div class=card><p class=muted>Tip: this page needs <code>X-Admin-Token</code> or creator WebApp. User portal is <a href="/app">/app</a>.</p></div>`;
+  if(isAuth) UI.showPopup("Admin access required", detail, [{id:"ok",type:"default",text:"OK"}]);
+});
 </script>
 """
 
 HTML_ROOT = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>tgbot — Media Downloader</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
- :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; color-scheme: dark; }
- *{box-sizing:border-box}
- html,body{margin:0;min-height:100%}
- body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
- h1{font-size:22px;margin:10px 0} h2{font-size:18px;margin:16px 0 8px}
- .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0;border:1px solid #232735}
- .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
- button{background:#2ea6ff;color:#fff;border:0;padding:12px 18px;border-radius:10px;cursor:pointer;font-weight:700;width:100%;margin:8px 0}
- button.alt{background:#242836} a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;margin:6px 0}
- table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #232735;text-align:left;font-size:13px}
- .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;background:#242836}
- header{padding-right:56px}
-</style>
-<div id="root">
-<h1>📥 tgbot</h1>
-<div id="app">Loading…</div>
+""" + _SHARED_UI + r"""
+<div class="page">
+<h1 style="margin:6px 0 2px">📥 tgbot</h1><p class=muted style="margin:0 0 12px">Private media downloader — <code>tgbot.southpark.ir:8080</code></p>
+<div id="app"><div class=card><div class="skeleton" style="height:16px;width:70%"></div><div class="skeleton" style="height:12px;width:90%;margin-top:10px"></div></div></div>
 </div>
 <script>
-const tg = window.Telegram?.WebApp;
-(function(){ if(!tg) return; try{ tg.ready(); tg.expand(); }catch(e){} function applySafe(){ try{ const sa=tg.safeAreaInset||{top:0,bottom:0}; const cs=tg.contentSafeAreaInset||{top:0,bottom:0}; document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px'); document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px'); }catch(e){} } applySafe(); try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe);}catch(e){} })();
-function isTelegram(){ return !!(tg && tg.initData && tg.initData.length > 20); }
+function isTelegram(){ const tg=window.Telegram?.WebApp; return !!(tg && tg.initData && tg.initData.length>20); }
 async function loadRoot(){
-  const viaTG = isTelegram();
-  const info = document.getElementById('app');
-  // auto-redirect when opened as Telegram WebApp (BotFather Menu Button = "/")
-  if(viaTG){
-    info.innerHTML = `<div class=card><p>🔗 Telegram detected — redirecting to your portal…</p><p class=muted>initData present, checking role…</p></div>`;
+  const tg=window.Telegram?.WebApp;
+  const info=document.getElementById('app');
+  if(isTelegram()){
+    info.innerHTML=`<div class=card><p>🔗 Telegram detected — redirecting…</p><p class=muted>Checking role…</p></div>`;
     try{
       const h={}; if(tg.initData) h['X-Telegram-Init-Data']=tg.initData;
-      const r = await fetch('/api/user/status', {headers:h});
+      const r=await fetch('/api/user/status', {headers:h});
       if(r.ok){
-        const j = await r.json();
-        // creator/admin → admin panel, others → user portal
-        if(j.subscription && j.subscription.is_creator){
-          location.href = '/admin/subscription';
-          return;
-        }
+        const j=await r.json();
+        if(j.subscription && j.subscription.is_creator){ location.href='/admin/subscription'; return; }
       }
     }catch(e){}
-    location.href = '/app';
-    return;
+    location.href='/app'; return;
   }
-  // Outside Telegram — show beautiful landing
   let tiers={}; try{ tiers=(await (await fetch('/api/tiers')).json()).tiers||{}; }catch(e){}
   let botUser=""; try{ botUser=(await (await fetch('/api/botinfo')).json()).username||""; }catch(e){}
-  const botLink = botUser ? `https://t.me/${botUser}` : `https://t.me/`;
-  info.innerHTML = `
+  const botLink=botUser?`https://t.me/${botUser}`:`https://t.me/`;
+  info.innerHTML=`
   <div class=card>
-    <h2>Welcome — Private Media Downloader</h2>
-    <p class=muted>Download from YouTube (cookies+PO), Instagram, TikTok, X/Twitter & 1,700+ yt-dlp sites. FastAPI streams at <code>https://tgbot.southpark.ir:8080</code></p>
+    <h2 style="margin:0 0 8px">Welcome — Private Media Downloader</h2>
+    <p class=muted>Download from YouTube (cookies+PO), Instagram, TikTok, X/Twitter & 1,700+ yt-dlp sites. Streams at <code>https://tgbot.southpark.ir:8080</code></p>
     <a class=btn href="${botLink}" target="_blank">🤖 Open bot in Telegram</a>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <a class=btn style="flex:1;background:#242836" href="/app">👤 User Portal (/app)</a>
-      <a class=btn style="flex:1;background:#242836" href="/admin/subscription">🛠 Admin (/admin/subscription)</a>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <a class=btn style="flex:1;background:#242836" href="/app">👤 User Portal</a>
+      <a class=btn style="flex:1;background:#242836" href="/admin/subscription">🛠 Admin</a>
     </div>
-    <p class=muted>Tip: set BotFather Menu Button to <code>https://tgbot.southpark.ir:8080/</code> — this page auto-detects Telegram WebApp and sends users/admins to the right panel. User portal needs Telegram auth; admin needs creator initData or <code>/admin_token</code>.</p>
+    <p class=muted>Tip: set BotFather Menu Button to <code>https://tgbot.southpark.ir:8080/</code> — this page auto-detects Telegram and sends users/admins correctly.</p>
   </div>
-  <div class=card>
-    <h3>Plans</h3>
-    <table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>
-    ${Object.entries(tiers).map(([k,v])=>`<tr><td>${v.label} (${k})</td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('') || '<tr><td colspan=3 class=muted>loading…</td></tr>'}
-    </table>
-    <p class=muted>Free 5/d (last in queue) → Basic 100/d → Plus 500/d → Pro 2500/d. Pay via Telegram Stars (XTR) or TON memo = your user ID. Use <code>/subscription</code> in bot.</p>
-  </div>
-  <div class=card>
-    <h3>Direct links</h3>
-    <p class=muted>Bot domain: <code>https://tgbot.southpark.ir:8080</code> (wildcard *.southpark.ir, direct TLS on 8080, no nginx).</p>
-    <ul style="opacity:.8;font-size:13px">
-      <li><code>/app</code> — user subscription & quota (Telegram WebApp)</li>
-      <li><code>/admin/subscription</code> — admin console (creator only)</li>
-      <li><code>/api/tiers</code> — public tier JSON</li>
-      <li><code>/stream/...</code> — forwarded file streams (24h token)</li>
-    </ul>
-  </div>`;
+  <div class=card><h3 style="margin:0 0 8px">Plans</h3><table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>${Object.entries(tiers).map(([k,v])=>`<tr><td><b>${v.label}</b> <span class=muted>(${k})</span></td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('')||'<tr><td colspan=3 class=muted>loading…</td></tr>'}</table><p class=muted>Free 5/d (last) → Basic 100/d → Plus 500/d → Pro 2500/d. Pay via Stars (XTR) or TON memo = user ID. Use <code>/subscription</code> in bot.</p></div>
+  <div class=card><h3 style="margin:0 0 8px">Links</h3><ul style="margin:0 0 0 18px;font-size:13px;opacity:.9"><li><code>/app</code> — user portal (needs Telegram)</li><li><code>/admin/subscription</code> — admin (creator only)</li><li><code>/api/tiers</code> — public JSON</li><li><code>/stream/...</code> — file streams (24h)</li></ul></div>`;
 }
 loadRoot();
 </script>
@@ -286,27 +374,14 @@ loadRoot();
 HTML_USER = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>My Subscription — tgbot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>
- :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; color-scheme: dark; }
- *{box-sizing:border-box}
- html,body{margin:0;min-height:100%}
- body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
- h1{font-size:20px;margin:0} .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0;border:1px solid #232735}
- .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px}
- .badge-free{background:#2a2e38;color:#aaa} .badge-basic{background:#1b3a5a} .badge-plus{background:#3a2e1b} .badge-pro{background:#3a1b3a}
- button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:700;width:100%;margin:6px 0}
- button.alt{background:#242836}
- .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
- table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid #232735;text-align:left;font-size:13px}
- a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700}
- header{position:sticky;top:0;z-index:10; background:rgba(15,17,21,0.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); padding:10px 0 12px; margin:-12px -16px 12px; padding-left:16px; padding-right:56px; padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top)); border-bottom:1px solid #22262f; display:flex; justify-content:space-between; align-items:center}
- header h1{font-size:17px;margin:0;font-weight:800}
-</style>
-<header><h1>💳 My Subscription</h1><a href="/" style="font-size:12px;color:#2ea6ff;text-decoration:none;white-space:nowrap">← Home</a></header>
-<div id="app">Loading…</div>
+""" + _SHARED_UI + r"""
+<div class="page">
+<header><div><h1>💳 My Subscription</h1><small>Quota, history & upgrades</small></div><a href="/" style="font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap">← Home</a></header>
+<div id="app"><div class=card><div class="skeleton" style="height:16px;width:60%"></div><div class="skeleton" style="height:12px;width:85%;margin-top:10px"></div></div></div>
+</div>
 <script>
-const tg = window.Telegram?.WebApp; (function(){ if(!tg) return; try{ tg.ready(); tg.expand(); }catch(e){} function applySafe(){ try{ const sa=tg.safeAreaInset||{top:0,bottom:0}; document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px'); document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px'); }catch(e){} } applySafe(); try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe);}catch(e){} })();
 async function getStatus(){
+  const tg=window.Telegram?.WebApp;
   const initData = tg?.initData||'';
   const h={};
   if(initData) h['X-Telegram-Init-Data']=initData;
@@ -317,77 +392,58 @@ async function getStatus(){
   }
   return r.json();
 }
-async function getTiers(){
-  const r = await fetch('/api/tiers');
-  return r.json();
-}
-function tierBadge(t){ const c = {free:'badge-free', basic:'badge-basic', plus:'badge-plus', pro:'badge-pro'}[t.tier||'free']||'badge-free'; return `<span class="badge ${c}">${t.label||t.tier}</span>`; }
+async function getTiers(){ const r=await fetch('/api/tiers'); return r.json(); }
+function tierBadge(t){ const c={free:'badge-free',basic:'badge-basic',plus:'badge-plus',pro:'badge-pro'}[t.tier||'free']||'badge-free'; return `<span class="badge ${c}">${t.label||t.tier}</span>`; }
 async function load(){
   const [st, tiersRes] = await Promise.all([getStatus().catch(e=>({error:e.message})), getTiers().catch(()=>({tiers:{}}))]);
   if(st.error){
-    const tiers = tiersRes.tiers||{};
-    const isTG = !!(tg && tg.initData);
-    document.getElementById('app').innerHTML = `
-      <div class=card style="border:1px solid #3a2a2a;background:#1e1515">
-        <h3 style="margin-top:0">🔒 Telegram auth required</h3>
-        <p>${st.error.includes("Unauthorized") ? "This portal needs Telegram WebApp <code>initData</code> — open it from inside Telegram." : st.error}</p>
-        <p class=muted>${isTG ? "Telegram detected but verification failed — try closing and reopening from the bot's Menu Button. If you opened via browser, use Telegram." : "You opened <code>/app</code> in a normal browser. No <code>initData</code> — the bot can't tell who you are."}</p>
-        <p class=muted>BotFather Menu Button should point to <code>https://tgbot.southpark.ir:8080/</code> (root) or <code>/app</code> — root auto-redirects users vs admins.</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
-          <a class=btn href="/">← Back to Home (/)</a>
-          <button class=alt onclick="location.reload()">🔄 Retry</button>
-        </div>
+    const tiers=tiersRes.tiers||{};
+    const tg=window.Telegram?.WebApp;
+    const isTG=!!(tg && tg.initData);
+    const detail=st.error;
+    const isAuth=detail.includes('Unauthorized');
+    document.getElementById('app').innerHTML=`
+      <div class=card style="border-color:rgba(255,69,58,.35)">
+        <h3 style="margin:0;display:flex;gap:8px;align-items:center">🔒 ${isAuth?'Telegram auth required':'Failed to load'}</h3>
+        <p style="margin:8px 0 0">${isAuth ? "This portal needs Telegram WebApp <code>initData</code> — open it from inside Telegram." : detail}</p>
+        <p class=muted>${isTG ? "Telegram detected but verification failed — close and reopen from Menu Button." : "You opened <code>/app</code> in a browser. No <code>initData</code> — bot can't identify you."}</p>
+        <p class=muted>BotFather Menu Button → <code>https://tgbot.southpark.ir:8080/</code> auto-redirects.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><a class=btn href="/">← Home</a><button class="btn-alt" onclick="location.reload()">🔄 Retry</button></div>
       </div>
-      <div class=card>
-        <h3>Plans (public)</h3>
-        <table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>
-        ${Object.entries(tiers).map(([k,v])=>`<tr><td>${v.label} (${k})</td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('') || '<tr><td colspan=3 class=muted>—</td></tr>'}
-        </table>
-        <p class=muted>Use <code>/subscription</code> inside the bot to buy with Stars. Outside Telegram you can only browse.</p>
-      </div>`;
+      <div class=card><h3 style="margin:0 0 8px">Plans (public)</h3><table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>${Object.entries(tiers).map(([k,v])=>`<tr><td><b>${v.label}</b> <span class=muted>(${k})</span></td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('')||'<tr><td colspan=3 class=muted>—</td></tr>'}</table><p class=muted>Use <code>/subscription</code> in bot to buy.</p></div>`;
+    if(isAuth) UI.showPopup("Telegram auth required", "Open this page inside Telegram via the bot's Menu Button (initData).", [{id:"ok",type:"default",text:"OK"}]);
     return;
   }
-  const tiers = tiersRes.tiers || {};
-  const sub = st.subscription;
-  const quota = st.quota || {};
-  const hist = st.history || [];
-  const settings = st.settings || {};
-  const until = sub && sub.until ? new Date(sub.until*1000).toLocaleString() : '—';
-  const tierInfo = (sub && tiers[sub.tier]) || tiers['free'] || {label:'Free', daily_limit:5};
-  document.getElementById('app').innerHTML = `
+  const tiers=tiersRes.tiers||{}; const sub=st.subscription; const quota=st.quota||{}; const hist=st.history||[]; const settings=st.settings||{};
+  const until=sub && sub.until ? new Date(sub.until*1000).toLocaleString() : '—';
+  const tierInfo=(sub && tiers[sub.tier])||tiers['free']||{label:'Free',daily_limit:5};
+  document.getElementById('app').innerHTML=`
   <div class=card>
     <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">Status</h3>${tierBadge(tierInfo)}</div>
     <div class=row><span>Tier</span><b>${tierInfo.label} (${sub?sub.tier:'free'})</b></div>
     <div class=row><span>Until</span><span>${until}</span></div>
     <div class=row><span>Daily quota</span><span>${quota.remaining ?? '?'} / ${quota.limit ?? tierInfo.daily_limit} left</span></div>
     <div class=row><span>Today used</span><span>${quota.used ?? 0}</span></div>
-    ${settings.enabled ? `<p class=muted>Subscription mode ${settings.enabled?'ON':'OFF'} · Free ${settings.free_enabled?'enabled (join channels)':'disabled'} · Queue priority ${tierInfo.priority ?? 0}</p>` : '<p class=muted>Subscription mode OFF — unlimited (legacy)</p>'}
+    ${settings.enabled ? `<p class=muted>Mode ${settings.enabled?'ON':'OFF'} · Free ${settings.free_enabled?'on':'off'} · Priority ${tierInfo.priority ?? 0}</p>` : '<p class=muted>Subscription OFF — unlimited (legacy)</p>'}
   </div>
   <div class=card>
-    <h3>Upgrade — Telegram Stars & TON</h3>
-    ${Object.entries(tiers).filter(([k])=>k!=='free').map(([k,v])=>`
-      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border:1px solid #2a2e38;border-radius:10px;padding:10px;margin:8px 0">
-        <div><b>${v.label}</b><br><span class=muted>${v.daily_limit}/day · ${v.price_stars} ⭐ · ${v.price_ton? v.price_ton+' TON':''}</span></div>
-        <button style="width:auto;padding:8px 12px" onclick="buy('`+k+`')">⭐ Buy</button>
-      </div>
-    `).join('')}
-    <p class=muted>Tap ⭐ Buy to get a Stars invoice in the bot chat (use <code>/subscription</code>). TON: send exact amount with memo = your user ID, then tap Verify in bot.</p>
-    <button class=alt onclick="location.reload()">🔄 Refresh</button>
+    <h3 style="margin:0 0 8px">Upgrade — Stars & TON</h3>
+    ${Object.entries(tiers).filter(([k])=>k!=='free').map(([k,v])=>`<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;border:1px solid var(--card-b);border-radius:10px;padding:10px;margin:8px 0"><div><b>${v.label}</b><br><span class=muted>${v.daily_limit}/day · ${v.price_stars} ⭐ ${v.price_ton? '/ '+v.price_ton+' TON':''}</span></div><button style="width:auto;padding:8px 12px" onclick="buy('${k}')">⭐ Buy</button></div>`).join('')}
+    <p class=muted>Tap ⭐ to get Stars invoice in bot chat (via <code>/subscription</code>). TON: send exact amount memo = user ID, then Verify.</p>
+    <button class="btn-alt" onclick="location.reload()">🔄 Refresh</button>
   </div>
-  ${hist.length ? `<div class=card><h3>Recent usage (7d)</h3><table><tr><th>Date</th><th>Count</th></tr>${hist.map(h=>`<tr><td>${h.date}</td><td>${h.count}</td></tr>`).join('')}</table></div>` : ''}
-  <div class=card><p class=muted>Bot: <code>https://tgbot.southpark.ir:8080</code> · Streaming via <code>https://tgbot.southpark.ir:8080/stream/...</code> · Need help? Contact admin via bot.</p></div>
-  `;
+  ${hist.length ? `<div class=card><h3 style="margin:0 0 8px">Recent usage (7d)</h3><table><tr><th>Date</th><th>Count</th></tr>${hist.map(h=>`<tr><td>${h.date}</td><td>${h.count}</td></tr>`).join('')}</table></div>` : ''}
+  <div class=card><p class=muted>Domain <code>https://tgbot.southpark.ir:8080</code> · <code>/stream/...</code> 24h token · Help via bot.</p></div>`;
 }
 function buy(tier){
-  if(tg && tg.sendData){
-    // WebApp will send data to bot if bot handles web_app_data; fallback to open bot
-    try{ tg.sendData(JSON.stringify({action:'buy', tier})); }catch(e){}
-  }
-  // also try to open bot with start param
-  const bot = 'https://t.me/' + (location.hostname.includes('avistel') ? '' : '') + '';
-  alert('Open the bot and send /subscription, then tap ⭐ '+tier+'. (WebApp purchase will arrive as invoice in chat.)');
+  const tg=window.Telegram?.WebApp;
+  if(tg && tg.sendData){ try{ tg.sendData(JSON.stringify({action:'buy', tier})); }catch(e){} }
+  UI.toast('Open bot → /subscription → tap ⭐ '+tier,'info',2600);
 }
-load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'+e.message+'</p>');
+load().catch(e=>{
+  UI.showPopup("Load failed", e.message||String(e), [{id:"ok",type:"default",text:"OK"}]);
+  document.getElementById('app').innerHTML=`<div class=card style="border-color:rgba(255,69,58,.35)"><h3 style="margin:0">⛔ Load failed</h3><p>${e.message}</p><div style="display:flex;gap:8px"><a class=btn href="/">← Home</a><button class="btn-alt" onclick="location.reload()">Retry</button></div></div>`;
+});
 </script>
 """
 
@@ -414,7 +470,6 @@ def mount(fastapi_app):
 
     @fastapi_app.get("/api/botinfo")
     async def _botinfo():
-        # try to resolve bot username via getMe (cached 1h)
         username = ""
         try:
             import time as _t, urllib.request, json as _j
@@ -437,12 +492,7 @@ def mount(fastapi_app):
 
     @fastapi_app.get("/admin/subscription/api")
     async def _api_get(request: Request):
-        # admin read — require admin auth
-        # allow creator via initData; otherwise require X-Admin-Token
         if not _is_admin_auth(request):
-            # fall back: if request is from localhost (dev) without token, allow read?
-            # but for security, require at least valid initData or token on prod
-            # we allow read without auth for monitoring? No — return 403
             raise HTTPException(status_code=403, detail="Forbidden — admin auth required (X-Admin-Token or creator initData)")
         from utils.subscription.store import get_settings, list_subscriptions
         from utils.subscription.tiers import TIERS
@@ -457,7 +507,6 @@ def mount(fastapi_app):
             raise HTTPException(status_code=403, detail="Forbidden — provide valid X-Admin-Token or Telegram WebApp initData (creator only)")
         body = await request.json()
         from utils.subscription.store import set_settings
-        # sanitize
         channels = body.get("channels")
         if channels is not None and isinstance(channels, list):
             sanitized = []
@@ -476,16 +525,9 @@ def mount(fastapi_app):
                     cuser = ""
                 if cid or cuser:
                     sanitized.append({"id": cid, "username": cuser})
-            # also sync legacy
             ch_id = sanitized[0]["id"] if sanitized else 0
             ch_user = sanitized[0]["username"] if sanitized else ""
-            new_s = set_settings(
-                enabled=bool(body.get("enabled")),
-                free_enabled=bool(body.get("free_enabled")),
-                channels=sanitized,
-                channel_id=ch_id,
-                channel_username=ch_user,
-            )
+            new_s = set_settings(enabled=bool(body.get("enabled")), free_enabled=bool(body.get("free_enabled")), channels=sanitized, channel_id=ch_id, channel_username=ch_user)
         else:
             channel_id = body.get("channel_id", 0)
             try:
@@ -497,23 +539,10 @@ def mount(fastapi_app):
                 channel_username = "@" + channel_username
             if channel_username == "@":
                 channel_username = ""
-            # if username provided without id, keep channels list in sync
             if channel_id or channel_username:
-                new_s = set_settings(
-                    enabled=bool(body.get("enabled")),
-                    free_enabled=bool(body.get("free_enabled")),
-                    channels=[{"id": channel_id, "username": channel_username}],
-                    channel_id=channel_id,
-                    channel_username=channel_username,
-                )
+                new_s = set_settings(enabled=bool(body.get("enabled")), free_enabled=bool(body.get("free_enabled")), channels=[{"id": channel_id, "username": channel_username}], channel_id=channel_id, channel_username=channel_username)
             else:
-                new_s = set_settings(
-                    enabled=bool(body.get("enabled")),
-                    free_enabled=bool(body.get("free_enabled")),
-                    channels=[],
-                    channel_id=0,
-                    channel_username="",
-                )
+                new_s = set_settings(enabled=bool(body.get("enabled")), free_enabled=bool(body.get("free_enabled")), channels=[], channel_id=0, channel_username="")
         try:
             from main import log_event
             import asyncio
@@ -528,33 +557,21 @@ def mount(fastapi_app):
         if not user or not user.get("id"):
             raise HTTPException(status_code=401, detail="Unauthorized — open this page inside Telegram (valid initData required)")
         uid = int(user["id"])
-        from utils.subscription.store import get_settings, get_subscription, is_subscription_active
+        from utils.subscription.store import get_settings, is_subscription_active
         from utils.subscription.tiers import TIERS
-        from utils.subscription.quota import check_quota, _usage_for
+        from utils.subscription.quota import check_quota
         from utils.gate import load_database
         active, sub = is_subscription_active(uid)
         if not sub:
-            # free tier pseudo-sub
             sub = {"tier": "free", "until": 0}
-        # quota
         allowed, rem, lim = check_quota(uid)
-        # used today
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         db = load_database()
         usage = db.get("usage", {}).get(str(uid), {})
         used = usage.get(today, 0) if isinstance(usage, dict) else 0
-        # history 7 days
         hist = []
         for d, cnt in sorted(usage.items())[-7:]:
             hist.append({"date": d, "count": cnt})
-        # tier label for display
         tier_info = TIERS.get(sub.get("tier", "free"), TIERS["free"])
-        return JSONResponse({
-            "user": {"id": uid, "username": user.get("username", ""), "first_name": user.get("first_name", "")},
-            "subscription": sub,
-            "tier_info": tier_info,
-            "quota": {"allowed": allowed, "remaining": rem, "limit": lim, "used": used},
-            "history": hist,
-            "settings": get_settings(),
-        })
+        return JSONResponse({"user": {"id": uid, "username": user.get("username", ""), "first_name": user.get("first_name", "")}, "subscription": sub, "tier_info": tier_info, "quota": {"allowed": allowed, "remaining": rem, "limit": lim, "used": used}, "history": hist, "settings": get_settings()})
