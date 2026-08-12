@@ -69,7 +69,7 @@ with the open-source **bgutil-ytdlp-pot-provider**:
 - The yt-dlp plugin that actually requests tokens is **pip-installed**
   (`bgutil-ytdlp-pot-provider` in `requirements.txt`) and auto-discovered by
   yt-dlp — no symlink hack.
-- `utils/downloader.py::_apply_pot_options` injects `player_client=mweb` + the
+- `utils/downloader/url_normalize.py::_apply_pot_options` injects `player_client=mweb` + the
   plugin's PO-token options into every YouTube extraction. For YouTube it **raises
   `RuntimeError`** when the provider is down (no silent fallback).
 
@@ -86,7 +86,7 @@ crashes mid-write, the jar is corrupted. The bot therefore:
 - **Locks the live YouTube jar read-only** (`chmod 444`) at startup
   (`main.py::initialize_cookie_jars`). yt-dlp can read it but never overwrite it.
 - **Hands each download a disposable snapshot** copied into `cache/cookies/`
-  (`utils/downloader.py::get_cookies_for_url`). Snapshots are purged on a timer
+   (`utils/downloader/cookies.py::get_cookies_for_url`). Snapshots are purged on a timer
   and whenever a jar is replaced.
 - **Backs up the YouTube jar** to `cookies/youtube/ytcookies.backup` (read-only).
   The Admin Console can **Save Backup** and **Restore Backup**, and a missing/empty
@@ -109,7 +109,7 @@ A **live cookie test** (`diagnose_youtube_access`) probes YouTube three ways —
 
 ## 🪜 Strategy ladder & error classification
 
-`utils/downloader.py::extract_formats` walks a strategy ladder so the bot degrades
+`utils/downloader/formats.py::extract_formats` walks a strategy ladder so the bot degrades
 gracefully per site:
 
 - **YouTube:** cookies + PO token only (no lower rungs).
@@ -360,5 +360,6 @@ per-file by the uploader.
 - [x] Phase 13 — **Docker-withdrawal:** bare-metal install path as the default; docs rewritten.
 - [x] Phase 14 — **Cookie folder reorganization** (`cookies/youtube/`, `instagram/`, `tiktok/`, `twitter/`, `ytdlp/`).
 - [x] Phase 15 — **Instagram no-auth-first fix** (`extract_formats` tries no-auth for Instagram; cookies trigger HTTP 400 when session is stale/flagged).
-- [x] Phase 16 — **Direct-forward DM relay** (`modules/direct_forward.py`): poll the bot's own Instagram / X DM inboxes and relay DMed media (photos, videos, reels, story shares, tweet shares, links) to `DIRECT_FORWARD_CHAT_ID`. See [Direct-forward feature](#-direct-forward-feature-instagram--x-dm-relay) below.
+- [x] Phase 16 — **Direct-forward DM relay** (`modules/direct_forward/`): poll the bot's own Instagram / X DM inboxes and relay DMed media (photos, videos, reels, story shares, tweet shares, links) to `DIRECT_FORWARD_CHAT_ID`. See [Direct-forward feature](#-direct-forward-feature-instagram--x-dm-relay) below.
 - [x] Phase 17 — **Learn course** (`learn/`): 19-lesson Python curriculum using this bot as the case study.
+- [x] Phase 18 — **TikTok self-DM relay + module package refactor** (2026-08-10/11): TikTok DM relay added over the IM WebSocket (`modules/direct_forward/tiktok.py`, self-DM `0:1:{uid}:{uid}`); the large single-file modules `modules/admin.py`, `modules/direct_forward.py` and `utils/downloader.py` were split into importable packages (`modules/admin/`, `modules/direct_forward/`, `utils/downloader/`) — behaviour-preserving, no API change. Also: X photo-only tweet native delivery via raw `gql.tweet_detail` walk, and the startup crash-loop fix (undefined names + TikTok `/embed/<id>` rewrite).

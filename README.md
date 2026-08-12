@@ -47,9 +47,10 @@ required). Runs as a `systemd` service that survives reboots.
   independently playable; the Bot API handles 2 GB, a Premium userbot lifts it to
   4 GB. Only one extra segment ever sits on disk.
 - **📨 Direct-forward DM relay.** DM a video, reel, story, tweet share, or link to
-  the bot's own Instagram/X accounts and it relays into a Telegram chat — driven
-  by the platform's private APIs, no third-party services. X **self-DM** even
-  works when the conversation is X Chat-encrypted (a Deno sidecar decrypts it).
+   the bot's own Instagram / X / TikTok accounts and it relays into a Telegram chat — driven
+   by the platform's private APIs, no third-party services. X and TikTok use the
+   **self-DM** method (you DM yourself — no separate bot account); X even
+   works when the conversation is X Chat-encrypted (a Deno sidecar decrypts it).
 - **🔄 Auto-updating engine.** A background loop upgrades `yt-dlp` to its nightly
   build every 6 hours (preserving the `[default]` extras).
 - **🔗 Zero-disk streaming.** Forward a Telegram file → get an HTTP stream link.
@@ -362,11 +363,14 @@ The bot protects your jars:
 
 ## 📨 Direct-Forward (DM relay)
 
-You can DM media to the bot's **own Instagram and X accounts** and have it
-delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
+You can DM media to the bot's **own Instagram, X, and TikTok accounts** and have it
+ delivered into a Telegram chat (`DIRECT_FORWARD_CHAT_ID`):
 
 - Send photos, videos, reels, story shares, tweet shares, or plain links from
-  your personal account (whitelist or pairing handshake) to the bot's account.
+   your personal account (whitelist or pairing handshake) to the bot's account.
+- TikTok uses a persistent IM-WebSocket connection (`websockets`) to your own
+   self-DM (`0:1:{uid}:{uid}`); shares resolve to authors via the public oEmbed
+   endpoint and download through the normal yt-dlp pipeline.
 - The bot relays them into your Telegram chat; links go through the normal
   yt-dlp pipeline (with cookie jars), enqueued behind interactive downloads.
 - Instagram uses `instagrapi`; X uses `twikit` against the **self-DM** method

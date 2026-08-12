@@ -93,8 +93,8 @@ invariants** so you don't have to rediscover them.
    VPS the PO endpoint must never be internet-reachable. If you bump the provider
    ref and the markers stop matching, the manager logs a loud warning — verify it.
 
-3. **YouTube = cookies + PO token, no fallback.** `utils/downloader.py::
-   _apply_pot_options` raises `RuntimeError` when the provider is down for a
+ 3. **YouTube = cookies + PO token, no fallback.** `utils/downloader/url_normalize.py::
+    _apply_pot_options` raises `RuntimeError` when the provider is down for a
    YouTube URL. Do not add a cookies-only/no-auth fallback for YouTube. Other
    sites keep the strategy ladder — but **Instagram flips the ladder**:
    `extract_formats` tries `no-auth` first for Instagram and falls back to
@@ -141,8 +141,8 @@ invariants** so you don't have to rediscover them.
    `__GROUP__`, `__PROJECT_DIR__`, `__MEMORY_MAX__` placeholders rendered by
    `install.sh` from the real user/path/RAM. Don't hardcode paths in the unit.
 
-8. **Playlist vs single-video are two distinct paths.** `utils/downloader.py::
-   is_playlist_url` detects any YouTube URL carrying `list=`; the handler routes
+ 8. **Playlist vs single-video are two distinct paths.** `utils/downloader/playlists.py::
+    is_playlist_url` detects any YouTube URL carrying `list=`; the handler routes
    it to the **tier keyboard** (`PLAYLIST_TIERS`), never the single-video format
    flow. Per-video playlist downloads call `download_media(format_selector=...)`
    — a yt-dlp *selector* string, not a `format_id` (ids differ per video).
@@ -220,7 +220,7 @@ invariants** so you don't have to rediscover them.
     `cookies/ytdlp/` are uploaded by the admin via `Admin → Cookies → ➕ Per-Site
     Jar` (state: `waiting_for_replace_per_site_<name>`); the jar is keyed off the
     URL's bare domain (`instagram.com` → `instagram`, `reddit.com` → `reddit`).
-    `get_cookies_for_url` (utils/downloader.py) and `_site_cookie_context` look
+     `get_cookies_for_url` (utils/downloader/cookies.py) and `_site_cookie_context` look
     the site up from `urllib.parse.urlparse(url).netloc`, **not** a hardcoded
     switch — adding a new site is just dropping a `<site>.txt` in `cookies/ytdlp/`.
     Any pre-existing flat-root jars (`ytcookies.txt`, `igcookies.txt`, etc.) need
@@ -236,7 +236,7 @@ invariants** so you don't have to rediscover them.
     etc. are plain text and never downloaded.
 
 13. **Direct-forward = DM relay: Instagram (dedicated bot account) + X (self-DM).**
-    `modules/direct_forward.py` (replacing the old saved/liked `auto_forward`)
+     `modules/direct_forward/` (replacing the old saved/liked `auto_forward`)
     relays media into `DIRECT_FORWARD_CHAT_ID` on a jittered poll cadence
     (`DIRECT_FORWARD_POLL_SECONDS`, default 300 s **±
     `DIRECT_FORWARD_POLL_JITTER_PCT`%**, never a fixed machine cadence — fixed
@@ -330,7 +330,7 @@ invariants** so you don't have to rediscover them.
     X self-DM is fully activatable in-chat (Admin → 📨 Direct-Forward →
     🔑 Set X Chat PIN) with no ssh/systemctl.
     **TikTok = the same self-DM trick over the IM WebSocket (2026-08-10).**
-    The worker (`modules/direct_forward.py::_tiktok_worker`) holds a persistent
+     The worker (`modules/direct_forward/tiktok.py::_tiktok_worker`) holds a persistent
     async WS (`wss://im-ws-sg.tiktok.com/ws/v2`, library `websockets`) to the
     account's own IM store, authenticated by the SAME `cookies/tiktok/ttcookies.txt`
     jar yt-dlp downloads with (no separate bot account, no pairing — the self-DM
@@ -490,7 +490,7 @@ invariants** so you don't have to rediscover them.
     (not `.jpg`), so an extension-only lookup silently dropped EVERY TikTok
     thumb and only < 10 MB TikTok videos *appeared* fine (server-generated).
     Rule: `download_media` locates the cover via
-    `utils/downloader.py::_find_thumbnail_file` (extension list **plus** a
+     `utils/downloader/thumbnails.py::_find_thumbnail_file` (extension list **plus** a
     magic-byte scan of the task dir for `<stem>.*` / `<stem>_*` siblings —
     `_looks_like_image` checks JPEG/PNG/WebP/GIF/BMP magic). If no cover
     exists, `extract_video_frame_thumb` pulls a 320×320 frame from the video
@@ -512,7 +512,7 @@ invariants** so you don't have to rediscover them.
     (10 = original, 5 = default, −1/unset = dubbed) and yt-dlp's own
     `bestaudio` sorts by it. The bot's single-video merge uses its OWN
     `best_audio_format_id`, so `extract_formats` sorts audio options by
-    `(language_preference, bitrate)` both descending (`utils/downloader.py`) —
+     `(language_preference, bitrate)` both descending (`utils/downloader/formats.py`) —
     originals first, then default, then dubs, bitrate only within a class.
     Do NOT collapse back to a pure-bitrate sort: on dubbed videos the original
     is usually the LOWEST-bitrate track, so a bitrate-only sort merges a Hindi
@@ -681,7 +681,7 @@ Don't port it to Go.
   client (`utils/premium_session.py`) and exports `PREMIUM_STRING_SESSION`;
   💾 Save to .env writes it via `dotenv.set_key` (dotenv-style quoting — safe
   for `run.sh`'s parser) and refreshes `config.PREMIUM_STRING_SESSION` in memory.
-  The gen flow lives in `modules/admin.py` (`PREMIUM_GEN`,
+   The gen flow lives in `modules/admin/` (`PREMIUM_GEN`,
   `waiting_for_premium_phone/_code/_password`, callbacks
   `admin_premium_gen/_abort/_save`); its free-form text states are dispatched
   **before** the `is_valid_telegram_id` gate. Every step shows an

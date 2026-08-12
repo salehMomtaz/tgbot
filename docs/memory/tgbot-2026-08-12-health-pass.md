@@ -122,3 +122,46 @@ working.
 - `docs/memory/tgbot-2026-08-12-health-pass.md` — this capture.
 
 No code changes were made. No secrets were staged.
+
+## Historical traceback audit (pre-02:51 boots) — 2026-08-12 follow-up
+
+A second pass on the same day re-scanned `logs/bot.log*` end-to-end: **46
+`Traceback` entries total, ALL from boots before the 02:51 restart** (i.e. the
+pre-refactor / refactoring-era runs). The current boot (and this pass) produced
+**zero** tracebacks. Categorised by root cause — every class is benign or
+already fixed by a later commit:
+
+| Count | Signature | Disposition |
+|---|---|---|
+| 18 | `RuntimeError: … no video formats (photo-only tweet handled natively)` | Pre-fix X photo path; commit `3cb497b` rewrote it into the clean `_x_fallback_photos` flow — no longer raised. |
+| 21 | `yt_dlp … [TikTok] … Unexpected response from webpage request` | Pre-`/embed/<id>` rewrite (commits `e48b060`/`c3b156c`/`7c20c30`). Current run shows no TikTok extraction errors. |
+| 3 | `KeyError: 8877223559` | Historical; not reproducible in current boot. |
+| 1 | `Dailymotion … Access forbidden` | Site-side geo block, not a bot bug. |
+| 1 | `Direct Upload Error … 404` | Dead test link (operator-sent), not a bot bug. |
+| 2 | `DM attachment invalid payload (133B/99B)` | Intended magic-byte guard (`_x_media_payload_ok`) rejecting HTML interstitials — by design (invariant #13b). |
+| 1 | `YouTube … sign-in required / no cookies` | Operator had not yet uploaded `ytcookies.txt`; fixed by jar upload. |
+
+**Conclusion:** the refactor (module package split) introduced no regressions;
+the 46 tracebacks are all stale, pre-fix artifacts. The live bot is clean.
+
+## Doc-path coherency fixes (this follow-up pass)
+
+The package split (commit `81a5139`) left stale `module.py::func` references in
+the prose of the contributor/design docs. Fixed to point at the new package
+layout (verified against actual `def` locations):
+
+- `AGENTS.md` — invariants prose: `utils/downloader.py::_apply_pot_options` →
+  `url_normalize.py`; `::is_playlist_url` → `playlists.py`; `get_cookies_for_url`
+  / `_site_cookie_context` → `cookies.py`; `modules/direct_forward.py` →
+  `modules/direct_forward/`; `::_tiktok_worker` → `tiktok.py`;
+  `::_find_thumbnail_file` → `thumbnails.py`; best-audio sort → `formats.py`;
+  `modules/admin.py` → `modules/admin/`.
+- `blueprint.md` — `utils/downloader.py::_apply_pot_options` → `url_normalize.py`;
+  `::get_cookies_for_url` → `cookies.py`; `::extract_formats` → `formats.py`;
+  Phase 16 `modules/direct_forward.py` → `modules/direct_forward/`; added
+  **Phase 18** (TikTok self-DM + package refactor).
+- `README.md` — Direct-Forward section now lists **Instagram / X / TikTok**
+  self-DM (TikTok IM-WebSocket relay was missing from the user-facing docs).
+
+`install.sh` / `run.sh` already match the package layout (no stale paths;
+`chmod +x` + xchat-bridge `enable` present). Deployment script is current.
