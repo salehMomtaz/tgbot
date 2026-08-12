@@ -353,6 +353,13 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         url = parts[0].strip()
         custom_filename = parts[1].strip() if len(parts) > 1 else None
 
+        # subscription gate (quota + channel force-join) — when subscription mode is on this is the source of truth
+        try:
+            from modules.subscription.handlers import gate_and_quota_check
+            if not await gate_and_quota_check(client, message):
+                return
+        except Exception:
+            pass
         if not is_authorized(user_id):
             return
 
@@ -386,6 +393,17 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             )
 
             async def direct_upload_job():
+                # re-check quota at execution time (queue may have waited)
+                try:
+                    from utils.subscription.quota import check_quota as _chk, increment_quota as _inc
+                    from utils.subscription.store import get_settings as _gs
+                    if _gs().get("enabled"):
+                        ok, _, _ = _chk(user_id)
+                        if not ok:
+                            await status_msg.edit_text("⏳ Daily limit reached — try again after 00:00 UTC. Use /subscription to upgrade.")
+                            return
+                except Exception:
+                    pass
                 await status_msg.edit_text("⚡ Starting direct URL download...")
                 cache_id = str(uuid.uuid4())[:8]
                 task_dir = f"cache/{cache_id}"
@@ -417,6 +435,11 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                         reply_to_message_id=message.id,
                         premium_allowed=is_premium_user(user_id),
                     )
+                    try:
+                        from utils.subscription.quota import increment_quota as _inc2
+                        _inc2(user_id)
+                    except Exception:
+                        pass
                     await log_event(f"✅ **Direct Upload:** Finished for User `{user_id}` from source `{url}`.")
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Failed to process direct file URL.\nError: `{str(e)}`")
@@ -490,6 +513,17 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         task_dir = f"cache/{cache_id}"
 
         async def queued_transfer_job():
+            # re-check quota at execution time (priority queue may have waited)
+            try:
+                from utils.subscription.quota import check_quota as _cq2, increment_quota as _iq2
+                from utils.subscription.store import get_settings as _gs2
+                if _gs2().get("enabled"):
+                    ok2, _, _ = _cq2(user_id)
+                    if not ok2:
+                        await callback_query.message.edit_text("⏳ Daily limit reached — try again after 00:00 UTC. Use /subscription to upgrade.")
+                        return
+            except Exception:
+                pass
             await callback_query.message.edit_text("⚡️ Downloading file from server to VPS...")
             loop = asyncio.get_event_loop()
             try:
@@ -541,6 +575,11 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                     reply_to_message_id=cache_data.get("origin_message_id"),
                     premium_allowed=is_premium_user(user_id),
                 )
+                try:
+                    from utils.subscription.quota import increment_quota as _iq3
+                    _iq3(user_id)
+                except Exception:
+                    pass
 
                 DOWNLOAD_CACHE.pop(cache_id, None)
                 await log_event(f"✅ **Job Successful:** `{clean_name}` was successfully processed and sent.")
@@ -660,6 +699,17 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             success = 0
             skipped = 0
             for idx, entry in enumerate(entries, 1):
+                # per-video quota check
+                try:
+                    from utils.subscription.quota import check_quota as _cqp, increment_quota as _iqp
+                    from utils.subscription.store import get_settings as _gsp
+                    if _gsp().get("enabled"):
+                        okq, _, _ = _cqp(user_id)
+                        if not okq:
+                            await progress_msg.edit_text(f"⏳ Daily limit reached during playlist ({success}/{total} done). Remaining videos skipped.")
+                            break
+                except Exception:
+                    pass
                 entry_url = entry["url"]
                 entry_title = entry["title"]
                 sub_cache_id = f"{cache_id}-{idx}"
@@ -713,6 +763,11 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                         reply_to_message_id=origin_id,
                         premium_allowed=is_premium_user(user_id),
                     )
+                    try:
+                        from utils.subscription.quota import increment_quota as _iqp2
+                        _iqp2(user_id)
+                    except Exception:
+                        pass
                     success += 1
                     await log_event(f"✅ **Playlist item {idx}/{total}:** `{result['title']}` sent.")
                 except Exception as e:

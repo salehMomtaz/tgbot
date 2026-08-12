@@ -57,6 +57,17 @@ logger = logging.getLogger(__name__)
 # Re-export back_markup for other modules
 back_markup = _back_markup
 
+_SUB_LAST: dict[int, float] = {}
+def _sub_rate_ok(uid: int) -> bool:
+    import time as _t2
+    now = _t2.monotonic()
+    last = _SUB_LAST.get(uid, 0)
+    lim = int(getattr(config, "SUB_RATE_LIMIT_SECONDS", 3) or 3)
+    if now - last < lim:
+        return False
+    _SUB_LAST[uid] = now
+    return True
+
 
 async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
@@ -691,6 +702,131 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             reply_markup=back_markup
         )
         ACTIVE_PROMPTS[user_id] = step_msg.id
+        await callback_query.answer()
+
+    # =========================================================================
+    # Subscription admin (💳)
+    # =========================================================================
+    elif data == "admin_sub_menu":
+        from utils.subscription.store import get_settings, list_subscriptions
+        from utils.subscription.tiers import TIERS, TIER_ORDER
+        s = get_settings()
+        subs = list_subscriptions()
+        import time as _t2
+        now = int(_t2.time())
+        active_count = sum(1 for v in subs.values() if int(v.get("until", 0)) > now)
+        en = "🟢 ON" if s.get("enabled") else "🔴 OFF"
+        free = "✅" if s.get("free_enabled") else "❌"
+        ch = s.get("channel_username") or (str(s.get("channel_id")) if s.get("channel_id") else "—")
+        tier_lines = " · ".join(f"{TIERS[t]['label']}:{TIERS[t]['price_stars']}⭐" for t in TIER_ORDER)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{'🔴 Disable' if s.get('enabled') else '🟢 Enable'} subscription mode", callback_data="admin_sub_toggle")],
+            [InlineKeyboardButton(f"Free tier: {free}", callback_data="admin_sub_toggle_free")],
+            [InlineKeyboardButton("📢 Set channel", callback_data="admin_sub_set_channel"), InlineKeyboardButton("🌐 WebApp", callback_data="admin_sub_webapp")],
+            [InlineKeyboardButton("➕ Grant sub", callback_data="admin_sub_grant"), InlineKeyboardButton("➖ Revoke sub", callback_data="admin_sub_revoke")],
+            [InlineKeyboardButton("📋 List subs", callback_data="admin_sub_list"), InlineKeyboardButton("🔄 Refresh", callback_data="admin_sub_menu")],
+            [InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
+        ])
+        await callback_query.message.edit_text(
+            f"💳 **Subscriptions**\n\n"
+            f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel: `{ch}`\n"
+            f"Active subs: **{active_count}**\nTiers: {tier_lines}\n\n"
+            f"Free users go last in the download queue (priority 0 vs 1-3). "
+            f"WebApp at `/admin/subscription` (same port 8080).",
+            reply_markup=kb
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_toggle":
+        if not _sub_rate_ok(user_id):
+            await callback_query.answer("Too fast — wait a moment.", show_alert=False)
+            return
+        from utils.subscription.store import get_settings, set_settings
+        s = get_settings()
+        ns = set_settings(enabled=not s.get("enabled"))
+        await log_event(f"💳 **Admin:** Subscription mode toggled to {ns.get('enabled')}")
+        # re-render by delegating
+        callback_query.data = "admin_sub_menu"
+        await _admin_callback_dispatch(client, callback_query)
+        return
+
+    elif data == "admin_sub_toggle_free":
+        if not _sub_rate_ok(user_id):
+            await callback_query.answer("Too fast — wait a moment.", show_alert=False)
+            return
+        from utils.subscription.store import get_settings, set_settings
+        s = get_settings()
+        ns = set_settings(free_enabled=not s.get("free_enabled"))
+        await log_event(f"💳 **Admin:** Free tier toggled to {ns.get('free_enabled')}")
+        callback_query.data = "admin_sub_menu"
+        await _admin_callback_dispatch(client, callback_query)
+        return
+
+    elif data == "admin_sub_set_channel":
+        USER_STATES[user_id] = "waiting_for_sub_channel"
+        ACTIVE_PROMPTS[user_id] = callback_query.message.id
+        await callback_query.message.edit_text(
+            "📢 **Set force-join channel**\n\n"
+            "Send the channel **@username** (e.g. `@mychannel`) or numeric ID (e.g. `-100123...`).\n"
+            "Send `0` or `clear` to remove the requirement (free tier without join).\n\n"
+            "_Free users must be members to download when subscription mode is ON._",
+            reply_markup=back_markup
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_webapp":
+        host = getattr(config, "SSL_CERT_PATH", "") and "https" or "http"
+        hint = "Open `http(s)://<your-vps>:8080/admin/subscription`"
+        try:
+            from modules.subscription.webapp import _admin_token
+            tok = _admin_token()
+            hint += f"\nAdmin-Token: `{tok}` (or use Telegram WebApp inside the bot)"
+        except Exception:
+            pass
+        await callback_query.message.edit_text(
+            f"🌐 **Subscription WebApp**\n\n{hint}\n\n"
+            "Best opened as a Telegram WebApp (Admin → Subscription → 🌐 WebApp) — "
+            "Telegram `initData` authenticates you automatically. Outside Telegram, paste the token in the page.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="admin_sub_menu")]])
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_grant":
+        USER_STATES[user_id] = "waiting_for_sub_grant"
+        ACTIVE_PROMPTS[user_id] = callback_query.message.id
+        await callback_query.message.edit_text(
+            "➕ **Grant subscription**\n\n"
+            "Send: `<user_id> <tier> [days]`\n"
+            "Example: `123456789 plus 30`  or  `123456789 pro`\n"
+            "Tiers: `basic` (100/d), `plus` (500/d), `pro` (2500/d). Default 30 days.",
+            reply_markup=back_markup
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_revoke":
+        USER_STATES[user_id] = "waiting_for_sub_revoke"
+        ACTIVE_PROMPTS[user_id] = callback_query.message.id
+        await callback_query.message.edit_text(
+            "➖ **Revoke subscription**\n\nSend the **user ID** to revoke:",
+            reply_markup=back_markup
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_list":
+        from utils.subscription.store import list_subscriptions
+        subs = list_subscriptions()
+        if not subs:
+            txt = "No subscriptions stored."
+        else:
+            import time as _t3
+            now = int(_t3.time())
+            lines = []
+            for uid, sub in sorted(subs.items(), key=lambda kv: kv[1].get("until", 0), reverse=True)[:30]:
+                until = sub.get("until", 0)
+                state = "✅" if until > now else "⌛ expired"
+                lines.append(f"`{uid}` — {sub.get('tier')} until {until} {state}")
+            txt = "📋 **Subscriptions (up to 30):**\n" + "\n".join(lines)
+        await callback_query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="admin_sub_menu")]]))
         await callback_query.answer()
 
 

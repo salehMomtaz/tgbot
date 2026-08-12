@@ -211,3 +211,18 @@ SYSMON_TOP_N = get_env_int("SYSMON_TOP_N", 20)
 SYSMON_HISTORY_SAMPLES = get_env_int("SYSMON_HISTORY_SAMPLES", 240)
 # Comma-separated list of paths whose filesystems are reported.
 SYSMON_DISK_PATHS = os.getenv("SYSMON_DISK_PATHS", ".")
+
+# =========================================================================
+# Subscription system (toggleable, 3 tiers + optional free with channel)
+# =========================================================================
+SUB_ENABLED = os.getenv("SUB_ENABLED", "false").lower() in ("true", "1", "yes")
+SUB_FREE_ENABLED = os.getenv("SUB_FREE_ENABLED", "false").lower() in ("true", "1", "yes")
+SUB_CHANNEL_ID = get_env_int("SUB_CHANNEL_ID", 0)
+SUB_CHANNEL_USERNAME = os.getenv("SUB_CHANNEL_USERNAME", "")
+# Stars prices are in tiers.py (XTR). TON address for Gram/TON payments.
+SUB_TON_ADDRESS = os.getenv("SUB_TON_ADDRESS", "")
+SUB_TON_API_KEY = os.getenv("SUB_TON_API_KEY", "")
+# WebApp admin — secret for signing admin links (random if unset, but set it for persistence)
+SUB_WEBAPP_SECRET = os.getenv("SUB_WEBAPP_SECRET", "")
+# Rate-limit for subscription callbacks (per user, seconds)
+SUB_RATE_LIMIT_SECONDS = get_env_int("SUB_RATE_LIMIT_SECONDS", 3)

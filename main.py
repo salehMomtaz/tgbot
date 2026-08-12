@@ -382,6 +382,13 @@ async def main_engine():
     register_admin_handlers(app)
     register_downloader_handlers(app, premium_app)
     register_stream_interceptor_handlers(app)
+    # subscription: /subscription cmds + Stars/TON payments
+    try:
+        from modules.subscription.handlers import register_subscription_handlers, register_subscription_payments
+        register_subscription_handlers(app)
+        register_subscription_payments(app)
+    except Exception as e:
+        logging.warning(f"[Subscription] Could not register handlers: {e}")
 
     # Group -2 Incoming Update Log Interceptors
     @app.on_message(filters.private, group=-2)
@@ -446,6 +453,11 @@ async def main_engine():
 
     # 9. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
     from modules.stream_handler import fastapi_app
+    try:
+        import modules.subscription.webapp as _sub_web
+        _sub_web.mount(fastapi_app)
+    except Exception as e:
+        logging.warning(f"[Subscription] Webapp mount failed: {e}")
 
     uvicorn_args = {
         "app": fastapi_app,

@@ -12,6 +12,7 @@ class QueueTask:
     message: object                       # Pyrogram Message to update with status
     coroutine: Callable[[], Awaitable]    # Zero-argument async function to run when ready
     task_id: str = field(default_factory=lambda: uuid4().hex)
+    priority: int = 1                     # subscription priority (0=free, 3=pro)
 
 class DownloadQueue:
     """
@@ -23,14 +24,41 @@ class DownloadQueue:
         self._lock = asyncio.Lock()       # ONLY guards the in-memory list operations
         self._active = False              # Indicates if a task is currently executing
 
-    async def add_task(self, user_id: int, message, coroutine) -> str:
-        """Enqueue a task and run it immediately if the engine is idle."""
-        task = QueueTask(user_id=user_id, message=message, coroutine=coroutine)
-        
-        # Acquire the lock for a fraction of a millisecond to update the list
+    async def add_task(self, user_id: int, message, coroutine, priority: int | None = None) -> str:
+        """Enqueue a task and run it immediately if the engine is idle.
+
+        priority: 0 (free) .. 3 (pro). Higher priority jumps ahead of lower ones.
+        If None, resolved from subscription tier (free=0, paid 1-3). Free users never
+        jump ahead of paid ones, but FIFO is preserved within same priority.
+        """
+        if priority is None:
+            try:
+                from utils.subscription.tiers import TIERS
+                from utils.subscription.store import is_subscription_active
+                active, sub = is_subscription_active(user_id)
+                if active and sub:
+                    tier = sub.get("tier") or "free"
+                    priority = TIERS.get(tier, {}).get("priority", 1)
+                else:
+                    from utils.subscription.store import get_settings
+                    s = get_settings()
+                    if s.get("enabled") and not active:
+                        priority = 0
+                    else:
+                        priority = 1
+            except Exception:
+                priority = 1
+        task = QueueTask(user_id=user_id, message=message, coroutine=coroutine, priority=int(priority or 1))
+
         async with self._lock:
-            self._pending.append(task)
-            position = len(self._pending)
+            # insert by priority (stable): find first lower-priority item
+            insert_at = len(self._pending)
+            for idx, t in enumerate(self._pending):
+                if t.priority < task.priority:
+                    insert_at = idx
+                    break
+            self._pending.insert(insert_at, task)
+            position = insert_at + 1
             start_worker = not self._active
             if start_worker:
                 self._active = True

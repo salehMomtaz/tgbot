@@ -183,6 +183,143 @@ def register_admin_handlers(app: Client):
             message.stop_propagation()
             return
 
+        # 1e. Subscription free-form states (must be handled before the telegram-ID gate)
+        if state == "waiting_for_sub_channel":
+            txt = input_text.strip()
+            if txt.lower() in ("0", "clear", "remove", "none", "-"):
+                from utils.subscription.store import set_settings as _set_sub
+                _set_sub(channel_id=0, channel_username="")
+                USER_STATES.pop(user_id, None)
+                if prompt_id:
+                    try:
+                        await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                    except Exception:
+                        pass
+                await message.reply_text("✅ Force-join channel **removed** (free tier without channel).", reply_markup=back_markup)
+                await log_event("💳 **Admin:** Force-join channel cleared.")
+                message.stop_propagation()
+                return
+            # Accept @username or numeric ID (channels are negative)
+            channel_id = 0
+            channel_username = ""
+            if txt.startswith("@"):
+                channel_username = txt.strip()
+                # try to resolve to numeric id for member checks; best-effort
+                try:
+                    chat = await client.get_chat(channel_username)
+                    channel_id = int(getattr(chat, "id", 0) or 0)
+                except Exception:
+                    channel_id = 0
+            else:
+                # numeric id
+                try:
+                    channel_id = int(txt)
+                    # if 0 or not plausible, treat as username without @
+                    if -9999999999999 <= channel_id <= 9999999999999:
+                        pass
+                    else:
+                        raise ValueError
+                    if channel_username == "" and txt.lstrip("-").isdigit():
+                        channel_username = ""
+                except Exception:
+                    # maybe bare username without @
+                    channel_username = "@" + txt.lstrip("@")
+                    try:
+                        chat = await client.get_chat(channel_username)
+                        channel_id = int(getattr(chat, "id", 0) or 0)
+                    except Exception:
+                        channel_id = 0
+            from utils.subscription.store import set_settings as _set_sub2
+            _set_sub2(channel_id=channel_id, channel_username=channel_username)
+            USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            await message.reply_text(
+                f"✅ Force-join channel set to `{channel_username or channel_id}`\n"
+                f"(id: `{channel_id}` username: `{channel_username or '—'}`).",
+                reply_markup=back_markup
+            )
+            await log_event(f"💳 **Admin:** Force-join channel set to {channel_username or channel_id} (id {channel_id}).")
+            message.stop_propagation()
+            return
+
+        if state == "waiting_for_sub_grant":
+            # Expected: <user_id> <tier> [days]
+            parts = input_text.strip().split()
+            if len(parts) < 2:
+                await message.reply_text(
+                    "❌ Format: `<user_id> <tier> [days]`\nExample: `123456789 plus 30`",
+                    reply_markup=back_markup
+                )
+                message.stop_propagation()
+                return
+            uid_txt, tier_txt = parts[0], parts[1].lower()
+            days_txt = parts[2] if len(parts) > 2 else "30"
+            if not is_valid_telegram_id(uid_txt):
+                await message.reply_text("❌ Invalid user ID (5-11 digits).", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+            from utils.subscription.tiers import TIERS
+            if tier_txt not in TIERS or tier_txt == "free":
+                await message.reply_text(f"❌ Invalid tier `{tier_txt}`. Use: basic / plus / pro.", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+            try:
+                days = int(days_txt)
+                if not 1 <= days <= 3650:
+                    raise ValueError
+            except Exception:
+                await message.reply_text("❌ Days must be 1..3650.", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+            target_id = int(uid_txt)
+            from utils.subscription.store import set_subscription as _grant
+            entry = _grant(target_id, tier_txt, duration_days=days, granted_by=f"admin:{user_id}")
+            USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            await message.reply_text(
+                f"✅ Granted **{tier_txt}** to `{target_id}` for {days} days (until `{entry['until']}`).",
+                reply_markup=back_markup
+            )
+            await log_event(f"💳 **Admin:** Granted {tier_txt} ({days}d) to {target_id} (until {entry['until']}).")
+            # notify recipient best-effort
+            try:
+                from utils.subscription.tiers import TIERS as _T
+                await client.send_message(target_id, f"✅ You received **{_T[tier_txt]['label']}** for {days} days. Use /subscription to see status.")
+            except Exception:
+                pass
+            message.stop_propagation()
+            return
+
+        if state == "waiting_for_sub_revoke":
+            if not is_valid_telegram_id(input_text):
+                await message.reply_text("❌ Invalid user ID (5-11 digits).", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+            target_id = int(input_text)
+            from utils.subscription.store import remove_subscription as _revoke
+            ok = _revoke(target_id)
+            USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            if ok:
+                await message.reply_text(f"✅ Revoked subscription for `{target_id}`.", reply_markup=back_markup)
+                await log_event(f"💳 **Admin:** Revoked subscription for {target_id}.")
+            else:
+                await message.reply_text(f"ℹ️ No active subscription for `{target_id}`.", reply_markup=back_markup)
+            message.stop_propagation()
+            return
+
         # 2. Handle User ID Input States (Add, Remove, Unban)
         if not is_valid_telegram_id(input_text):
             USER_STATES.pop(user_id, None)
