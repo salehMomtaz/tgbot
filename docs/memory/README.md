@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-08-11.
+code or the git log alone. Last updated: 2026-08-12.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -72,6 +72,11 @@ code or the git log alone. Last updated: 2026-08-11.
   one silent dispatch regression (`admin_pot_menu` no-op), confirmed X photo-paste
   fix live in production, tightened `database.json` perms, documented the iptables
   `INPUT ACCEPT` exposure of the 8080 streamer for the operator.
+- [2026-08-12 health pass — full-feature + security sweep](tgbot-2026-08-12-health-pass.md)
+  — comprehensive feature matrix (YouTube video/audio/playlist, SoundCloud,
+  direct file, cancel, admin console, SSRF guard) all green; direct-forward
+  workers (IG/X/TikTok) running healthy; XChat bridge active; no code changes
+  made.
 - [X photo-paste fix](tgbot-2026-08-11-x-photo-paste-fix.md) — photo-only
   pasted tweet URLs silently failed ("No downloadable media") because twikit
   2.3.3's `User.__init__` raises `KeyError('urls')` on some authors, aborting
