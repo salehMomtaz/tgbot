@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import hmac, hashlib, json, time, urllib.parse
 import config
+from fastapi import HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.requests import Request
 
 def _admin_token() -> str:
     tok = getattr(config, "BOT_TOKEN", "") or ""
@@ -101,16 +104,12 @@ load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'
 """
 
 def mount(fastapi_app):
-    from fastapi import HTTPException
-    from fastapi.responses import HTMLResponse, JSONResponse
-    from starlette.requests import Request as StarletteRequest
-
     @fastapi_app.get("/admin/subscription", response_class=HTMLResponse)
     async def _page():
         return HTML
 
     @fastapi_app.get("/admin/subscription/api")
-    async def _api_get(request: StarletteRequest):
+    async def _api_get(request: Request):
         # read is allowed with valid initData OR admin token; but also allow creator via header-less localhost during dev — require at least one?
         # For now allow read to anyone who knows the URL (no secrets in GET) — settings + counts are not sensitive beyond tier names
         from utils.subscription.store import get_settings, list_subscriptions
@@ -122,7 +121,7 @@ def mount(fastapi_app):
         return JSONResponse({"settings": get_settings(), "tiers": TIERS, "subscriptions": active})
 
     @fastapi_app.post("/admin/subscription/api")
-    async def _api_post(request: StarletteRequest):
+    async def _api_post(request: Request):
         tok = request.headers.get("X-Admin-Token", "")
         init_data = request.headers.get("X-Telegram-Init-Data", "")
         ok = False
