@@ -92,23 +92,53 @@ def _parse_user_from_request(request: Request):
     return None
 
 
-HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Subscription Admin — tgbot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
- body{font-family:system-ui,sans-serif;max-width:760px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6}
- h1{font-size:20px;margin:8px 0} .card{background:#1a1d24;border-radius:12px;padding:16px;margin:12px 0}
- label{display:flex;justify-content:space-between;align-items:center;margin:8px 0;gap:12px}
- input{padding:8px;border-radius:8px;border:1px solid #333;background:#0f1115;color:#fff;flex:1}
- button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:600}
- table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #2a2e38;text-align:left;font-size:13px}
+ :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; --tg-content-top:0px; color-scheme: dark; }
+ *{box-sizing:border-box}
+ html,body{margin:0;min-height:100%}
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:780px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
+ header{position:sticky;top:0;z-index:10; background:rgba(15,17,21,0.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); padding:10px 0 12px; margin:-12px -16px 12px; padding-left:16px; padding-right:56px; padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top)); border-bottom:1px solid #22262f}
+ header h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.2px;line-height:1.2}
+ header p{margin:4px 0 0;font-size:12px;opacity:.6}
+ .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0; border:1px solid #232735; box-shadow:0 1px 0 rgba(0,0,0,.3)}
+ label{display:flex;justify-content:space-between;align-items:center;margin:10px 0;gap:12px}
+ label input[type="checkbox"]{width:18px;height:18px;flex:0 0 auto}
+ input,textarea,select{padding:9px 10px;border-radius:10px;border:1px solid #2a2e38;background:#0f1115;color:#fff;flex:1; font:inherit}
+ textarea{resize:vertical;min-height:84px}
+ button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:700}
+ button:active{transform:scale(.98)} button:disabled{opacity:.5}
+ table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid #232735;text-align:left;font-size:13px;word-break:break-word}
+ th{opacity:.7;font-weight:600}
  .ok{color:#6f6} .warn{color:#fa0} .muted{opacity:.6;font-size:12px}
- .pill{display:inline-block;background:#242836;border-radius:999px;padding:2px 8px;font-size:12px;margin:2px}
+ .pill{display:inline-block;background:#242836;border-radius:999px;padding:3px 9px;font-size:12px;margin:3px;border:1px solid #2a2e38}
+ .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+ @media(max-width:560px){ .grid2{grid-template-columns:1fr} }
 </style>
-<h1>💳 Subscription Admin <span style="opacity:.5;font-size:13px">tgbot.southpark.ir:8080</span></h1>
+<header><h1>💳 Subscription Admin</h1><p>Manage plans, free tier & force-join channels</p></header>
 <div id="app">Loading…</div>
 <script>
-const tg = window.Telegram?.WebApp; if(tg){tg.ready(); tg.expand();}
+const tg = window.Telegram?.WebApp;
+(function(){
+  if(!tg) return;
+  try{ tg.ready(); tg.expand(); }catch(e){}
+  function applySafe(){
+    try{
+      const sa = tg.safeAreaInset || {top:0,bottom:0};
+      const cs = tg.contentSafeAreaInset || {top:0,bottom:0};
+      document.documentElement.style.setProperty('--tg-safe-top', (sa.top||0)+'px');
+      document.documentElement.style.setProperty('--tg-safe-bottom', (sa.bottom||0)+'px');
+      document.documentElement.style.setProperty('--tg-content-top', (cs.top||0)+'px');
+      // also use viewport height for fullscreen
+      const vh = tg.viewportStableHeight || tg.viewportHeight;
+      if(vh) document.documentElement.style.setProperty('--tg-vh', vh+'px');
+    }catch(e){}
+  }
+  applySafe();
+  try{ tg.onEvent('viewportChanged', applySafe); tg.onEvent('safeAreaChanged', applySafe); tg.onEvent('contentSafeAreaChanged', applySafe); }catch(e){}
+})();
 let token = localStorage.getItem('admin_token')||'';
 async function api(method, body){
   const h={'Content-Type':'application/json'};
@@ -170,26 +200,30 @@ load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'
 </script>
 """
 
-HTML_ROOT = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+HTML_ROOT = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>tgbot — Media Downloader</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
- body{font-family:system-ui,sans-serif;max-width:720px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6}
+ :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; color-scheme: dark; }
+ *{box-sizing:border-box}
+ html,body{margin:0;min-height:100%}
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
  h1{font-size:22px;margin:10px 0} h2{font-size:18px;margin:16px 0 8px}
- .card{background:#1a1d24;border-radius:12px;padding:16px;margin:12px 0}
+ .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0;border:1px solid #232735}
  .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
  button{background:#2ea6ff;color:#fff;border:0;padding:12px 18px;border-radius:10px;cursor:pointer;font-weight:700;width:100%;margin:8px 0}
  button.alt{background:#242836} a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;margin:6px 0}
- table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #2a2e38;text-align:left;font-size:13px}
+ table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #232735;text-align:left;font-size:13px}
  .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;background:#242836}
+ header{padding-right:56px}
 </style>
 <div id="root">
-<h1>📥 tgbot <span style="opacity:.5;font-size:13px">tgbot.southpark.ir:8080</span></h1>
+<h1>📥 tgbot</h1>
 <div id="app">Loading…</div>
 </div>
 <script>
 const tg = window.Telegram?.WebApp;
-if(tg){ try{ tg.ready(); tg.expand(); }catch(e){} }
+(function(){ if(!tg) return; try{ tg.ready(); tg.expand(); }catch(e){} function applySafe(){ try{ const sa=tg.safeAreaInset||{top:0,bottom:0}; const cs=tg.contentSafeAreaInset||{top:0,bottom:0}; document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px'); document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px'); }catch(e){} } applySafe(); try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe);}catch(e){} })();
 function isTelegram(){ return !!(tg && tg.initData && tg.initData.length > 20); }
 async function loadRoot(){
   const viaTG = isTelegram();
@@ -249,24 +283,29 @@ loadRoot();
 </script>
 """
 
-HTML_USER = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+HTML_USER = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>My Subscription — tgbot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
- body{font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6}
- h1{font-size:20px} .card{background:#1a1d24;border-radius:12px;padding:16px;margin:12px 0}
+ :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; color-scheme: dark; }
+ *{box-sizing:border-box}
+ html,body{margin:0;min-height:100%}
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6; padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top)); padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom)); overflow-y:auto; -webkit-overflow-scrolling:touch;}
+ h1{font-size:20px;margin:0} .card{background:#1a1d24;border-radius:14px;padding:16px;margin:12px 0;border:1px solid #232735}
  .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px}
  .badge-free{background:#2a2e38;color:#aaa} .badge-basic{background:#1b3a5a} .badge-plus{background:#3a2e1b} .badge-pro{background:#3a1b3a}
- button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:600;width:100%;margin:6px 0}
+ button{background:#2ea6ff;color:#fff;border:0;padding:10px 16px;border-radius:10px;cursor:pointer;font-weight:700;width:100%;margin:6px 0}
  button.alt{background:#242836}
  .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
- table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #2a2e38;text-align:left;font-size:13px}
+ table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;border-bottom:1px solid #232735;text-align:left;font-size:13px}
  a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700}
+ header{position:sticky;top:0;z-index:10; background:rgba(15,17,21,0.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); padding:10px 0 12px; margin:-12px -16px 12px; padding-left:16px; padding-right:56px; padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top)); border-bottom:1px solid #22262f; display:flex; justify-content:space-between; align-items:center}
+ header h1{font-size:17px;margin:0;font-weight:800}
 </style>
-<h1>💳 My Subscription <a href="/" style="float:right;font-size:12px;color:#2ea6ff;text-decoration:none">← Home</a></h1>
+<header><h1>💳 My Subscription</h1><a href="/" style="font-size:12px;color:#2ea6ff;text-decoration:none;white-space:nowrap">← Home</a></header>
 <div id="app">Loading…</div>
 <script>
-const tg = window.Telegram?.WebApp; if(tg){tg.ready(); tg.expand();}
+const tg = window.Telegram?.WebApp; (function(){ if(!tg) return; try{ tg.ready(); tg.expand(); }catch(e){} function applySafe(){ try{ const sa=tg.safeAreaInset||{top:0,bottom:0}; document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px'); document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px'); }catch(e){} } applySafe(); try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe);}catch(e){} })();
 async function getStatus(){
   const initData = tg?.initData||'';
   const h={};
