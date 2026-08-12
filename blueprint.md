@@ -87,7 +87,7 @@ crashes mid-write, the jar is corrupted. The bot therefore:
   (`main.py::initialize_cookie_jars`). yt-dlp can read it but never overwrite it.
 - **Hands each download a disposable snapshot** copied into `cache/cookies/`
    (`utils/downloader/cookies.py::get_cookies_for_url`). Snapshots are purged on a timer
-  and whenever a jar is replaced.
+   and whenever a jar is replaced.
 - **Backs up the YouTube jar** to `cookies/youtube/ytcookies.backup` (read-only).
   The Admin Console can **Save Backup** and **Restore Backup**, and a missing/empty
   live jar is auto-restored at boot.
@@ -104,6 +104,38 @@ crashes mid-write, the jar is corrupted. The bot therefore:
 A **live cookie test** (`diagnose_youtube_access`) probes YouTube three ways — no
   auth, cookies-only, cookies+PO — and reports real-format counts so you know
   *exactly* whether your cookies / PO stack are healthy.
+
+### Per-site cookie jars for all yt-dlp sites
+
+With full yt-dlp support, any of the 1,700+ supported sites may need cookies
+for login-walled content. The bot provides a **cookie jar per site**:
+
+- **Naming pattern**: `cookies/ytdlp/<site>.txt` where `<site>` = first label of
+  the hostname (e.g., `pornhub.com` → `pornhub.txt`, `vimeo.com` → `vimeo.txt`).
+- **Auto-generated on boot**: `main.py::initialize_cookie_jars` creates empty
+  jars with a Netscape header for every known yt-dlp extractor domain.
+- **Admin upload**: Admin Console → 🍪 Cookie Jars → **➕ Per-Site Jar** → type
+  the site identifier → send `.txt` document. The bot validates (real cookie
+  lines, not header-only) and writes atomically.
+- **Resolution**: `_resolve_jar_path()` in `utils/downloader/cookies.py` extracts
+  the domain from the URL, strips `www.`, takes the first label, and looks up
+  `cookies/ytdlp/<site>.txt`. Falls back to `cookies/ytdlp/cookies.txt` (global).
+- **Special cases**: Some sites don't fit the simple pattern (multi-domain
+  sites, adult sites with age gates, Chinese sites requiring CN IP, DRM sites).
+  See [`docs/cookie_site_special_cases.md`](docs/cookie_site_special_cases.md)
+  for the full reference.
+
+### Direct-forward workers & cookie freshness
+
+The IG / X / TikTok DM workers use the **shared primary jars** (`igcookies.txt`,
+`xcookies.txt`, `ttcookies.txt`) but **do not trigger cookie write-back**
+(they use `instagrapi`/`twikit` directly, not yt-dlp). If a site is *only*
+accessed via direct-forward (no yt-dlp downloads), its jar **will go stale**.
+Fix options:
+1. Upload fresh cookies periodically via Admin Console.
+2. Set fallback credentials in `.env` (`IG_DIRECT_USERNAME`/`PASSWORD`,
+   `X_DIRECT_*` — X already uses shared jar; TikTok uses shared jar).
+3. Future: add a periodic yt-dlp "cookie refresh" job for Instagram.
 
 ---
 
@@ -364,3 +396,4 @@ per-file by the uploader.
 - [x] Phase 17 — **Learn course** (`learn/`): 19-lesson Python curriculum using this bot as the case study.
 - [x] Phase 18 — **TikTok self-DM relay + module package refactor** (2026-08-10/11): TikTok DM relay added over the IM WebSocket (`modules/direct_forward/tiktok.py`, self-DM `0:1:{uid}:{uid}`); the large single-file modules `modules/admin.py`, `modules/direct_forward.py` and `utils/downloader.py` were split into importable packages (`modules/admin/`, `modules/direct_forward/`, `utils/downloader/`) — behaviour-preserving, no API change. Also: X photo-only tweet native delivery via raw `gql.tweet_detail` walk, and the startup crash-loop fix (undefined names + TikTok `/embed/<id>` rewrite).
 - [x] Phase 19 — **yt-dlp full site support** (2026-08-12): replaced the hardcoded ~25-domain allowlist in `is_social_media_link()` with compiled yt-dlp extractor `_VALID_URL` patterns (1,786 patterns, `generic` excluded) in `utils/downloader/supported_sites.py`. All yt-dlp sites now automatically get the format-selection keyboard; non-yt-dlp URLs stay on the direct-file path. No new system dependencies — pure Python, uses the already-installed yt-dlp.
+- [x] Phase 20 — **Per-site cookie jars + IG DM cookie freshness** (2026-08-12): auto-generated empty per-site cookie jars for all 90+ yt-dlp domains at boot (`cookies/ytdlp/<site>.txt`); Admin Console "➕ Per-Site Jar" flow documented; special cases cataloged in `docs/cookie_site_special_cases.md`. IG DM relay diagnosed: stale `igcookies.txt` with expired `sessionid` (duplicated entries) — worker retries login on poll cadence but needs fresh cookies or fallback credentials. Direct-forward workers don't participate in yt-dlp cookie write-back; jars for sites only accessed via DM will go stale without manual refresh.

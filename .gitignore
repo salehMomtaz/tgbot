@@ -40,7 +40,13 @@ bgutil-provider/
 tools/install-manifest.txt
 
 # Cookie jars under the layout (private session cookies)
-cookies/
+cookies/youtube/
+cookies/instagram/
+cookies/tiktok/
+cookies/twitter/
+# cookies/ytdlp/ — tracked as empty templates; real cookies go in .gitignore'd files
+# but we don't track individual *.txt in ytdlp/ to avoid committing real cookies
+# !cookies/ytdlp/  # uncomment to track the directory structure only
 # Direct-forward client sessions (contain logged-in tokens)
 direct_ig_session.json
 direct_x_cookies.json

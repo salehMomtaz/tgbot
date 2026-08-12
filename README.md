@@ -359,8 +359,20 @@ The bot protects your jars:
   trashed/empty live jar auto-restores from the backup on boot.
 - **Test** runs a real extraction against a public video and tells you exactly how
   many formats the site returned (or if the jar is bot-flagged).
-- **Per-site jars:** the Cookie Jars menu can add a jar for any host
-  (`cookies/ytdlp/<site>.txt`), which the downloader picks up by URL domain.
+- **Per-site jars:** With full yt-dlp support, any of the 1,700+ sites may need
+  cookies. The bot auto-generates `cookies/ytdlp/<site>.txt` for all known
+  domains at boot (e.g., `pornhub.txt`, `vimeo.txt`, `reddit.txt`). Use the
+  Cookie Jars menu → **➕ Per-Site Jar** → type the site name (e.g., `pornhub`)
+  → send the `.txt` document. The downloader picks it up by URL domain
+  automatically. Special cases (multi-domain sites, adult age gates, Chinese
+  sites, DRM) are documented in
+  [`docs/cookie_site_special_cases.md`](docs/cookie_site_special_cases.md).
+
+> **Direct-forward note:** The IG/X/TikTok DM workers consume the shared primary
+> jars (`igcookies.txt`, `xcookies.txt`, `ttcookies.txt`) but **do not trigger
+> cookie write-back** (they use `instagrapi`/`twikit`, not yt-dlp). If a site is
+> *only* accessed via DM relay (no manual yt-dlp downloads), its jar will go
+> stale — upload fresh cookies periodically or set fallback credentials in `.env`.
 
 ---
 
