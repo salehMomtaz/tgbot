@@ -53,6 +53,7 @@ invariants** so you don't have to rediscover them.
 | Thumbnails, ffmpeg metadata, video probing | `utils/downloader/thumbnails.py` |
 | Single-media download pipeline | `utils/downloader/download.py` |
 | Binary & video splitting generators | `utils/downloader/split.py` |
+| yt-dlp extractor pattern compilation & URL matching | `utils/downloader/supported_sites.py` |
 
 ### `modules/admin/` package (replaces `modules/admin.py`)
 
@@ -225,15 +226,19 @@ invariants** so you don't have to rediscover them.
     switch — adding a new site is just dropping a `<site>.txt` in `cookies/ytdlp/`.
     Any pre-existing flat-root jars (`ytcookies.txt`, `igcookies.txt`, etc.) need
     `mv` into the new layout during deployment; the old paths are not honoured.
-    **Routing gate (2026-08-07):** the message-level switch is
-    `is_social_media_link` (modules/downloader_handler.py) — a URL that is NOT
-    in its allowlist falls into the **direct-file** path (plain HTTP GET, no
-    format selection). Adding a new site therefore needs BOTH its domain in
-    that allowlist AND (optionally) a per-site jar. The direct-file path has an
-    SSRF guard (`_is_ssrf_target`): it refuses loopback/private/link-local
-    destinations, protecting the 127.0.0.1 PO provider and internal services.
-    Only `http://`/`https://` count as links (`is_link`) — `file://`, `ftp://`
-    etc. are plain text and never downloaded.
+**Routing gate (2026-08-12):** the message-level switch is
+     `is_social_media_link` (modules/downloader_handler.py) — a URL that
+     does not match any compiled yt-dlp extractor `_VALID_URL` pattern
+     (1,786 patterns, `generic` excluded —
+     `utils/downloader/supported_sites.py`) falls into the **direct-file**
+     path (plain HTTP GET, no format selection). The yt-dlp pattern set
+     grows automatically with every yt-dlp upgrade — adding a new site
+     requires no bot-code change, only (optionally) a per-site cookie jar
+     at `cookies/ytdlp/<site>.txt`. The direct-file path has an SSRF
+     guard (`_is_ssrf_target`): it refuses loopback/private/link-local
+     destinations, protecting the 127.0.0.1 PO provider and internal
+     services. Only `http://`/`https://` count as links (`is_link`) —
+     `file://`, `ftp://` etc. are plain text and never downloaded.
 
 13. **Direct-forward = DM relay: Instagram (dedicated bot account) + X (self-DM).**
      `modules/direct_forward/` (replacing the old saved/liked `auto_forward`)

@@ -32,24 +32,38 @@ def is_link(text: str) -> bool:
 
 
 def is_social_media_link(url: str) -> bool:
-    """Check if the target link belongs to a supported media crawler.
+    """Return True if *url* should be handled by the yt-dlp path.
 
-    The format-selection flow (yt-dlp extract_formats + cookie jars) must
-    serve every yt-dlp-supported site, not just the core six. Everything that
-    is NOT in this list still falls through to the direct-file path, so a raw
-    .mp4/.jpg link keeps working as before. Adding a new site here also works
-    with the per-site jar layout (cookies/ytdlp/<site>.txt) — see
-    get_cookies_for_url / _site_cookie_context.
+    Previously this was a hardcoded ``social_domains`` allowlist (~25 domains);
+    everything else fell through to the direct-file HTTP GET path. That meant
+    1,700+ yt-dlp sites (niconico, pornhub, clips.twitch.tv, etc.) returned
+    raw HTML instead of the real media. Now it delegates to
+    :func:`utils.downloader.supported_sites.is_ytdlp_supported`, which
+    pre-compiles all yt-dlp ``_VALID_URL`` patterns (generic excluded). Direct
+    ``.mp4`` / ``.zip`` links that only the generic extractor would handle
+    still correctly fall through to the direct-file path — generic is excluded.
+    Per-site jars (``cookies/ytdlp/<site>.txt``) continue to work via
+    :func:`get_cookies_for_url` / ``_site_cookie_context``.
+
+    Kept under the historical name ``is_social_media_link`` so invariants,
+    tests and call sites need no rename; the semantics are now
+    "is yt-dlp supported".
     """
-    url_lower = url.lower()
-    social_domains = [
-        "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com",
-        "soundcloud.com", "snd.sc", "dailymotion.com", "dai.ly", "vimeo.com",
-        "twitch.tv", "facebook.com", "fb.watch", "reddit.com", "bilibili.com",
-        "bandcamp.com", "mixcloud.com", "rutube.ru", "ok.ru", "vk.com",
-        "tumblr.com", "streamable.com",
-    ]
-    return any(domain in url_lower for domain in social_domains)
+    try:
+        from utils.downloader.supported_sites import is_ytdlp_supported
+        return is_ytdlp_supported(url)
+    except Exception:
+        # Fallback: if yt-dlp import or compilation fails, preserve the
+        # previous hardcoded allowlist rather than breaking all downloads.
+        url_lower = (url or "").lower()
+        social_domains = [
+            "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com", "x.com",
+            "soundcloud.com", "snd.sc", "dailymotion.com", "dai.ly", "vimeo.com",
+            "twitch.tv", "facebook.com", "fb.watch", "reddit.com", "bilibili.com",
+            "bandcamp.com", "mixcloud.com", "rutube.ru", "ok.ru", "vk.com",
+            "tumblr.com", "streamable.com",
+        ]
+        return any(domain in url_lower for domain in social_domains)
 
 
 # Metadata fetches (format extraction / playlist reading) run IMMEDIATELY and

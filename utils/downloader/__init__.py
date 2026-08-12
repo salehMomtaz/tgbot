@@ -68,6 +68,12 @@ from .download import (
     download_media,
 )
 
+from .supported_sites import (
+    is_ytdlp_supported,
+    get_ytdlp_extractor_name,
+    warm_ytdlp_patterns,
+)
+
 from .split import (
     split_file_generator,
     split_video_by_size_generator,
@@ -121,6 +127,10 @@ __all__ = [
     "probe_video_dimensions",
     # download
     "download_media",
+    # supported_sites
+    "is_ytdlp_supported",
+    "get_ytdlp_extractor_name",
+    "warm_ytdlp_patterns",
     # split
     "split_file_generator",
     "split_video_by_size_generator",

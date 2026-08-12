@@ -9,11 +9,13 @@ to it — piped straight from Telegram's servers with zero local buffering.
 Built on **pyrogram**. Provisioned with a one-shot `./install.sh` (no Docker
 required). Runs as a `systemd` service that survives reboots.
 
-> **Last verified:** 2026-08-11 — full admin-console + security sweep after the
-> `modules/admin` & `modules/direct_forward` → sub-packages refactor (commit
-> `81a5139`). One regression (`admin_pot_menu` silent no-op) found, fixed, and
-> live-verified; the X photo-tweet paste fix from that morning confirmed working
-> in production. See [`docs/memory/tgbot-2026-08-11-health-pass.md`](docs/memory/tgbot-2026-08-11-health-pass.md).
+> **Last verified:** 2026-08-12 — full yt-dlp site support: the link-routing
+> gate now matches URLs against ALL compiled yt-dlp extractor patterns (1,700+
+> sites, generic excluded) instead of a hardcoded domain allowlist. See
+> [`docs/memory/tgbot-2026-08-12-ytdlp-full-support.md`](docs/memory/tgbot-2026-08-12-ytdlp-full-support.md).
+> (Prior sweep 2026-08-11: full admin-console + security pass after the
+> `modules/admin` & `modules/direct_forward` → sub-packages refactor; see
+> [`docs/memory/tgbot-2026-08-11-health-pass.md`](docs/memory/tgbot-2026-08-11-health-pass.md).)
 
 > **New to this?** The complete, beginner-friendly walkthrough — from "I just
 > bought a VPS" to "the bot is live" — lives in
@@ -246,37 +248,38 @@ The same pipeline in plain text (renders anywhere, terminal included):
 
 Only one handler owns text-that-is-a-link (`downloader_handler.py`, Group 1).
 It fires **only when the message starts with `http://` or `https://`**. Inside,
-the first fork decides almost everything: **is the host one of the six media
-crawlers, or not?** The two branches share almost nothing.
+the first fork decides almost everything: **is the URL known to yt-dlp, or
+not?** (checked against all 1,786 compiled yt-dlp `_VALID_URL` patterns,
+generic excluded — `utils/downloader/supported_sites.py`). The two branches
+share almost nothing.
 
 | What you send | Detected as | Path taken |
 |---|---|---|
-| `youtube.com` / `youtu.be` | social → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
-| `youtube.com/playlist?list=…` (or `watch?v=…&list=…`) | social → **YouTube playlist** | flat-extract list → **tier keyboard** (3 video + 3 audio: low/med/high) → download & upload each video |
-| `instagram.com` | social → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
-| `tiktok.com` | social → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · URL rewritten to `/embed/<id>` (yt-dlp#17403 hedge) · format keyboard |
-| `twitter.com` / `x.com` | social → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
-| **any other URL** | **direct file** | raw HTTP download — **no yt-dlp, no cookies, no format choice** |
+| `youtube.com` / `youtu.be` | yt-dlp → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
+| `youtube.com/playlist?list=…` (or `watch?v=…&list=…`) | yt-dlp → **YouTube playlist** | flat-extract list → **tier keyboard** (3 video + 3 audio: low/med/high) → download & upload each video |
+| `instagram.com` | yt-dlp → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
+| `tiktok.com` | yt-dlp → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · URL rewritten to `/embed/<id>` (yt-dlp#17403 hedge) · format keyboard |
+| `twitter.com` / `x.com` | yt-dlp → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
+| `nicovideo.jp`, `pornhub.com`, `clips.twitch.tv`, `vimeo.com`, `soundcloud.com`, `bilibili.com`, `bandcamp.com`, `reddit.com`, … (all other yt-dlp sites) | yt-dlp → that site | yt-dlp · per-site jar `cookies/ytdlp/<site>.txt` (if you added one) or global fallback · format keyboard |
+| **non-yt-dlp URL** (`example.com/video.mp4`, `…/archive.zip`, any generic file or unsupported host) | **direct file** | raw HTTP download — **no yt-dlp, no cookies, no format choice** |
 
-> ⚠️ The "direct file" branch is broader than it looks — it is **not** "all the
-> other yt-dlp sites." Only the six domains above ever reach yt-dlp. A Vimeo,
-> Soundcloud, Dailymotion, Facebook, or Reddit link — even though yt-dlp supports
-> them — is treated as a **direct file URL**: the bot just does an HTTP `GET` on
-> exactly the link you pasted. For a genuine direct file (`…/clip.mp4`,
-> `…/archive.zip`, `…/report.pdf`) that's correct and fast. For a media *page*
-> URL on a non-listed host you'll get the HTML page, not the media. You can also
-> append ` | custom-name.ext` to any link to rename the result. (The admin
-> **Cookie Jars** menu can add per-site jars for extra hosts, so the social
-> domain list is extensible without code changes.)
+> A genuine direct file (`…/clip.mp4`, `…/archive.zip`, `…/report.pdf`) that
+> lives on a page yt-dlp doesn't know about correctly stays on the direct-file
+> path and the bot does a plain `GET` on exactly the link you pasted. Only
+> **page URLs** that match a yt-dlp extractor (1,700+ sites) take the format
+> keyboard path — that routing is automatic (yt-dlp upgrades add new sites with
+> no bot-code change). You can also append ` | custom-name.ext` to any link to
+> rename the result. The admin **Cookie Jars** menu can add per-site jars for
+> any extra host.
 
 ```mermaid
 flowchart TD
     M([Authorized user sends text]) --> L{starts with<br/>http / https ?}
     L -- no --> X1([Admin Console / welcome<br/>not a download])
     L -- yes --> P["split on the '|' character<br/>url · optional custom name"]
-    P --> SOC{host is youtube / youtu.be<br/>instagram / tiktok /<br/>twitter / x ?}
+    P --> SOC{"URL matches a yt-dlp extractor?<br/>(1,786 compiled _VALID_URL patterns,<br/>generic excluded)"}
 
-    SOC -- YES · media crawler --> JAR["pick cookie jar by host<br/>(snapshot copy — live jar stays read-only)"]
+    SOC -- YES · yt-dlp site --> JAR["pick cookie jar by host<br/>(snapshot copy — live jar stays read-only)"]
     JAR --> YL{YouTube?}
     YL -- yes --> YS["cookies + PO token — the ONLY strategy<br/>provider must be running or it errors<br/>(no cookies-only / no-auth fallback)"]
     YL -- no --> OS["cookies first, then fall back to no-auth"]
@@ -299,7 +302,7 @@ flowchart TD
     DM --> UP1([split if over the limit → upload])
     UP1 --> OK1([✅ done])
 
-    SOC -- NO · not a crawler --> DF["treat as a DIRECT FILE URL"]
+    SOC -- NO · not yt-dlp --> DF["treat as a DIRECT FILE URL"]
     DF --> GET["aiohttp GET · 30-min timeout<br/>name = last path segment (URL-decoded)<br/>or your custom name"]
     GET --> BODY["stream body to disk · 512 KB chunks<br/>live progress bar"]
     BODY --> UP2([split if needed → upload<br/>as a plain document])
