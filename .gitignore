@@ -44,6 +44,8 @@ cookies/youtube/
 cookies/instagram/
 cookies/tiktok/
 cookies/twitter/
+cookies/meta.json
+cookies/*.txt
 # cookies/ytdlp/ — tracked as empty templates; real cookies go in .gitignore'd files
 # but we don't track individual *.txt in ytdlp/ to avoid committing real cookies
 # !cookies/ytdlp/  # uncomment to track the directory structure only
