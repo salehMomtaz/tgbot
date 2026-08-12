@@ -1,4 +1,4 @@
-"""Subscription webapp — mounted on the existing FastAPI (port 8080, behind nginx as https://tgbot.avistel.ir).
+"""Subscription webapp — mounted on the existing FastAPI (direct TLS https://tgbot.southpark.ir:8080).
 
 Routes:
   GET  /admin/subscription           -> Admin HTML panel (Telegram WebApp, admin only)
@@ -105,7 +105,7 @@ HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content=
  .ok{color:#6f6} .warn{color:#fa0} .muted{opacity:.6;font-size:12px}
  .pill{display:inline-block;background:#242836;border-radius:999px;padding:2px 8px;font-size:12px;margin:2px}
 </style>
-<h1>💳 Subscription Admin <span style="opacity:.5;font-size:13px">tgbot.avistel.ir</span></h1>
+<h1>💳 Subscription Admin <span style="opacity:.5;font-size:13px">tgbot.southpark.ir:8080</span></h1>
 <div id="app">Loading…</div>
 <script>
 const tg = window.Telegram?.WebApp; if(tg){tg.ready(); tg.expand();}
@@ -147,7 +147,7 @@ async function load(){
   <div class=card style="opacity:.8;font-size:12px">
     <b>Auth:</b> paste admin token from bot <code>/admin_token</code> if Telegram WebApp initData not available. Token is stored locally.
     <br><input id=tok placeholder="admin token" value="${token}" style="width:260px;margin-top:8px"> <button onclick="setTok()">Set</button>
-    <p class=muted>Admin write requires token or Telegram initData from creator. This page is only reachable via <code>https://tgbot.avistel.ir/admin/subscription</code> (TLS wildcard). For user status, open <a href="/app" style="color:#2ea6ff">/app</a> inside Telegram.</p>
+    <p class=muted>Admin write requires token or Telegram initData from creator. This page is only reachable via <code>https://tgbot.southpark.ir:8080/admin/subscription</code> (wildcard *.southpark.ir, direct TLS on 8080). For user status, open <a href="/app" style="color:#2ea6ff">/app</a> inside Telegram.</p>
   </div>`;
 }
 async function save(){
@@ -170,6 +170,85 @@ load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'
 </script>
 """
 
+HTML_ROOT = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>tgbot — Media Downloader</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:720px;margin:0 auto;padding:16px;background:#0f1115;color:#e6e6e6}
+ h1{font-size:22px;margin:10px 0} h2{font-size:18px;margin:16px 0 8px}
+ .card{background:#1a1d24;border-radius:12px;padding:16px;margin:12px 0}
+ .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
+ button{background:#2ea6ff;color:#fff;border:0;padding:12px 18px;border-radius:10px;cursor:pointer;font-weight:700;width:100%;margin:8px 0}
+ button.alt{background:#242836} a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:700;margin:6px 0}
+ table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #2a2e38;text-align:left;font-size:13px}
+ .badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;background:#242836}
+</style>
+<div id="root">
+<h1>📥 tgbot <span style="opacity:.5;font-size:13px">tgbot.southpark.ir:8080</span></h1>
+<div id="app">Loading…</div>
+</div>
+<script>
+const tg = window.Telegram?.WebApp;
+if(tg){ try{ tg.ready(); tg.expand(); }catch(e){} }
+function isTelegram(){ return !!(tg && tg.initData && tg.initData.length > 20); }
+async function loadRoot(){
+  const viaTG = isTelegram();
+  const info = document.getElementById('app');
+  // auto-redirect when opened as Telegram WebApp (BotFather Menu Button = "/")
+  if(viaTG){
+    info.innerHTML = `<div class=card><p>🔗 Telegram detected — redirecting to your portal…</p><p class=muted>initData present, checking role…</p></div>`;
+    try{
+      const h={}; if(tg.initData) h['X-Telegram-Init-Data']=tg.initData;
+      const r = await fetch('/api/user/status', {headers:h});
+      if(r.ok){
+        const j = await r.json();
+        // creator/admin → admin panel, others → user portal
+        if(j.subscription && j.subscription.is_creator){
+          location.href = '/admin/subscription';
+          return;
+        }
+      }
+    }catch(e){}
+    location.href = '/app';
+    return;
+  }
+  // Outside Telegram — show beautiful landing
+  let tiers={}; try{ tiers=(await (await fetch('/api/tiers')).json()).tiers||{}; }catch(e){}
+  let botUser=""; try{ botUser=(await (await fetch('/api/botinfo')).json()).username||""; }catch(e){}
+  const botLink = botUser ? `https://t.me/${botUser}` : `https://t.me/`;
+  info.innerHTML = `
+  <div class=card>
+    <h2>Welcome — Private Media Downloader</h2>
+    <p class=muted>Download from YouTube (cookies+PO), Instagram, TikTok, X/Twitter & 1,700+ yt-dlp sites. FastAPI streams at <code>https://tgbot.southpark.ir:8080</code></p>
+    <a class=btn href="${botLink}" target="_blank">🤖 Open bot in Telegram</a>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <a class=btn style="flex:1;background:#242836" href="/app">👤 User Portal (/app)</a>
+      <a class=btn style="flex:1;background:#242836" href="/admin/subscription">🛠 Admin (/admin/subscription)</a>
+    </div>
+    <p class=muted>Tip: set BotFather Menu Button to <code>https://tgbot.southpark.ir:8080/</code> — this page auto-detects Telegram WebApp and sends users/admins to the right panel. User portal needs Telegram auth; admin needs creator initData or <code>/admin_token</code>.</p>
+  </div>
+  <div class=card>
+    <h3>Plans</h3>
+    <table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>
+    ${Object.entries(tiers).map(([k,v])=>`<tr><td>${v.label} (${k})</td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('') || '<tr><td colspan=3 class=muted>loading…</td></tr>'}
+    </table>
+    <p class=muted>Free 5/d (last in queue) → Basic 100/d → Plus 500/d → Pro 2500/d. Pay via Telegram Stars (XTR) or TON memo = your user ID. Use <code>/subscription</code> in bot.</p>
+  </div>
+  <div class=card>
+    <h3>Direct links</h3>
+    <p class=muted>Bot domain: <code>https://tgbot.southpark.ir:8080</code> (wildcard *.southpark.ir, direct TLS on 8080, no nginx).</p>
+    <ul style="opacity:.8;font-size:13px">
+      <li><code>/app</code> — user subscription & quota (Telegram WebApp)</li>
+      <li><code>/admin/subscription</code> — admin console (creator only)</li>
+      <li><code>/api/tiers</code> — public tier JSON</li>
+      <li><code>/stream/...</code> — forwarded file streams (24h token)</li>
+    </ul>
+  </div>`;
+}
+loadRoot();
+</script>
+"""
+
 HTML_USER = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>My Subscription — tgbot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -182,8 +261,9 @@ HTML_USER = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="
  button.alt{background:#242836}
  .muted{opacity:.6;font-size:12px} .row{display:flex;justify-content:space-between;margin:6px 0}
  table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;border-bottom:1px solid #2a2e38;text-align:left;font-size:13px}
+ a.btn{display:inline-block;text-align:center;background:#2ea6ff;color:#fff;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700}
 </style>
-<h1>💳 My Subscription</h1>
+<h1>💳 My Subscription <a href="/" style="float:right;font-size:12px;color:#2ea6ff;text-decoration:none">← Home</a></h1>
 <div id="app">Loading…</div>
 <script>
 const tg = window.Telegram?.WebApp; if(tg){tg.ready(); tg.expand();}
@@ -192,7 +272,10 @@ async function getStatus(){
   const h={};
   if(initData) h['X-Telegram-Init-Data']=initData;
   const r = await fetch('/api/user/status', {headers:h});
-  if(!r.ok) throw new Error(await r.text());
+  if(!r.ok){
+    let msg=""; try{ const j=await r.json(); msg=j.detail||JSON.stringify(j); }catch(e){ try{ msg=await r.text(); }catch(_){ msg=r.statusText; } }
+    throw new Error(msg||`HTTP ${r.status}`);
+  }
   return r.json();
 }
 async function getTiers(){
@@ -203,7 +286,26 @@ function tierBadge(t){ const c = {free:'badge-free', basic:'badge-basic', plus:'
 async function load(){
   const [st, tiersRes] = await Promise.all([getStatus().catch(e=>({error:e.message})), getTiers().catch(()=>({tiers:{}}))]);
   if(st.error){
-    document.getElementById('app').innerHTML = `<div class=card><p style="color:#f66">${st.error}</p><p class=muted>Open this page from Telegram (bot → /subscription → Open Mini App) so initData is available. Outside Telegram, this portal needs Telegram auth.</p></div>`;
+    const tiers = tiersRes.tiers||{};
+    const isTG = !!(tg && tg.initData);
+    document.getElementById('app').innerHTML = `
+      <div class=card style="border:1px solid #3a2a2a;background:#1e1515">
+        <h3 style="margin-top:0">🔒 Telegram auth required</h3>
+        <p>${st.error.includes("Unauthorized") ? "This portal needs Telegram WebApp <code>initData</code> — open it from inside Telegram." : st.error}</p>
+        <p class=muted>${isTG ? "Telegram detected but verification failed — try closing and reopening from the bot's Menu Button. If you opened via browser, use Telegram." : "You opened <code>/app</code> in a normal browser. No <code>initData</code> — the bot can't tell who you are."}</p>
+        <p class=muted>BotFather Menu Button should point to <code>https://tgbot.southpark.ir:8080/</code> (root) or <code>/app</code> — root auto-redirects users vs admins.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <a class=btn href="/">← Back to Home (/)</a>
+          <button class=alt onclick="location.reload()">🔄 Retry</button>
+        </div>
+      </div>
+      <div class=card>
+        <h3>Plans (public)</h3>
+        <table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>
+        ${Object.entries(tiers).map(([k,v])=>`<tr><td>${v.label} (${k})</td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('') || '<tr><td colspan=3 class=muted>—</td></tr>'}
+        </table>
+        <p class=muted>Use <code>/subscription</code> inside the bot to buy with Stars. Outside Telegram you can only browse.</p>
+      </div>`;
     return;
   }
   const tiers = tiersRes.tiers || {};
@@ -234,7 +336,7 @@ async function load(){
     <button class=alt onclick="location.reload()">🔄 Refresh</button>
   </div>
   ${hist.length ? `<div class=card><h3>Recent usage (7d)</h3><table><tr><th>Date</th><th>Count</th></tr>${hist.map(h=>`<tr><td>${h.date}</td><td>${h.count}</td></tr>`).join('')}</table></div>` : ''}
-  <div class=card><p class=muted>Bot: <code>https://tgbot.avistel.ir</code> · Streaming via <code>https://tgbot.avistel.ir/stream/...</code> · Need help? Contact admin via bot.</p></div>
+  <div class=card><p class=muted>Bot: <code>https://tgbot.southpark.ir:8080</code> · Streaming via <code>https://tgbot.southpark.ir:8080/stream/...</code> · Need help? Contact admin via bot.</p></div>
   `;
 }
 function buy(tier){
@@ -252,6 +354,10 @@ load().catch(e=> document.getElementById('app').innerHTML='<p style=color:#f66>'
 
 
 def mount(fastapi_app):
+    @fastapi_app.get("/", response_class=HTMLResponse)
+    async def _root():
+        return HTML_ROOT
+
     @fastapi_app.get("/admin/subscription", response_class=HTMLResponse)
     async def _page():
         return HTML_ADMIN
@@ -264,6 +370,31 @@ def mount(fastapi_app):
     async def _tiers():
         from utils.subscription.tiers import TIERS
         return JSONResponse({"tiers": TIERS})
+
+    _botinfo_cache: dict = {"at": 0, "username": ""}
+
+    @fastapi_app.get("/api/botinfo")
+    async def _botinfo():
+        # try to resolve bot username via getMe (cached 1h)
+        username = ""
+        try:
+            import time as _t, urllib.request, json as _j
+            now = int(_t.time())
+            if now - _botinfo_cache["at"] < 3600 and _botinfo_cache["username"]:
+                username = _botinfo_cache["username"]
+            else:
+                tok = getattr(config, "BOT_TOKEN", "") or ""
+                if tok:
+                    url = f"https://api.telegram.org/bot{tok}/getMe"
+                    with urllib.request.urlopen(url, timeout=5) as resp:
+                        data = _j.loads(resp.read().decode())
+                        if data.get("ok"):
+                            username = data.get("result", {}).get("username", "")
+                            _botinfo_cache["at"] = now
+                            _botinfo_cache["username"] = username
+        except Exception:
+            username = ""
+        return JSONResponse({"username": username, "domain": getattr(config, "DOMAIN", ""), "webapp_root": "/", "webapp_app": "/app", "webapp_admin": "/admin/subscription"})
 
     @fastapi_app.get("/admin/subscription/api")
     async def _api_get(request: Request):
