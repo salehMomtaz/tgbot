@@ -708,7 +708,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
     # Subscription admin (💳)
     # =========================================================================
     elif data == "admin_sub_menu":
-        from utils.subscription.store import get_settings, list_subscriptions
+        from utils.subscription.store import get_settings, get_channels, list_subscriptions
         from utils.subscription.tiers import TIERS, TIER_ORDER
         s = get_settings()
         subs = list_subscriptions()
@@ -717,22 +717,26 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         active_count = sum(1 for v in subs.values() if int(v.get("until", 0)) > now)
         en = "🟢 ON" if s.get("enabled") else "🔴 OFF"
         free = "✅" if s.get("free_enabled") else "❌"
-        ch = s.get("channel_username") or (str(s.get("channel_id")) if s.get("channel_id") else "—")
+        chans = get_channels()
+        if chans:
+            ch = ", ".join([c.get("username") or str(c.get("id")) for c in chans])
+        else:
+            ch = s.get("channel_username") or (str(s.get("channel_id")) if s.get("channel_id") else "— (none)")
         tier_lines = " · ".join(f"{TIERS[t]['label']}:{TIERS[t]['price_stars']}⭐" for t in TIER_ORDER)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{'🔴 Disable' if s.get('enabled') else '🟢 Enable'} subscription mode", callback_data="admin_sub_toggle")],
             [InlineKeyboardButton(f"Free tier: {free}", callback_data="admin_sub_toggle_free")],
-            [InlineKeyboardButton("📢 Set channel", callback_data="admin_sub_set_channel"), InlineKeyboardButton("🌐 WebApp", callback_data="admin_sub_webapp")],
+            [InlineKeyboardButton("➕ Add channel", callback_data="admin_sub_add_channel"), InlineKeyboardButton("➖ Remove channel", callback_data="admin_sub_remove_channel")],
+            [InlineKeyboardButton("🌐 WebApp", callback_data="admin_sub_webapp"), InlineKeyboardButton("📋 List subs", callback_data="admin_sub_list")],
             [InlineKeyboardButton("➕ Grant sub", callback_data="admin_sub_grant"), InlineKeyboardButton("➖ Revoke sub", callback_data="admin_sub_revoke")],
-            [InlineKeyboardButton("📋 List subs", callback_data="admin_sub_list"), InlineKeyboardButton("🔄 Refresh", callback_data="admin_sub_menu")],
-            [InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
+            [InlineKeyboardButton("🔄 Refresh", callback_data="admin_sub_menu"), InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
         ])
         await callback_query.message.edit_text(
             f"💳 **Subscriptions**\n\n"
-            f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel: `{ch}`\n"
+            f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel(s): `{ch}`\n"
             f"Active subs: **{active_count}**\nTiers: {tier_lines}\n\n"
             f"Free users go last in the download queue (priority 0 vs 1-3). "
-            f"WebApp at `/admin/subscription` (same port 8080).",
+            f"WebApp at `/admin/subscription` (same port 8080, also `https://tgbot.avistel.ir/admin/subscription`).",
             reply_markup=kb
         )
         await callback_query.answer()
@@ -762,14 +766,31 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await _admin_callback_dispatch(client, callback_query)
         return
 
-    elif data == "admin_sub_set_channel":
-        USER_STATES[user_id] = "waiting_for_sub_channel"
+    elif data in ("admin_sub_set_channel", "admin_sub_add_channel"):
+        USER_STATES[user_id] = "waiting_for_sub_channel_add"
         ACTIVE_PROMPTS[user_id] = callback_query.message.id
+        from utils.subscription.store import get_channels
+        cur = get_channels()
+        cur_txt = ", ".join([c.get("username") or str(c.get("id")) for c in cur]) if cur else "— (none yet)"
         await callback_query.message.edit_text(
-            "📢 **Set force-join channel**\n\n"
+            f"📢 **Add force-join channel**\n\nCurrent: `{cur_txt}`\n\n"
             "Send the channel **@username** (e.g. `@mychannel`) or numeric ID (e.g. `-100123...`).\n"
-            "Send `0` or `clear` to remove the requirement (free tier without join).\n\n"
-            "_Free users must be members to download when subscription mode is ON._",
+            "You can add multiple — each is required.\n"
+            "Send `0` or `clear` to remove ALL channels.\n\n"
+            "_Free users must be members of ALL listed channels to download when subscription mode is ON._",
+            reply_markup=back_markup
+        )
+        await callback_query.answer()
+
+    elif data == "admin_sub_remove_channel":
+        USER_STATES[user_id] = "waiting_for_sub_channel_remove"
+        ACTIVE_PROMPTS[user_id] = callback_query.message.id
+        from utils.subscription.store import get_channels as _gc2
+        cur2 = _gc2()
+        cur_txt2 = ", ".join([c.get("username") or str(c.get("id")) for c in cur2]) if cur2 else "— (none)"
+        await callback_query.message.edit_text(
+            f"🗑 **Remove force-join channel**\n\nCurrent: `{cur_txt2}`\n\n"
+            "Send the **@username** or numeric ID to remove (or `all` / `0` to clear).",
             reply_markup=back_markup
         )
         await callback_query.answer()

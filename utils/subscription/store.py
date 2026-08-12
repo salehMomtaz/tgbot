@@ -32,6 +32,7 @@ DEFAULT_SUB_SETTINGS = {
     "free_enabled": bool(getattr(config, "SUB_FREE_ENABLED", False)),
     "channel_id": int(getattr(config, "SUB_CHANNEL_ID", 0) or 0),
     "channel_username": str(getattr(config, "SUB_CHANNEL_USERNAME", "") or ""),
+    "channels": [],  # list of {id:int, username:str} — multi-channel force-join
 }
 
 
@@ -49,6 +50,13 @@ def _load_raw() -> dict:
         for k, v in DEFAULT_SUB_SETTINGS.items():
             if k not in db["sub_settings"]:
                 db["sub_settings"][k] = v
+        # migrate legacy single channel -> channels list
+        db["sub_settings"].setdefault("channels", [])
+        if db["sub_settings"].get("channels") == []:
+            legacy_id = int(db["sub_settings"].get("channel_id", 0) or 0)
+            legacy_user = str(db["sub_settings"].get("channel_username", "") or "").strip()
+            if legacy_id or legacy_user:
+                db["sub_settings"]["channels"] = [{"id": legacy_id, "username": legacy_user}]
     return db
 
 
@@ -62,12 +70,84 @@ def get_settings() -> dict:
     return dict(db.get("sub_settings", DEFAULT_SUB_SETTINGS))
 
 
+def get_channels() -> list[dict]:
+    """Return normalized channels list."""
+    s = get_settings()
+    chans = s.get("channels") or []
+    # legacy fallback
+    if not chans:
+        cid = s.get("channel_id")
+        cuser = s.get("channel_username")
+        if cid or cuser:
+            chans = [{"id": int(cid or 0), "username": str(cuser or "").strip()}]
+    # sanitize
+    out = []
+    for c in chans:
+        if not isinstance(c, dict):
+            continue
+        cid = int(c.get("id", 0) or 0)
+        user = str(c.get("username", "") or "").strip()
+        if cid or user:
+            out.append({"id": cid, "username": user})
+    return out
+
+
+def add_channel(channel_id: int = 0, channel_username: str = "") -> list[dict]:
+    with _LOCK:
+        from utils.gate import load_database, save_database
+        db = load_database()
+        if "sub_settings" not in db:
+            db["sub_settings"] = dict(DEFAULT_SUB_SETTINGS)
+        db["sub_settings"].setdefault("channels", [])
+        # migrate legacy if needed
+        if not db["sub_settings"]["channels"] and (db["sub_settings"].get("channel_id") or db["sub_settings"].get("channel_username")):
+            db["sub_settings"]["channels"] = [{"id": int(db["sub_settings"].get("channel_id", 0) or 0), "username": str(db["sub_settings"].get("channel_username", "") or "").strip()}]
+        # dedup
+        for c in db["sub_settings"]["channels"]:
+            if (channel_id and c.get("id") == channel_id) or (channel_username and c.get("username") == channel_username):
+                save_database(db)
+                return list(db["sub_settings"]["channels"])
+        db["sub_settings"]["channels"].append({"id": int(channel_id or 0), "username": str(channel_username or "").strip()})
+        # keep legacy synced (first entry)
+        if db["sub_settings"]["channels"]:
+            db["sub_settings"]["channel_id"] = int(db["sub_settings"]["channels"][0].get("id", 0) or 0)
+            db["sub_settings"]["channel_username"] = str(db["sub_settings"]["channels"][0].get("username", "") or "")
+        save_database(db)
+        return list(db["sub_settings"]["channels"])
+
+
+def remove_channel(channel_id: int = 0, channel_username: str = "") -> list[dict]:
+    with _LOCK:
+        from utils.gate import load_database, save_database
+        db = load_database()
+        if "sub_settings" not in db:
+            db["sub_settings"] = dict(DEFAULT_SUB_SETTINGS)
+        chans = db["sub_settings"].get("channels", [])
+        new = []
+        for c in chans:
+            if channel_id and c.get("id") == channel_id:
+                continue
+            if channel_username and c.get("username") == channel_username:
+                continue
+            new.append(c)
+        db["sub_settings"]["channels"] = new
+        if new:
+            db["sub_settings"]["channel_id"] = int(new[0].get("id", 0) or 0)
+            db["sub_settings"]["channel_username"] = str(new[0].get("username", "") or "")
+        else:
+            db["sub_settings"]["channel_id"] = 0
+            db["sub_settings"]["channel_username"] = ""
+        save_database(db)
+        return list(new)
+
+
 def set_settings(**kwargs) -> dict:
     with _LOCK:
         from utils.gate import load_database, save_database
         db = load_database()
         if "sub_settings" not in db:
             db["sub_settings"] = dict(DEFAULT_SUB_SETTINGS)
+        db["sub_settings"].setdefault("channels", [])
         for k, v in kwargs.items():
             if k in DEFAULT_SUB_SETTINGS:
                 db["sub_settings"][k] = v
@@ -79,6 +159,27 @@ def set_settings(**kwargs) -> dict:
                 pass
         if "channel_username" in kwargs:
             db["sub_settings"]["channel_username"] = str(kwargs["channel_username"]).strip()
+        if "channels" in kwargs and isinstance(kwargs["channels"], list):
+            # sanitize full list
+            sanitized = []
+            for c in kwargs["channels"]:
+                if not isinstance(c, dict):
+                    continue
+                sanitized.append({"id": int(c.get("id", 0) or 0), "username": str(c.get("username", "") or "").strip()})
+            db["sub_settings"]["channels"] = sanitized
+            if sanitized:
+                db["sub_settings"]["channel_id"] = int(sanitized[0].get("id", 0) or 0)
+                db["sub_settings"]["channel_username"] = str(sanitized[0].get("username", "") or "")
+            else:
+                db["sub_settings"]["channel_id"] = 0
+                db["sub_settings"]["channel_username"] = ""
+        # keep channels in sync if only legacy single was changed via UI
+        if "channel_id" in kwargs or "channel_username" in kwargs:
+            cid = int(db["sub_settings"].get("channel_id", 0) or 0)
+            cuser = str(db["sub_settings"].get("channel_username", "") or "").strip()
+            # if channels empty but legacy has value, seed channels
+            if not db["sub_settings"].get("channels") and (cid or cuser):
+                db["sub_settings"]["channels"] = [{"id": cid, "username": cuser}]
         save_database(db)
         return dict(db["sub_settings"])
 

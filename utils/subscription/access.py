@@ -41,6 +41,34 @@ async def is_channel_member(client, user_id: int, channel_id: int) -> bool:
         return False
 
 
+async def check_all_channels(client, user_id: int) -> tuple[bool, list[dict]]:
+    """Return (all_joined, missing_list). Empty missing means all joined or no channels."""
+    from .store import get_channels
+    chans = get_channels()
+    if not chans:
+        return True, []
+    missing: list[dict] = []
+    for ch in chans:
+        cid = int(ch.get("id", 0) or 0)
+        if cid:
+            ok = await is_channel_member(client, user_id, cid)
+        else:
+            # username-only: try to resolve username to id first
+            uname = ch.get("username", "")
+            ok = False
+            if uname:
+                try:
+                    chat = await client.get_chat(uname)
+                    cid_resolved = int(getattr(chat, "id", 0) or 0)
+                    if cid_resolved:
+                        ok = await is_channel_member(client, user_id, cid_resolved)
+                except Exception:
+                    ok = False
+        if not ok:
+            missing.append(ch)
+    return (len(missing) == 0), missing
+
+
 async def check_access(client, user_id: int) -> tuple[bool, str]:
     """
     Returns (allowed, reason_code).
@@ -66,10 +94,11 @@ async def check_access(client, user_id: int) -> tuple[bool, str]:
 
     # check free path
     if settings.get("free_enabled"):
-        # if channel is set, check membership; else allow free directly
-        ch_id = settings.get("channel_id", 0)
-        if ch_id:
-            ok = await is_channel_member(client, user_id, ch_id)
+        # if channels are set, check all memberships; else allow free directly
+        from .store import get_channels
+        chans = get_channels()
+        if chans:
+            ok, missing = await check_all_channels(client, user_id)
             if ok:
                 return True, "ok"
             return False, "need_channel"

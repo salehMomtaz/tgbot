@@ -393,6 +393,34 @@ if [[ -f "$PROJECT_DIR/deploy/tgbot-xchat-bridge.service" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 6e. Nginx reverse proxy for https://tgbot.avistel.ir (wildcard *.avistel.ir)
+# ---------------------------------------------------------------------------
+# FastAPI listens on 127.0.0.1:8080 plain HTTP; nginx terminates TLS with the
+# wildcard cert at /etc/letsencrypt/live/avistel.ir/ (already valid for
+# tgbot.avistel.ir via *.avistel.ir). This is best-effort: if nginx/certbot
+# are not present, we skip and the bot still runs on plain HTTP 8080.
+if [[ -f "$PROJECT_DIR/deploy/tgbot.avistel.ir.conf" ]]; then
+    if have nginx && [[ -d /etc/nginx/sites-available ]]; then
+        if [[ -f /etc/letsencrypt/live/avistel.ir/fullchain.pem ]]; then
+            log "Installing nginx vhost tgbot.avistel.ir → 127.0.0.1:8080 ..."
+            $SUDO cp "$PROJECT_DIR/deploy/tgbot.avistel.ir.conf" /etc/nginx/sites-available/tgbot.avistel.ir
+            $SUDO ln -sf /etc/nginx/sites-available/tgbot.avistel.ir /etc/nginx/sites-enabled/tgbot.avistel.ir
+            if $SUDO nginx -t >/dev/null 2>&1; then
+                $SUDO systemctl reload nginx 2>/dev/null || $SUDO nginx -s reload 2>/dev/null || true
+                log "nginx vhost tgbot.avistel.ir installed + reloaded (https://tgbot.avistel.ir → 8080)."
+            else
+                warn "nginx -t failed after installing tgbot vhost — leaving disabled. Check /etc/nginx/sites-available/tgbot.avistel.ir"
+            fi
+            note "nginx-vhost:/etc/nginx/sites-enabled/tgbot.avistel.ir"
+        else
+            log "nginx present but wildcard cert /etc/letsencrypt/live/avistel.ir/* missing — skipping tgbot vhost (run certbot later and re-run install.sh)."
+        fi
+    else
+        log "nginx not found or no sites-available — skipping tgbot vhost (bot still works on http://:8080; install nginx + certbot for https://tgbot.avistel.ir)."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Seed a .env from .env.example if none exists (newbie convenience)
 # ---------------------------------------------------------------------------
 if [[ ! -f ".env" && -f ".env.example" ]]; then

@@ -52,6 +52,39 @@ def register_admin_handlers(app: Client):
         if is_blacklisted(user_id):
             message.stop_propagation()
 
+        # Subscription-aware gate: when subscription mode is ON, do NOT auto-blacklist
+        # strangers — they will be shown a subscription / channel prompt instead.
+        try:
+            from utils.subscription.store import get_settings, is_subscription_active
+            sub_s = get_settings()
+            if sub_s.get("enabled"):
+                if user_id == config.SYSTEM_CREATOR_ID:
+                    return  # creator always passes
+                active, _ = is_subscription_active(user_id)
+                if active:
+                    return
+                if sub_s.get("free_enabled"):
+                    return  # free tier (channel check later)
+                if is_authorized(user_id):
+                    return
+                # subscription required but none — do NOT blacklist here; let the
+                # downstream handler (downloader gate or Group-1 welcome) show the
+                # /subscription prompt. Stopping silently would hide the prompt.
+                # We still stop propagation for non-link strangers to show a
+                # minimal subscription nudge in Group 1, but we don't blacklist.
+                # Let Group 1 handle it; just don't block links (downloader does).
+                from modules.downloader_handler import is_link
+                txt = (message.text or "").strip()
+                is_link_msg = is_link(txt.split("|")[0].strip()) if txt else False
+                if not is_link_msg:
+                    # For non-link chatter, show subscription prompt via Group 1 fallback
+                    # — don't blacklist. Just let Group 1 run (no stop).
+                    return
+                # For links, also let downloader's gate_and_quota_check render the UI
+                return
+        except Exception:
+            pass
+
         if not is_authorized(user_id):
             blacklist_user(user_id)
             await log_event(f"⚠️ **Intruder Blocked:** User `{user_id}` has been banned and blacklisted.")
@@ -184,65 +217,100 @@ def register_admin_handlers(app: Client):
             return
 
         # 1e. Subscription free-form states (must be handled before the telegram-ID gate)
-        if state == "waiting_for_sub_channel":
+        # Helper to parse a channel identifier (id or @username) via Telegram API
+        async def _parse_channel_input(txt: str):
+            txt = txt.strip()
+            cid, cuser = 0, ""
+            if txt.startswith("@"):
+                cuser = txt.strip()
+                try:
+                    chat = await client.get_chat(cuser)
+                    cid = int(getattr(chat, "id", 0) or 0)
+                except Exception:
+                    cid = 0
+            else:
+                try:
+                    cid = int(txt)
+                    if not (-9999999999999 <= cid <= 9999999999999):
+                        raise ValueError
+                except Exception:
+                    # bare username without @
+                    cuser = "@" + txt.lstrip("@")
+                    try:
+                        chat = await client.get_chat(cuser)
+                        cid = int(getattr(chat, "id", 0) or 0)
+                    except Exception:
+                        cid = 0
+            return cid, cuser
+
+        if state in ("waiting_for_sub_channel", "waiting_for_sub_channel_add"):
             txt = input_text.strip()
             if txt.lower() in ("0", "clear", "remove", "none", "-"):
                 from utils.subscription.store import set_settings as _set_sub
-                _set_sub(channel_id=0, channel_username="")
+                _set_sub(channels=[], channel_id=0, channel_username="")
                 USER_STATES.pop(user_id, None)
                 if prompt_id:
                     try:
                         await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
                     except Exception:
                         pass
-                await message.reply_text("✅ Force-join channel **removed** (free tier without channel).", reply_markup=back_markup)
-                await log_event("💳 **Admin:** Force-join channel cleared.")
+                await message.reply_text("✅ All force-join channels **removed** (free tier without channel).", reply_markup=back_markup)
+                await log_event("💳 **Admin:** All force-join channels cleared.")
                 message.stop_propagation()
                 return
-            # Accept @username or numeric ID (channels are negative)
-            channel_id = 0
-            channel_username = ""
-            if txt.startswith("@"):
-                channel_username = txt.strip()
-                # try to resolve to numeric id for member checks; best-effort
-                try:
-                    chat = await client.get_chat(channel_username)
-                    channel_id = int(getattr(chat, "id", 0) or 0)
-                except Exception:
-                    channel_id = 0
-            else:
-                # numeric id
-                try:
-                    channel_id = int(txt)
-                    # if 0 or not plausible, treat as username without @
-                    if -9999999999999 <= channel_id <= 9999999999999:
-                        pass
-                    else:
-                        raise ValueError
-                    if channel_username == "" and txt.lstrip("-").isdigit():
-                        channel_username = ""
-                except Exception:
-                    # maybe bare username without @
-                    channel_username = "@" + txt.lstrip("@")
-                    try:
-                        chat = await client.get_chat(channel_username)
-                        channel_id = int(getattr(chat, "id", 0) or 0)
-                    except Exception:
-                        channel_id = 0
-            from utils.subscription.store import set_settings as _set_sub2
-            _set_sub2(channel_id=channel_id, channel_username=channel_username)
+            cid, cuser = await _parse_channel_input(txt)
+            if not cid and not cuser:
+                await message.reply_text("❌ Could not parse channel. Send @username or numeric ID.", reply_markup=back_markup)
+                message.stop_propagation()
+                return
+            from utils.subscription.store import add_channel as _add_ch
+            chans = _add_ch(channel_id=cid, channel_username=cuser)
             USER_STATES.pop(user_id, None)
             if prompt_id:
                 try:
                     await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
                 except Exception:
                     pass
+            ch_list = ", ".join([c.get("username") or str(c.get("id")) for c in chans]) or "—"
             await message.reply_text(
-                f"✅ Force-join channel set to `{channel_username or channel_id}`\n"
-                f"(id: `{channel_id}` username: `{channel_username or '—'}`).",
+                f"✅ Channel added: `{cuser or cid}`\n"
+                f"Now tracking: {ch_list}",
                 reply_markup=back_markup
             )
-            await log_event(f"💳 **Admin:** Force-join channel set to {channel_username or channel_id} (id {channel_id}).")
+            await log_event(f"💳 **Admin:** Force-join channel added {cuser or cid} (id {cid}). Now {len(chans)} channels.")
+            message.stop_propagation()
+            return
+
+        if state == "waiting_for_sub_channel_remove":
+            txt = input_text.strip()
+            if txt.lower() in ("0", "clear", "all"):
+                from utils.subscription.store import set_settings as _set_sub3
+                _set_sub3(channels=[], channel_id=0, channel_username="")
+                USER_STATES.pop(user_id, None)
+                if prompt_id:
+                    try:
+                        await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                    except Exception:
+                        pass
+                await message.reply_text("✅ All force-join channels cleared.", reply_markup=back_markup)
+                await log_event("💳 **Admin:** All force-join channels cleared (remove).")
+                message.stop_propagation()
+                return
+            cid, cuser = await _parse_channel_input(txt)
+            from utils.subscription.store import remove_channel as _rm_ch
+            chans = _rm_ch(channel_id=cid, channel_username=cuser)
+            USER_STATES.pop(user_id, None)
+            if prompt_id:
+                try:
+                    await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
+                except Exception:
+                    pass
+            ch_list = ", ".join([c.get("username") or str(c.get("id")) for c in chans]) or "— (none)"
+            await message.reply_text(
+                f"✅ Channel removed: `{cuser or cid}`\nRemaining: {ch_list}",
+                reply_markup=back_markup
+            )
+            await log_event(f"💳 **Admin:** Force-join channel removed {cuser or cid}. Remaining {len(chans)}")
             message.stop_propagation()
             return
 
@@ -553,12 +621,57 @@ def register_admin_handlers(app: Client):
                 reply_markup=keyboard
             )
         else:
+            # subscription-aware welcome: if sub mode ON, show tailored prompt
+            try:
+                from utils.subscription.store import get_settings
+                from utils.subscription.access import check_access
+                from utils.subscription.tiers import TIERS
+                from modules.subscription.handlers import _tiers_keyboard, _sub_status_text
+                s = get_settings()
+                if s.get("enabled"):
+                    ok, reason = await check_access(client, user_id)
+                    if not ok:
+                        if reason == "need_channel":
+                            from utils.subscription.store import get_channels
+                            from utils.subscription.access import check_all_channels
+                            chans = get_channels()
+                            _, missing = await check_all_channels(client, user_id)
+                            if not missing:
+                                missing = chans
+                            lines = []
+                            kb_rows = []
+                            for ch in missing:
+                                cuser = ch.get("username") or ""
+                                cid = ch.get("id", 0)
+                                if cuser:
+                                    link = f"https://t.me/{cuser.lstrip('@')}"
+                                    lines.append(f"• {cuser} — {link}")
+                                    kb_rows.append([InlineKeyboardButton(f"📢 Join {cuser}", url=link)])
+                                else:
+                                    lines.append(f"• channel `{cid}`")
+                            kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+                            await message.reply_text(
+                                f"👋 **Welcome!** Free access requires joining:\n" + "\n".join(lines) + "\n\nJoin all, then send a link. Or unlock unlimited with /subscription.",
+                                reply_markup=kb
+                            )
+                            message.stop_propagation()
+                            return
+                        if reason == "need_subscription":
+                            await message.reply_text(
+                                f"👋 **Welcome!**\n\n{_sub_status_text(user_id)}\n\nUse /subscription to choose a tier (Basic 100/d, Plus 500/d, Pro 2500/d) — or join required channels for free tier.",
+                                reply_markup=_tiers_keyboard()
+                            )
+                            message.stop_propagation()
+                            return
+            except Exception:
+                pass
             await message.reply_text(
                 "👋 **Hello! Welcome to your Private Downloader Bot.**\n\n"
                 "To get started:\n"
                 "• Send me any YouTube, Instagram, TikTok, or X/Twitter link to download it.\n"
                 "• Send me any direct file URL to upload it directly to Telegram.\n"
-                "• Forward me a Telegram file (video, document, music) to generate an instant direct stream link."
+                "• Forward me a Telegram file (video, document, music) to generate an instant direct stream link.\n\n"
+                "Use /subscription to see plans."
             )
         message.stop_propagation()
 

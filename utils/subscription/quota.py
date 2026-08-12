@@ -52,12 +52,12 @@ def check_quota(user_id: int) -> tuple[bool, int, int]:
     return allowed, max(0, limit - used), limit
 
 
+_QUOTA_LOCK = __import__("threading").Lock()
+
 def increment_quota(user_id: int) -> int:
     """Increment today's usage and return new count (thread-safe)."""
     from utils.gate import load_database, save_database
-    import threading
-    _lock = threading.Lock()
-    with _lock:
+    with _QUOTA_LOCK:
         db = load_database()
         if "usage" not in db:
             db["usage"] = {}
@@ -66,15 +66,14 @@ def increment_quota(user_id: int) -> int:
         if uid not in db["usage"]:
             db["usage"][uid] = {}
         db["usage"][uid][today] = db["usage"][uid].get(today, 0) + 1
-        # prune old dates (> 7 days) to keep file small
+        # prune old dates — keep at most 7 per user, oldest first
         for u, dates in list(db["usage"].items()):
-            for d in list(dates.keys()):
-                if d != today:
-                    # keep at most 7 entries
-                    if len(dates) > 7:
-                        # remove oldest
-                        oldest = sorted(dates.keys())[0]
-                        if oldest != today:
-                            del dates[oldest]
+            if len(dates) > 7:
+                for old in sorted(d for d in dates.keys() if d != today)[: len(dates) - 7]:
+                    dates.pop(old, None)
+            # also drop stray empty dicts older than 30 days for hygiene
+            # (cheap: if user never returns, their entry lingers ~30d)
+            if not dates:
+                db["usage"].pop(u, None)
         save_database(db)
         return db["usage"][uid][today]

@@ -54,6 +54,12 @@ class TelegramChannelHandler(logging.Handler):
     def emit(self, record):
         try:
             log_entry = self.format(record)
+            # redact any accidental token leakage
+            try:
+                from utils.security import redact_token as _redact
+                log_entry = _redact(log_entry)
+            except Exception:
+                pass
 
             # Format timestamp and level tags
             timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record.created))

@@ -349,9 +349,38 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         text = message.text.strip()
         user_id = message.from_user.id
 
+        # flood guard — tier-aware (free 5/min, paid higher, creator 30/min)
+        try:
+            from utils.security import is_flood
+            from utils.subscription.tiers import TIERS
+            from utils.subscription.store import is_subscription_active
+            active, sub = is_subscription_active(user_id)
+            if user_id == getattr(config, "SYSTEM_CREATOR_ID", 0):
+                flood_lim = 30
+            elif active and sub:
+                tier = sub.get("tier", "free")
+                # pro gets more leeway
+                flood_lim = {"basic": 8, "plus": 12, "pro": 20}.get(tier, 5)
+            else:
+                flood_lim = 5
+            if is_flood(user_id, window=60, limit=flood_lim):
+                await message.reply_text("⏳ You're sending links too fast — wait a minute and try again.")
+                return
+        except Exception:
+            pass
+
         parts = text.split("|", 1)
         url = parts[0].strip()
         custom_filename = parts[1].strip() if len(parts) > 1 else None
+
+        # URL sanity (length + scheme)
+        try:
+            from utils.security import is_safe_url
+            if not is_safe_url(url):
+                await message.reply_text("❌ Invalid URL (must be http/https, max 2048 chars).")
+                return
+        except Exception:
+            pass
 
         # subscription gate (quota + channel force-join) — when subscription mode is on this is the source of truth
         try:

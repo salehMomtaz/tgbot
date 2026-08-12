@@ -59,6 +59,7 @@ required). Runs as a `systemd` service that survives reboots.
   Files pipe from Telegram to your browser on the fly via a FastAPI bridge.
 - **🩺 Site-aware errors.** Opaque yt-dlp exceptions become clear messages:
   sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
+- **💳 Subscriptions (Stars/TON/Gram).** Toggleable 3-tier plans (Basic 100/d 100⭐, Plus 500/d 250⭐, Pro 2500/d 500⭐) + free tier (5/d, or join channels). Telegram Stars invoices + TON inbound via memo (`/api/user/status`), daily quota, multi-channel force-join, priority queue (free last), and a WebApp admin portal at `https://tgbot.avistel.ir/admin/subscription` + user portal at `/app`.
 - **🖥️ Standalone system monitor.** A tiny static Go binary (`cmd/tgbot-monitor/`)
   posts `#system` reports and 80% CPU/RAM/disk warnings to your log channel —
   even when the bot itself is down.
@@ -128,6 +129,7 @@ inline-button console:
 | 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. Add jars for any other site (per-site). |
 | 🔐 PO Token | Start / stop / restart / diagnose the PO-token provider; live status badge. |
 | 📨 Direct-Forward | Pair / unpair the bot's Instagram account for the DM relay. |
+| 💳 Subscriptions | Toggle mode, free tier + multi-channel add/remove, Stars/TON tiers, grant/revoke, WebApp at `https://tgbot.avistel.ir/admin/subscription` + user portal `/app`. Queue priority 0→3. |
 | 💥 Abort Transfer | Cancel everything in the queue and purge the cache. |
 
 ---

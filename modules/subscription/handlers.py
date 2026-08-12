@@ -257,14 +257,26 @@ async def gate_and_quota_check(client, message: Message) -> bool:
             await message.reply_text("🚫 You are blacklisted.")
             return False
         if reason == "need_channel":
-            ch_user = settings.get("channel_username") or ""
-            ch_id = settings.get("channel_id", 0)
-            link = f"https://t.me/{ch_user.lstrip('@')}" if ch_user else f"channel {ch_id}"
-            kb = None
-            if ch_user:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Channel", url=link)]])
+            from utils.subscription.store import get_channels
+            from utils.subscription.access import check_all_channels
+            chans = get_channels()
+            _, missing = await check_all_channels(client, user_id)
+            if not missing:
+                missing = chans
+            lines = []
+            kb_rows = []
+            for ch in missing:
+                cuser = ch.get("username") or ""
+                cid = ch.get("id", 0)
+                if cuser:
+                    link = f"https://t.me/{cuser.lstrip('@')}"
+                    lines.append(f"• {cuser} — {link}")
+                    kb_rows.append([InlineKeyboardButton(f"📢 Join {cuser}", url=link)])
+                else:
+                    lines.append(f"• channel `{cid}`")
+            kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
             await message.reply_text(
-                f"🔒 Free access requires joining our channel first:\n{link}\n\nJoin, then send your link again.",
+                f"🔒 Free access requires joining our channel(s) first:\n" + "\n".join(lines) + "\n\nJoin all, then send your link again. Or use /subscription to unlock without joining.",
                 reply_markup=kb
             )
             return False
