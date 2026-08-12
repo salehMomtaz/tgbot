@@ -736,7 +736,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel(s): `{ch}`\n"
             f"Active subs: **{active_count}**\nTiers: {tier_lines}\n\n"
             f"Free users go last in the download queue (priority 0 vs 1-3). "
-            f"WebApp at `/admin/subscription` (same port 8080, also `https://tgbot.avistel.ir/admin/subscription`).",
+            f"WebApp at `https://tgbot.southpark.ir:8080/` (root auto-redirect, `/app` user, `/admin/subscription` admin).",
             reply_markup=kb
         )
         await callback_query.answer()
@@ -796,18 +796,19 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer()
 
     elif data == "admin_sub_webapp":
-        host = getattr(config, "SSL_CERT_PATH", "") and "https" or "http"
-        hint = "Open `http(s)://<your-vps>:8080/admin/subscription`"
+        # Prefer current DOMAIN, fallback to generic
+        dom = getattr(config, "DOMAIN", "") or "https://tgbot.southpark.ir:8080"
+        hint = f"Open `{dom}/admin/subscription`  (or `{dom}/` landing, auto-redirects)"
         try:
             from modules.subscription.webapp import _admin_token
             tok = _admin_token()
-            hint += f"\nAdmin-Token: `{tok}` (or use Telegram WebApp inside the bot)"
+            hint += f"\nAdmin-Token: `{tok}` (or use Telegram WebApp `initData`)"
         except Exception:
             pass
+        hint += "\n\nInside Telegram: root `https://tgbot.southpark.ir:8080/` auto-detects role (admin→/admin, user→/app). Outside: paste token in page."
         await callback_query.message.edit_text(
             f"🌐 **Subscription WebApp**\n\n{hint}\n\n"
-            "Best opened as a Telegram WebApp (Admin → Subscription → 🌐 WebApp) — "
-            "Telegram `initData` authenticates you automatically. Outside Telegram, paste the token in the page.",
+            "Best opened as Telegram WebApp — `initData` authenticates creator automatically. Outside Telegram, paste token.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="admin_sub_menu")]])
         )
         await callback_query.answer()

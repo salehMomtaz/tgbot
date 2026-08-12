@@ -393,31 +393,46 @@ if [[ -f "$PROJECT_DIR/deploy/tgbot-xchat-bridge.service" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6e. Nginx reverse proxy for https://tgbot.avistel.ir (wildcard *.avistel.ir)
+# 6e. Direct TLS for https://tgbot.southpark.ir:8080 (wildcard *.southpark.ir) + optional nginx reference
 # ---------------------------------------------------------------------------
-# FastAPI listens on 127.0.0.1:8080 plain HTTP; nginx terminates TLS with the
-# wildcard cert at /etc/letsencrypt/live/avistel.ir/ (already valid for
-# tgbot.avistel.ir via *.avistel.ir). This is best-effort: if nginx/certbot
-# are not present, we skip and the bot still runs on plain HTTP 8080.
-if [[ -f "$PROJECT_DIR/deploy/tgbot.avistel.ir.conf" ]]; then
-    if have nginx && [[ -d /etc/nginx/sites-available ]]; then
-        if [[ -f /etc/letsencrypt/live/avistel.ir/fullchain.pem ]]; then
-            log "Installing nginx vhost tgbot.avistel.ir → 127.0.0.1:8080 ..."
-            $SUDO cp "$PROJECT_DIR/deploy/tgbot.avistel.ir.conf" /etc/nginx/sites-available/tgbot.avistel.ir
-            $SUDO ln -sf /etc/nginx/sites-available/tgbot.avistel.ir /etc/nginx/sites-enabled/tgbot.avistel.ir
-            if $SUDO nginx -t >/dev/null 2>&1; then
-                $SUDO systemctl reload nginx 2>/dev/null || $SUDO nginx -s reload 2>/dev/null || true
-                log "nginx vhost tgbot.avistel.ir installed + reloaded (https://tgbot.avistel.ir → 8080)."
-            else
-                warn "nginx -t failed after installing tgbot vhost — leaving disabled. Check /etc/nginx/sites-available/tgbot.avistel.ir"
-            fi
-            note "nginx-vhost:/etc/nginx/sites-enabled/tgbot.avistel.ir"
-        else
-            log "nginx present but wildcard cert /etc/letsencrypt/live/avistel.ir/* missing — skipping tgbot vhost (run certbot later and re-run install.sh)."
-        fi
-    else
-        log "nginx not found or no sites-available — skipping tgbot vhost (bot still works on http://:8080; install nginx + certbot for https://tgbot.avistel.ir)."
+# FastAPI (uvicorn) terminates TLS itself on :8080 via certs/fullchain.pem (copied from
+# /etc/letsencrypt/live/southpark.ir/ — wildcard *.southpark.ir, valid for tgbot.southpark.ir).
+# This is the primary mode (no nginx). The bot still runs on plain HTTP 8080 if certs missing.
+# For nginx lovers, deploy/tgbot.southpark.ir.conf is kept as reference (manual enable only).
+if [[ -f /etc/letsencrypt/live/southpark.ir/fullchain.pem ]]; then
+    log "Installing direct TLS certs for tgbot.southpark.ir:8080 → certs/ ..."
+    mkdir -p "$PROJECT_DIR/certs"
+    $SUDO cp /etc/letsencrypt/live/southpark.ir/fullchain.pem "$PROJECT_DIR/certs/fullchain.pem"
+    $SUDO cp /etc/letsencrypt/live/southpark.ir/privkey.pem "$PROJECT_DIR/certs/privkey.pem"
+    $SUDO chown "${REAL_USER}:${REAL_GROUP}" "$PROJECT_DIR/certs/"*.pem 2>/dev/null || $SUDO chown "${REAL_USER}" "$PROJECT_DIR/certs/"*.pem 2>/dev/null || true
+    $SUDO chmod 644 "$PROJECT_DIR/certs/fullchain.pem" 2>/dev/null || true
+    $SUDO chmod 600 "$PROJECT_DIR/certs/privkey.pem" 2>/dev/null || true
+    # renewal hook (auto-copy on certbot renewal + restart)
+    if [[ -d /etc/letsencrypt/renewal-hooks/deploy ]]; then
+        $SUDO tee /etc/letsencrypt/renewal-hooks/deploy/tgbot-copy.sh >/dev/null <<'HOOK'
+#!/bin/bash
+set -e
+if [[ "$RENEWED_LINEAGE" == */southpark.ir ]]; then
+  cp "$RENEWED_LINEAGE/fullchain.pem" "__PROJECT_DIR__/certs/fullchain.pem"
+  cp "$RENEWED_LINEAGE/privkey.pem" "__PROJECT_DIR__/certs/privkey.pem"
+  chown __USER__:__GROUP__ "__PROJECT_DIR__/certs/"*.pem 2>/dev/null || chown __USER__ "__PROJECT_DIR__/certs/"*.pem 2>/dev/null || true
+  chmod 644 "__PROJECT_DIR__/certs/fullchain.pem" 2>/dev/null || true
+  chmod 600 "__PROJECT_DIR__/certs/privkey.pem" 2>/dev/null || true
+  systemctl try-restart tgbot.service >/dev/null 2>&1 || true
+fi
+HOOK
+        $SUDO sed -i -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" -e "s|__USER__|$REAL_USER|g" -e "s|__GROUP__|$REAL_GROUP|g" /etc/letsencrypt/renewal-hooks/deploy/tgbot-copy.sh
+        $SUDO chmod +x /etc/letsencrypt/renewal-hooks/deploy/tgbot-copy.sh
+        log "Renewal hook installed: /etc/letsencrypt/renewal-hooks/deploy/tgbot-copy.sh"
     fi
+    log "Direct TLS certs ready: $PROJECT_DIR/certs/ (DOMAIN=https://tgbot.southpark.ir:8080)"
+    note "certs:$PROJECT_DIR/certs/fullchain.pem"
+else
+    log "Wildcard cert /etc/letsencrypt/live/southpark.ir/* missing — bot will run on plain HTTP 8080 (set DOMAIN=http://YOUR_VPS_IP:8080). Run certbot for southpark.ir later and re-run install.sh."
+fi
+# Optional nginx reference (not auto-enabled — direct TLS is primary)
+if [[ -f "$PROJECT_DIR/deploy/tgbot.southpark.ir.conf" ]]; then
+    log "Nginx reference available at deploy/tgbot.southpark.ir.conf (manual enable only, direct TLS is primary)."
 fi
 
 # ---------------------------------------------------------------------------
