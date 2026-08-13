@@ -310,12 +310,13 @@ class PotProviderManager:
     async def health_check_loop(self) -> None:
         """Run forever while the bot is up; restart the provider if it dies."""
         while self._running:
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
             if not self._running:
                 break
 
             if self.proc is None or self.proc.returncode is not None:
-                logger.warning("[POT] Provider process is gone; will restart")
+                rc = getattr(self.proc, "returncode", None) if self.proc else None
+                logger.warning(f"[POT] Provider process is gone (returncode={rc}); will restart (failures={self._consecutive_failures+1})")
                 self._consecutive_failures += 1
             else:
                 try:

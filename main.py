@@ -128,8 +128,13 @@ def setup_system_logger():
                     return True
                 if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
                     return True
-                # Also allow the setup line that confirms linkage
                 if "bale logging" in msg_l:
+                    return True
+                # Shared logs (utils.*, pot_provider, downloader) are okay to be in both
+                # per user: "if something is shared then it is okay to be send in both channels"
+                if name.startswith("utils."):
+                    return True
+                if "pot" in name or "cookie" in name:
                     return True
                 return False
             b_handler.addFilter(_bale_filter)
