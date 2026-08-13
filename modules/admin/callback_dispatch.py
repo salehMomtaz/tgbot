@@ -39,6 +39,9 @@ from .keyboards import (
     get_direct_menu_keyboard,
     _gen_abort_markup,
     _gen_dial_pad_markup,
+    get_cookie_action_keyboard,
+    get_premium_menu_keyboard,
+    get_pot_menu_keyboard,
 )
 from .premium_gen import (
     _premium_gen_cleanup,
@@ -191,7 +194,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         else:
             status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Tap **🔑 Generate Session** to create one right here."
 
-        from .keyboards import get_premium_menu_keyboard
         await callback_query.message.edit_text(
             f"👑 **Premium Uploads (4 GB)**\n\n{status_note}\n\n"
             f"**Whitelisted users:**\n{premium_lines}",
@@ -329,7 +331,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             status_note = "🟢 Premium userbot session is configured — 4 GB uploads are available to whitelisted users."
         else:
             status_note = "⚪ No `PREMIUM_STRING_SESSION` set — 4 GB uploads are DISABLED. Tap **🔑 Generate Session** to create one right here."
-        from .keyboards import get_premium_menu_keyboard
         await callback_query.message.edit_text(
             f"👑 **Premium Uploads (4 GB)**\n\n{status_note}\n\n"
             f"**Whitelisted users:**\n{premium_lines}",
@@ -393,7 +394,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
     elif data == "admin_cookies_menu":
         USER_STATES.pop(user_id, None)
         ACTIVE_PROMPTS.pop(user_id, None)
-        from .keyboards import get_cookie_action_keyboard
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("YouTube", callback_data="admin_cookie_select:ytcookies"), InlineKeyboardButton("Instagram", callback_data="admin_cookie_select:igcookies")],
             [InlineKeyboardButton("TikTok", callback_data="admin_cookie_select:ttcookies"), InlineKeyboardButton("X/Twitter", callback_data="admin_cookie_select:xcookies")],
@@ -642,7 +642,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             await callback_query.answer("X relay disabled", show_alert=True)
 
     elif data == "admin_direct_test_x":
-        from modules import direct_forward
         result = direct_forward.test_x_connection()
         await callback_query.message.edit_text(result,
             reply_markup=get_direct_menu_keyboard())
@@ -676,7 +675,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             await callback_query.answer("TikTok relay disabled", show_alert=True)
 
     elif data == "admin_direct_test_tiktok":
-        from modules import direct_forward
         result = await direct_forward.test_tiktok_connection()
         await callback_query.message.edit_text(result,
             reply_markup=get_direct_menu_keyboard())
