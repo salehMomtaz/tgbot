@@ -51,31 +51,50 @@ if config.PREMIUM_STRING_SESSION:
 # =========================================================================
 
 def setup_system_logger():
-    """Binds our custom TelegramChannelHandler directly to Python's root logger."""
+    """Binds channel handlers (Telegram + optional Bale) to Python's root logger at same INFO level."""
+    # Local file is always added (mirrors everything)
+    try:
+        from utils.logger import ensure_local_log_handler
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        local_handler = ensure_local_log_handler()
+        local_handler.setLevel(logging.INFO)
+        # Avoid double-adding on re-entry
+        if local_handler not in root_logger.handlers:
+            root_logger.addHandler(local_handler)
+        logging.info(f"[Logger] Local log mirror active at: {os.path.abspath('logs/bot.log')}")
+    except Exception as e:
+        print(f"Warning: Failed to init local log handler: {e}")
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+
+    # Telegram log channel (required)
     if config.LOG_CHANNEL_ID != 0:
         try:
-            from utils.logger import TelegramChannelHandler, ensure_local_log_handler
-            root_logger = logging.getLogger()
-
-            # CRITICAL FIX: Explicitly lower root logger's filtering threshold so INFO logs are not discarded
-            root_logger.setLevel(logging.INFO)
-
-            # Format logs briefly; our channel handler adds emojis, timestamps, and module tags.
+            from utils.logger import TelegramChannelHandler
             channel_formatter = logging.Formatter('%(message)s')
             handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
             handler.setFormatter(channel_formatter)
-            handler.setLevel(logging.INFO)  # Capture standard INFO, WARNING, and ERROR logs
-
-            # Also mirror the same logs to a local rotating file for real-time debugging.
-            local_handler = ensure_local_log_handler()
-            local_handler.setLevel(logging.INFO)
-
-            root_logger.addHandler(handler)
-            root_logger.addHandler(local_handler)
-            logging.info("[Logger] Standalone Telegram Logging Service linked to Root Logger.")
-            logging.info(f"[Logger] Local log mirror active at: {os.path.abspath('logs/bot.log')}")
+            handler.setLevel(logging.INFO)
+            logging.getLogger().addHandler(handler)
+            logging.info("[Logger] Telegram logging linked to LOG_CHANNEL_ID")
         except Exception as e:
-            print(f"Warning: Failed to initialize standalone Telegram logger: {e}")
+            print(f"Warning: Failed to initialize Telegram logger: {e}")
+
+    # Bale log channel (separate, same level) — only if BALE_TOKEN + BALE_LOG_CHANNEL_ID set
+    if getattr(config, "BALE_TOKEN", "") and getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
+        try:
+            from utils.logger import BaleChannelHandler
+            bale_formatter = logging.Formatter('%(message)s')
+            b_handler = BaleChannelHandler(config.BALE_TOKEN, config.BALE_LOG_CHANNEL_ID)
+            b_handler.setFormatter(bale_formatter)
+            b_handler.setLevel(logging.INFO)
+            logging.getLogger().addHandler(b_handler)
+            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID}")
+        except Exception as e:
+            print(f"Warning: Failed to initialize Bale logger: {e}")
+    elif getattr(config, "BALE_TOKEN", ""):
+        logging.info("[Logger] Bale logging disabled (BALE_LOG_CHANNEL_ID=0) — Bale logs stay local only")
 
 async def log_event(text: str):
     """Log an event locally. The standalone root logger handles automatic Telegram routing."""

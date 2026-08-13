@@ -182,6 +182,258 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         else:
             await callback.answer()
 
+    # --- Bale extras (ported from tgbot extras, same level as Telegram) ---
+    # GitHub explorer, YouTube search, Translate, Web -> Markdown
+    # These were Telegram-only after the balebot merge; Bale had no handler, so
+    # https://github.com/salehMomtaz/tgbot got no response. Now same features
+    # on Bale, using Bale's 20 MB uploader and sanitized captions.
+    import re
+    REPO_RE = re.compile(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/?$")
+
+    @dp.message(F.chat.type == "private", lambda m: m.text and REPO_RE.match(m.text.strip().split("|")[0].strip()) is not None)
+    async def bale_github_repo_link(message: Message):
+        if not is_authorized(message.from_user.id) and not _is_bale_admin(message.from_user.id):
+            return
+        txt = message.text.strip().split("|")[0].strip()
+        mm = REPO_RE.match(txt)
+        if not mm:
+            return
+        owner, repo = mm.groups()
+        # Reuse Telegram github keyboard but via Bale
+        from modules.github.keyboards import get_repo_menu_keyboard as _gkb
+        from modules.github.handlers import _set_repo, GITHUB_CACHE
+        import uuid, re as _re
+        gh_id = f"gh_{str(uuid.uuid4())[:8]}"
+        # Use same cache as Telegram (shared file)
+        try:
+            from modules.github.handlers import _set_repo as _set
+            _set(gh_id, {"owner": owner, "repo": repo, "path": "/", "page": 1, "items_list": []})
+        except:
+            # fallback simple
+            pass
+        await message.reply(f"🐙 **GitHub Repository Browser**\n\n📁 **{owner}/{repo}**\n🔗 https://github.com/{owner}/{repo}\n\nSelect an action:", reply_markup=_gkb(gh_id))
+
+    @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().startswith("/search"))
+    async def bale_search(message: Message):
+        q = message.text[7:].strip() if len(message.text) > 7 else ""
+        if not q:
+            await message.reply("⚠️ **Usage:** `/search <query>`")
+            return
+        from modules.github.api import fetch_github_api
+        import urllib.parse
+        status = await message.reply("🔍 Searching GitHub...")
+        try:
+            data = await fetch_github_api(f"https://api.github.com/search/repositories?q={urllib.parse.quote(q)}&sort=stars&order=desc")
+            items = data.get("items", [])[:5]
+            if not items:
+                await status.edit_text("ℹ️ No repositories found.")
+                return
+            lines = [f"{i}. **{it['full_name']}**\n   ⭐ `{it['stargazers_count']}` | 🍴 `{it['forks_count']}`\n   🔗 https://github.com/{it['full_name']}" for i, it in enumerate(items, 1)]
+            await status.edit_text("🔍 **GitHub Top Results:**\n\n" + "\n\n".join(lines))
+        except Exception as e:
+            await status.edit_text(f"❌ Search failed: {e}")
+
+    @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().startswith("/yt "))
+    async def bale_yt(message: Message):
+        raw = message.text[3:].strip()
+        if not raw:
+            await message.reply("⚠️ **Usage:** `/yt <query>` or `/yt <limit> <query>`")
+            return
+        from modules.youtube.scraper import search_ytdlp_flat
+        parts = raw.split(None, 1)
+        limit = 5
+        query = raw
+        if parts[0].isdigit():
+            n = int(parts[0])
+            if 1 <= n <= 15:
+                limit = n
+                query = parts[1].strip() if len(parts) > 1 else ""
+        if not query:
+            await message.reply("⚠️ Please provide a search query.")
+            return
+        status = await message.reply("🔍 Searching YouTube...")
+        try:
+            entries = await search_ytdlp_flat(query, limit)
+            if not entries:
+                await status.edit_text("ℹ️ No videos found.")
+                return
+            lines = []
+            for idx, e in enumerate(entries, 1):
+                title = e.get('title', 'Unknown')
+                vid = e.get('id')
+                uploader = e.get('uploader', 'Unknown')
+                dur = e.get('duration')
+                dstr = f"{int(dur//60)}m {int(dur%60)}s" if dur else "??"
+                lines.append(f"{idx}. **{title}**\n   👤 `{uploader}` | ⏱ `{dstr}`\n   🔗 https://youtu.be/{vid}")
+            await status.edit_text("🎬 **YouTube Results:**\n\n" + "\n\n".join(lines))
+        except Exception as e:
+            await status.edit_text(f"❌ Search failed: {e}")
+
+    @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().startswith("/tr "))
+    async def bale_tr(message: Message):
+        raw = message.text[3:].strip()
+        if not raw:
+            await message.reply("🈯 **Usage:** `/tr src:dst text`")
+            return
+        from modules.translate.api import google_translate_async
+        parts = raw.split(None, 1)
+        if ":" not in parts[0]:
+            await message.reply("⚠️ Language pair must be `src:dst`")
+            return
+        src, dst = parts[0].split(":", 1)
+        if len(parts) < 2:
+            await message.reply("⚠️ Please write the text to translate")
+            return
+        try:
+            trans = await google_translate_async(parts[1].strip(), src.strip().lower(), dst.strip().lower())
+            await message.reply(f"🈯 **Translation ({src} -> {dst})**\n\n{trans}")
+        except Exception as e:
+            await message.reply(f"❌ Translation failed: {e}")
+
+    @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().startswith("/web "))
+    async def bale_web(message: Message):
+        raw = message.text[4:].strip()
+        if not raw:
+            await message.reply("⚠️ **Usage:** `/web <url>`")
+            return
+        url = raw.split()[0]
+        if not url.startswith("http"):
+            url = "https://" + url
+        status = await message.reply("🔍 Fetching webpage and converting to Markdown...")
+        try:
+            from modules.web.api import fetch_markdown_text
+            title, md = await fetch_markdown_text(url)
+            if not md.strip():
+                await status.edit_text("ℹ️ No readable markdown from this page.")
+                return
+            if len(md) > 3500:
+                import uuid, os
+                os.makedirs("cache", exist_ok=True)
+                cid = str(uuid.uuid4())[:8]
+                safe = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title)
+                p = f"cache/{cid}_{safe}.txt"
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(f"🌐 Webpage Markdown\n🔗 Source: {url}\n{'='*40}\n\n{md}")
+                await process_split_and_upload_bale(message.bot, message.chat.id, p, 'd', f"{safe}.txt", "Web", 0, None, status)
+            else:
+                await status.edit_text(f"🌐 **Webpage:** `{title}`\n\n{md[:3900]}")
+        except Exception as e:
+            await status.edit_text(f"❌ Failed to extract: {e}")
+
+    @dp.callback_query(F.data.startswith("gh:"))
+    async def bale_gh_callback(callback: CallbackQuery):
+        # Minimal Bale GitHub panel — reuses same cache as Telegram, but delivers via Bale's 20 MB uploader
+        # For full explorer, use Telegram; Bale shows info + ZIP at same level.
+        data = callback.data
+        parts = data.split(":")
+        if len(parts) < 3:
+            await callback.answer("Invalid callback.", show_alert=True)
+            return
+        gh_id = parts[1]
+        action = parts[2]
+        try:
+            from modules.github.handlers import _get_repo, _save_github_cache, GITHUB_CACHE
+            from modules.github.keyboards import get_back_keyboard, get_repo_menu_keyboard
+            from modules.github.api import fetch_github_api
+        except:
+            await callback.answer("GitHub module not available.", show_alert=True)
+            return
+        meta = _get_repo(gh_id) if '_get_repo' in locals() else None
+        # Fallback: try GITHUB_CACHE directly
+        if not meta:
+            try:
+                from modules.github.handlers import GITHUB_CACHE as _GC
+                meta = _GC.get(gh_id)
+            except:
+                meta = None
+        if not meta:
+            try:
+                await callback.message.edit_text("⚠️ Session expired. Send link again.")
+            except:
+                pass
+            await callback.answer("Session expired.", show_alert=True)
+            return
+        owner = meta["owner"]; repo = meta["repo"]
+        back_kb = get_back_keyboard(gh_id)
+        async def ack(t=None, show_alert=False):
+            try:
+                await callback.answer(text=t, show_alert=show_alert)
+            except:
+                pass
+        async def edit(t, kb=None):
+            try:
+                return await callback.message.edit_text(t, reply_markup=kb)
+            except:
+                pass
+        if action == "close":
+            await ack("Closed.")
+            try:
+                await callback.message.delete()
+            except:
+                pass
+            try:
+                from modules.github.handlers import GITHUB_CACHE as _GC2
+                _GC2.pop(gh_id, None)
+                _save_github_cache()
+            except:
+                pass
+            return
+        if action == "back":
+            await ack()
+            await edit(f"🐙 **GitHub Repository Browser**\n\n📁 **{owner}/{repo}**\n🔗 https://github.com/{owner}/{repo}\n\nSelect an action:", get_repo_menu_keyboard(gh_id))
+            return
+        if action == "zip":
+            from modules.github.handlers import repo_zip_url, safe_cache_filename
+            from modules.github.api import get_github_headers
+            import uuid, os, aiohttp
+            # Bale delivery via 20 MB split
+            async def _bale_stream(url, path, headers):
+                import aiohttp
+                timeout = aiohttp.ClientTimeout(total=600, connect=15)
+                proxy = getattr(config, "AIOHTTP_PROXY", None)
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.get(url, headers=headers, proxy=proxy) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"HTTP {resp.status}")
+                        with open(path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(512*1024):
+                                f.write(chunk)
+            branch = meta.get("branch")
+            safe = safe_cache_filename(f"{repo}_{branch or 'default'}", repo)
+            tmp = f"cache/{uuid.uuid4().hex[:8]}_{safe}.zip"
+            src = repo_zip_url(owner, repo, branch)
+            await ack("Enqueued ZIP (Bale 20 MB).")
+            await edit("⏳ Downloading ZIP...")
+            async def job():
+                os.makedirs("cache", exist_ok=True)
+                try:
+                    await _bale_stream(src, tmp, get_github_headers())
+                    await callback.message.edit_text("📤 Uploading ZIP to Bale (20 MB splits)...")
+                    await process_split_and_upload_bale(callback.bot, callback.message.chat.id, tmp, 'd', f"{safe}.zip", "GitHub", 0, None, callback.message)
+                except Exception as e:
+                    if os.path.exists(tmp):
+                        try:
+                            os.remove(tmp)
+                        except:
+                            pass
+                    await callback.message.edit_text(f"❌ ZIP failed: {e}", reply_markup=back_kb)
+            from utils.shared import queue
+            await queue.add_task(callback.from_user.id, callback.message, job)
+            return
+        # For other actions, show info via Bale (same level as Telegram)
+        await ack()
+        if action == "info":
+            await edit("🔍 Fetching metadata...")
+            try:
+                data = await fetch_github_api(f"https://api.github.com/repos/{owner}/{repo}")
+                desc = data.get("description") or "No Description"
+                await edit(f"📊 **{owner}/{repo}**\n\n📝 `{desc}`\n⭐ `{data.get('stargazers_count',0)}` | 🍴 `{data.get('forks_count',0)}`", back_kb)
+            except Exception as e:
+                await edit(f"❌ Failed: {e}", back_kb)
+            return
+        # Fallback for unhandled gh actions on Bale
+        await callback.answer("This action is full on Telegram -- try /search, /yt, /tr, /web on Bale for now.", show_alert=False)
+
     # --- Bale state machine (limited: add/remove/unban/setlimit only) ---
     @dp.message(F.chat.type == "private", lambda m: m.text is not None)
     async def bale_state(message: Message):

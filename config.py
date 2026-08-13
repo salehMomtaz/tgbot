@@ -232,10 +232,12 @@ SYSMON_DISK_PATHS = os.getenv("SYSMON_DISK_PATHS", ".")
 # process, sharing the download core, queue and PO provider. When empty, zero
 # Bale code runs. See docs/memory/tgbot-balebot-integration.md for the full
 # threat model: Bale traffic is treated as untrusted input; the Bale admin
-# console is intentionally limited (no cookies / premium / POT / direct-forward);
-# and there is NO Bale log channel — logs stay on Telegram + local file only.
+# console is intentionally limited (no cookies / premium / POT / direct-forward).
+# Logs: Telegram -> LOG_CHANNEL_ID, Bale -> BALE_LOG_CHANNEL_ID (separate private channels).
+# If BALE_LOG_CHANNEL_ID is 0, Bale side logs only to local file (still at same INFO level).
 BALE_TOKEN = os.getenv("BALE_TOKEN", "")
 BALE_SYSTEM_CREATOR_ID = get_env_int("BALE_SYSTEM_CREATOR_ID", 0)
+BALE_LOG_CHANNEL_ID = get_env_int("BALE_LOG_CHANNEL_ID", 0)
 # Bale file ceiling is 20 MB per message (docs claims 50, real is 20). The uploader
 # splits at 19 MB target / 20 MB hard, with Bale-safe filename + caption sanitizers.
 BALE_HARD_LIMIT_MB = get_env_int("BALE_HARD_LIMIT_MB", 20)

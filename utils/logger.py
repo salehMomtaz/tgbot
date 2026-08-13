@@ -51,6 +51,64 @@ class TelegramChannelHandler(logging.Handler):
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self.api_rich_url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
 
+
+class BaleChannelHandler(logging.Handler):
+    """
+    Bale-side counterpart to TelegramChannelHandler.
+    Bale is government-owned, so logs are kept separate: Telegram logs -> LOG_CHANNEL_ID
+    (Telegram), Bale logs -> BALE_LOG_CHANNEL_ID (Bale, tapi.bale.ai). Both run at
+    the same INFO level when configured. Uses plain text (Bale auto-parses Markdown,
+    so we strip rich formatting to avoid rejections). Same async daemon-thread
+    pattern as Telegram handler.
+    """
+    def __init__(self, bale_token: str, channel_id: int):
+        super().__init__()
+        self.bale_token = bale_token
+        self.channel_id = channel_id
+        # Bale Bot API base is https://tapi.bale.ai (per apiDocuments/baleAPI.md)
+        self.api_url = f"https://tapi.bale.ai/bot{bale_token}/sendMessage"
+
+    def emit(self, record):
+        try:
+            log_entry = self.format(record)
+            try:
+                from utils.security import redact_token as _redact
+                log_entry = _redact(log_entry)
+            except Exception:
+                pass
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record.created))
+            level = record.levelname
+            module = record.module
+            emoji = "📝"
+            if level == "WARNING":
+                emoji = "⚠️"
+            elif level in ["ERROR", "CRITICAL"]:
+                emoji = "🚨"
+            # Bale auto-parses Markdown, so we must NOT send HTML. Send plain
+            # text with the same structure but no HTML tags, and truncate.
+            # Strip any accidental markdown chars that could be parsed.
+            safe_entry = log_entry.replace("*", "").replace("_", "").replace("`", "")
+            if len(safe_entry) > 3500:
+                safe_entry = safe_entry[:3500] + "\n... [TRUNCATED] ..."
+            text = f"{emoji} [{level}] [{timestamp}] ({module})\n{safe_entry}"
+            # Bale's sendMessage: chat_id + text (no parse_mode needed, plain)
+            payload = {"chat_id": self.channel_id, "text": text}
+
+            def execute_post():
+                try:
+                    import config
+                    proxies = (
+                        {"http": config.REQUESTS_PROXY, "https": config.REQUESTS_PROXY}
+                        if getattr(config, "REQUESTS_PROXY", None) else None
+                    )
+                    requests.post(self.api_url, json=payload, timeout=5, proxies=proxies)
+                except Exception:
+                    pass
+
+            threading.Thread(target=execute_post, daemon=True).start()
+        except Exception:
+            pass
+
     def emit(self, record):
         try:
             log_entry = self.format(record)
