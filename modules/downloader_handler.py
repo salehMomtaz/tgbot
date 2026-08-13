@@ -382,14 +382,17 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         except Exception:
             pass
 
-        # subscription gate (quota + channel force-join) — when subscription mode is on this is the source of truth
+        # subscription gate (quota + channel force-join) — when ON, this is the source of truth for free tier
+        _sub_enabled = False
         try:
+            from utils.subscription.store import get_settings as _gs
+            _sub_enabled = bool(_gs().get("enabled"))
             from modules.subscription.handlers import gate_and_quota_check
             if not await gate_and_quota_check(client, message):
                 return
         except Exception:
             pass
-        if not is_authorized(user_id):
+        if not _sub_enabled and not is_authorized(user_id):
             return
 
         if is_social_media_link(url):

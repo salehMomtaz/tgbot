@@ -100,17 +100,8 @@ async def _drain_bale_backlog(bot: Bot):
 def create_bale_dispatcher(bot: Bot) -> Dispatcher:
     dp = Dispatcher()
 
-    # --- security gate (Bale) ---
-    # We implement as middleware via handler filter: first check blacklist etc
-    # Instead of aiogram middleware (more boilerplate), just check in each handler.
-    # But we add a global message middleware for logging + rate limit
-    @dp.message()
-    async def _bale_catch_all(message: Message, bot: Bot):
-        # This will be last; real handlers are more specific with filters
-        pass
-
-    # --- /start /console ---
-    @dp.message(F.text, F.chat.type == "private", F.text.func(lambda t: t.strip().lower() in ("/start","/admin","console","🛠 console","hi!","hey")))
+    # --- /start /console --- (must be registered BEFORE generic link handler)
+    @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().lower() in ("/start","/admin","console","🛠 console","hi!","hey"))
     async def bale_start(message: Message):
         uid = message.from_user.id
         # rate limit
@@ -192,7 +183,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
             await callback.answer()
 
     # --- Bale state machine (limited: add/remove/unban/setlimit only) ---
-    @dp.message(F.text, F.chat.type == "private", F.text.func(lambda t: t.strip().lower() not in ("/start",)))
+    @dp.message(F.chat.type == "private", lambda m: m.text is not None)
     async def bale_state(message: Message):
         uid = message.from_user.id
         if uid not in BALE_USER_STATES:
