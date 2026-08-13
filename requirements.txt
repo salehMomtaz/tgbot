@@ -17,7 +17,8 @@ python-dotenv
 bgutil-ytdlp-pot-provider
 # Direct-forward DM relay (modules/direct_forward/). Local libraries speaking
 # the platforms' own private APIs — no third-party relay services.
-instagrapi
+# 2.18.14 brings Realtime MQTToT (Instagram push, TikTok-like). Keep in sync with aiogram.
+instagrapi==2.18.14
 # curl-backed requests adapter giving instagrapi's PRIVATE session a real
 # Chrome TLS fingerprint (utils/ig_anti_detect.py). The private API previously
 # rode plain Python requests TLS — an easy "this is a script" signal.
@@ -28,4 +29,5 @@ twikit
 # yt-dlp[default], but declared here because we import it directly.
 websockets
 # Bale.ai frontend (optional, aiogram v3 → https://tapi.bale.ai). Only needed if BALE_TOKEN is set.
-aiogram==3.12.0
+# 3.30.0+ supports pydantic 2.13 needed by instagrapi 2.18.14's Realtime.
+aiogram==3.30.0

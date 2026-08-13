@@ -656,6 +656,121 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
 
+    # --- Hybrid push (experimental, pure Python MQTToT, NO browser) ---
+    # When IG_DIRECT_MQTT_ENABLED, we run a lightweight Realtime MQTT listener
+    # alongside polling. Same TikTok-like instant push (~1-3s) with polling as
+    # fallback + gap recovery for the stalled batch you saw.
+    mqtt_task = None
+    if getattr(config, "IG_DIRECT_MQTT_ENABLED", False):
+        async def _ig_mqtt_listener():
+            # Separate client for MQTT so polling's direct_threads doesn't race
+            mqtt_cl = _make_client()
+            try:
+                await loop.run_in_executor(None, lambda: _ig_login(mqtt_cl, log_prefix="[DirectForward/IG-MQTT]"))
+                mqtt_cl.dump_settings("direct_ig_session.json")
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG-MQTT] MQTT login failed: {e} — will retry via polling only")
+                return
+            # Connect Realtime (MQTToT on edge-mqtt.facebook.com)
+            try:
+                # realtime_on must be set before connect to catch early events
+                def _on_mqtt_message(payload):
+                    # payload is already parsed by dispatch_message_sync → emitted as "message"
+                    # We handle it via same path as polling but from MQTT thread.
+                    # Use thread-safe scheduling: push to asyncio queue
+                    try:
+                        # payload wrapper: {"message": {"path": "/direct_v2/threads/...", "op": "replace", "thread_id": ..., "value": {...}}}
+                        msg = payload.get("message") if isinstance(payload, dict) else None
+                        if isinstance(msg, dict) and "value" in msg:
+                            # MQTT value is the raw DM item dict (same shape as polling)
+                            item = msg["value"] if isinstance(msg["value"], dict) else {}
+                            if item.get("item_id"):
+                                # Schedule processing off the MQTT thread
+                                loop.call_soon_threadsafe(lambda: asyncio.create_task(_ig_mqtt_handle_item(item)))
+                    except Exception as ex:
+                        logger.warning(f"[DirectForward/IG-MQTT] handler error: {ex}")
+
+                async def _ig_mqtt_handle_item(item: dict):
+                    # Reuse same processing as polling, with shared state lock
+                    st = _load_state()
+                    pr = _get_pair(st, "ig")
+                    if not pr:
+                        return
+                    uid = str(item.get("user_id", ""))
+                    if uid != pr["user_id"]:
+                        return
+                    last = _cursor(st, "ig")
+                    try:
+                        iid = int(item.get("item_id", 0) or 0)
+                        if iid <= last:
+                            return  # already processed via polling or previous MQTT
+                    except:
+                        return
+                    logger.info(f"[DirectForward/IG-MQTT] push item {item.get('item_id')} from @{pr['username']} — instant relay")
+                    try:
+                        await _ig_process_message(item, mqtt_cl, loop, queue, chat_id, bot_client, premium_client, pr["username"])
+                        _bump_cursor(st, "ig", int(item["item_id"]))
+                        await _state_save_owned(st, {"ig"})
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/IG-MQTT] item {item.get('item_id')} failed: {e}")
+
+                # Register handlers for both iris and direct realtime
+                mqtt_cl.realtime_on("message", _on_mqtt_message)
+                mqtt_cl.realtime_on("direct", _on_mqtt_message)
+                # Connect and subscribe (iris_subscribe needs seq_id/snapshot_at_ms from inbox)
+                rt = await loop.run_in_executor(None, mqtt_cl.realtime_connect)
+                try:
+                    await loop.run_in_executor(None, rt.direct_subscribe)
+                    logger.info("[DirectForward/IG-MQTT] Realtime MQTT connected + direct_subscribe ok — push active")
+                except Exception as e:
+                    logger.warning(f"[DirectForward/IG-MQTT] direct_subscribe failed: {e} — will rely on polling")
+
+                # Keepalive + read loop (blocking recv, so run in executor)
+                while True:
+                    try:
+                        # ping every 60s to keep MQTToT alive
+                        await asyncio.sleep(60)
+                        try:
+                            await loop.run_in_executor(None, mqtt_cl.realtime_ping)
+                        except Exception as e:
+                            logger.warning(f"[DirectForward/IG-MQTT] ping failed: {e} — reconnecting")
+                            raise
+                        # Also drain any pending packets (read_once is non-blocking after ping)
+                        for _ in range(5):
+                            try:
+                                await loop.run_in_executor(None, mqtt_cl.realtime_read_once)
+                            except Exception:
+                                break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/IG-MQTT] loop error: {e} — reconnect in 20s")
+                        await asyncio.sleep(20)
+                        # Reconnect logic: disconnect then reconnect
+                        try:
+                            await loop.run_in_executor(None, mqtt_cl.realtime_disconnect)
+                        except:
+                            pass
+                        try:
+                            rt2 = await loop.run_in_executor(None, mqtt_cl.realtime_connect)
+                            await loop.run_in_executor(None, rt2.direct_subscribe)
+                            logger.info("[DirectForward/IG-MQTT] reconnected")
+                        except Exception as e2:
+                            logger.warning(f"[DirectForward/IG-MQTT] reconnect failed: {e2}")
+                            await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                try:
+                    await loop.run_in_executor(None, mqtt_cl.realtime_disconnect)
+                except:
+                    pass
+                raise
+            except Exception as e:
+                logger.error(f"[DirectForward/IG-MQTT] fatal: {e} — falling back to polling only")
+                await asyncio.sleep(60)
+
+        mqtt_task = asyncio.create_task(_ig_mqtt_listener())
+        logger.info("[DirectForward/IG-MQTT] hybrid enabled — polling + push (TikTok-like)")
+
     while True:
         state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
         state_dirty = False
@@ -687,12 +802,43 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 activity[act_key] = act_now
                 state_dirty = True
 
-                raw = await loop.run_in_executor(
-                    None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 25}))
-                items = ((raw or {}).get("thread", {}) or {}).get("items", []) or []
+                # --- gap-aware fetch: paginate until we have all items after last_seen ---
+                # Previously we fetched only 25 items; a week-long outage could leave dozens
+                # of missed DMs beyond that window. Now we walk the thread backwards (older)
+                # until the gap is closed or we hit a safety cap, so after a stale-cookie
+                # recovery (like the recent risky_contactpoint) every missed item is relayed.
                 last_seen = _cursor(state, "ig")
+                all_items: list[dict] = []
+                cursor = None
+                # Safety: cap at 200 items per thread per poll (covers ~1-2 weeks of DM)
+                # and at most 8 pages (25*8=200). Next poll will catch any remainder.
+                for _page in range(8):
+                    params = {"limit": 25, "direction": "older"}
+                    if cursor:
+                        params["cursor"] = cursor
+                    raw_page = await loop.run_in_executor(
+                        None, lambda tid=th.id, p=params: cl.private_request(f"direct_v2/threads/{tid}/", params=p))
+                    thread_page = (raw_page or {}).get("thread", {}) or {}
+                    page_items = thread_page.get("items") or []
+                    if not page_items:
+                        break
+                    all_items.extend(page_items)
+                    # If the oldest item in this page is already <= last_seen, gap is closed
+                    try:
+                        oldest_id = int(page_items[-1].get("item_id", 0) or 0)
+                        if oldest_id and oldest_id <= last_seen:
+                            break
+                    except Exception:
+                        pass
+                    cursor = thread_page.get("oldest_cursor")
+                    if not cursor:
+                        break
+                    if len(all_items) >= 200:
+                        break
+
+                # Filter to only new, non-viewer items after cursor
                 new_msgs = []
-                for m in items:
+                for m in all_items:
                     if m.get("is_sent_by_viewer"):
                         continue
                     try:
@@ -700,7 +846,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                             new_msgs.append(m)
                     except Exception:
                         logger.warning(f"[DirectForward/IG] weird item id {m.get('item_id', '!')!r} skip")
+                # Process oldest first so Telegram order matches IG order
                 new_msgs.sort(key=lambda m: int(m["item_id"]))
+                if new_msgs:
+                    logger.info(f"[DirectForward/IG] gap fetch: thread {th.id} had {len(all_items)} items, {len(new_msgs)} new after cursor {last_seen}")
 
                 pair_username = ""
                 if pair:
@@ -708,6 +857,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
 
                 for m in new_msgs:
                     consumed = False
+                    success = False
                     try:
                         if pairing_active:
                             consumed = await _ig_pairing_scan(m, thread_users, state,
@@ -717,16 +867,29 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
                             await _ig_process_message(m, cl, loop, queue, chat_id,
                                                       bot_client, premium_client, pair.get("username", ""))
+                            success = True
+                        elif consumed:
+                            success = True
+                        elif not pair or str(m.get("user_id", "")) != pair["user_id"]:
+                            # Non-paired user in same thread (group) — still advance cursor
+                            success = True
                     except Exception as e:
                         logger.error(f"[DirectForward/IG] item {m.get('item_id', '?')} failed: {e}")
-                    # Always advance past attempted items: one bad DM must not
-                    # block the relay forever.
-                    try:
-                        _bump_cursor(state, "ig", int(m["item_id"]))
-                    except Exception:
-                        pass
-                if new_msgs:
-                    await _state_save_owned(state, {"ig"})
+                        success = False
+                    # Precise cursor: only advance on success. A failed item stays
+                    # behind the cursor so the next poll retries it (at-least-once).
+                    # The missed batch from the recent stale-cookie stall will thus be
+                    # retried until delivered, instead of being skipped.
+                    if success:
+                        try:
+                            _bump_cursor(state, "ig", int(m["item_id"]))
+                            await _state_save_owned(state, {"ig"})
+                        except Exception:
+                            pass
+                    else:
+                        # Don't bump — leave cursor at previous value so this item is retried
+                        logger.warning(f"[DirectForward/IG] cursor NOT advanced for failed item {m.get('item_id')} — will retry")
+
             if state_dirty:
                 await _state_save_owned(state, {"ig"})
             cl.dump_settings("direct_ig_session.json")
