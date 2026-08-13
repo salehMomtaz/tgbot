@@ -213,6 +213,11 @@ SYSMON_HISTORY_SAMPLES = get_env_int("SYSMON_HISTORY_SAMPLES", 240)
 SYSMON_DISK_PATHS = os.getenv("SYSMON_DISK_PATHS", ".")
 
 # =========================================================================
+# GitHub explorer (ported from balebot — pure HTTP API, no Bale dependency)
+# =========================================================================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+# =========================================================================
 # Subscription system (toggleable, 3 tiers + optional free with channel)
 # =========================================================================
 SUB_ENABLED = os.getenv("SUB_ENABLED", "false").lower() in ("true", "1", "yes")

@@ -87,6 +87,10 @@ def register_subscription_handlers(app: Client):
             f"💳 **Subscription**\n\n{text}\n\nChoose a tier:",
             reply_markup=_tiers_keyboard()
         )
+        try:
+            message.stop_propagation()
+        except Exception:
+            pass
 
     @app.on_message(filters.command("quota") & filters.private, group=0)
     async def quota_cmd(client: Client, message: Message):
@@ -96,10 +100,18 @@ def register_subscription_handlers(app: Client):
         allowed, rem2, lim = check_quota(user_id)
         tier = sub.get("tier") if sub else "free"
         await message.reply_text(f"📊 **Quota:** {rem}/{lim} left today (tier: {tier}). {'✅ Can download' if allowed else '❌ Limit reached — resets at 00:00 UTC'}")
+        try:
+            message.stop_propagation()
+        except Exception:
+            pass
 
     @app.on_message(filters.command("admin_token") & filters.private, group=0)
     async def admin_token_cmd(client: Client, message: Message):
         if message.from_user.id != getattr(config, "SYSTEM_CREATOR_ID", 0):
+            try:
+                message.stop_propagation()
+            except Exception:
+                pass
             return
         try:
             from modules.subscription.webapp import _admin_token
@@ -107,6 +119,10 @@ def register_subscription_handlers(app: Client):
             await message.reply_text(f"🔑 **Admin token** for `/admin/subscription` WebApp:\n`{tok}`\n\nSend as header `X-Admin-Token` or open the page inside Telegram (auto-auth via initData).")
         except Exception as e:
             await message.reply_text(f"❌ Could not generate token: {e}")
+        try:
+            message.stop_propagation()
+        except Exception:
+            pass
 
     @app.on_callback_query(filters.regex(r"^sub:"))
     async def sub_callback(client: Client, cb: CallbackQuery):

@@ -389,6 +389,27 @@ async def main_engine():
         register_subscription_payments(app)
     except Exception as e:
         logging.warning(f"[Subscription] Could not register handlers: {e}")
+    # balebot-originated extras now on Telegram too (pure HTTP, no Bale dep)
+    try:
+        from modules.github.handlers import register_github_handlers
+        register_github_handlers(app, premium_app)
+    except Exception as e:
+        logging.warning(f"[GitHub] Could not register handlers: {e}")
+    try:
+        from modules.youtube.handlers import register_youtube_handlers
+        register_youtube_handlers(app, premium_app)
+    except Exception as e:
+        logging.warning(f"[YouTube] Could not register handlers: {e}")
+    try:
+        from modules.translate.handlers import register_translate_handlers
+        register_translate_handlers(app)
+    except Exception as e:
+        logging.warning(f"[Translate] Could not register handlers: {e}")
+    try:
+        from modules.web.handlers import register_web_handlers
+        register_web_handlers(app, premium_app)
+    except Exception as e:
+        logging.warning(f"[Web] Could not register handlers: {e}")
 
     # Group -2 Incoming Update Log Interceptors
     @app.on_message(filters.private, group=-2)

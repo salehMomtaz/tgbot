@@ -60,6 +60,7 @@ required). Runs as a `systemd` service that survives reboots.
 - **🩺 Site-aware errors.** Opaque yt-dlp exceptions become clear messages:
   sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
 - **💳 Subscriptions (Stars/TON/Gram).** Toggleable 3-tier plans (Basic 100/d 100⭐, Plus 500/d 250⭐, Pro 2500/d 500⭐) + free tier (5/d, or join channels). Telegram Stars invoices + TON inbound via memo (`/api/user/status`), daily quota, multi-channel force-join, priority queue (free last), and a WebApp at `https://tgbot.southpark.ir:8080` (direct TLS, wildcard `*.southpark.ir`): landing `/` auto-redirects (Telegram→role), user portal `/app`, admin `/admin/subscription` — fullscreen, `safeAreaInset` aware, native `showPopup` + fallback modal/toast.
+- **🐙 GitHub explorer + 🔍 YouTube search + 🈯 Translate + 🌐 Web→Markdown.** Ported from the sibling balebot: paste any `github.com/owner/repo` → repo control panel (ZIP, branches/tags/releases, issues/PRs, commits, languages, README, file explorer with folder ZIP); `/search <q>`, `/user <u>`, `/trend`; `/yt <q> [n]`, `/ytrecent @chan [n]`, `/ytch @chan <q>`, `/transcript <yt_url>`; `/tr src:dst text`; `/web <url>` (Markdown). All queue through the single worker + Telegram-native uploader.
 - **🖥️ Standalone system monitor.** A tiny static Go binary (`cmd/tgbot-monitor/`)
   posts `#system` reports and 80% CPU/RAM/disk warnings to your log channel —
   even when the bot itself is down.

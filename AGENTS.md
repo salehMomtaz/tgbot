@@ -39,6 +39,7 @@ invariants** so you don't have to rediscover them.
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
+| Change GitHub explorer / YouTube search / Translate / Web Markdown (balebot extras) | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers; see `docs/memory/tgbot-balebot-merge-2026-08-13.md`) |
 
 ### `utils/downloader/` package (replaces `utils/downloader.py`)
 

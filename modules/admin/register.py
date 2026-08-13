@@ -608,6 +608,21 @@ def register_admin_handlers(app: Client):
         text = message.text.strip()
         user_id = message.from_user.id
 
+        # Guard: commands already handled in group 0 (subscription, helpers, future /yt etc.)
+        # must not also trigger the greeting. Group 0 handlers call stop_propagation,
+        # but keep this fallback so a missed stop never produces a double reply.
+        if text.startswith("/"):
+            cmd = text.split()[0].split("@")[0].lower()
+            # /start is intentionally handled here (shows console/welcome)
+            if cmd not in ("/start",):
+                # Let the command's own handler (group 0) handle it; don't show greeting.
+                # If no handler consumed it, swallow it quietly rather than spamming welcome.
+                try:
+                    message.stop_propagation()
+                except Exception:
+                    pass
+                return
+
         from modules.downloader_handler import is_link
         if is_link(text):
             # Pass link down to downloader_handler
