@@ -43,9 +43,10 @@ class BaleChannelHandler(logging.Handler):
             elif level in ["ERROR", "CRITICAL"]:
                 emoji = "🚨"
             # Same rich HTML as Telegram handler (bale_log is a Telegram channel, so HTML is safe)
+            # Rich 32768, not 4096 -- previous 3500 truncated your detailed 17003 dump
             escaped_entry = html.escape(log_entry)
-            if len(escaped_entry) > 3500:
-                escaped_entry = escaped_entry[:3500] + "\n... [TRUNCATED] ..."
+            if len(escaped_entry) > 31500:
+                escaped_entry = escaped_entry[:31500] + "\n... [TRUNCATED at 32768 rich limit] ..."
             rich_html = (
                 f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n"
                 f"<pre>{escaped_entry}</pre>"

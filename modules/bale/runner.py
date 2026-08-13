@@ -246,8 +246,9 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 dump = _red(dump)
             except Exception:
                 pass
-            if len(dump) > 8000:
-                dump = dump[:8000] + "\n... [TRUNCATED] ..."
+            # Rich 32768, not 4096 -- previous 8000 truncated detailed Bale dumps prematurely
+            if len(dump) > 31500:
+                dump = dump[:31500] + "\n... [TRUNCATED at 32768 rich limit] ..."
             logger.info(f"📥 **[BALE RECEIVED UPDATE]**\n{dump}")
         except Exception:
             pass
@@ -266,8 +267,9 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 dump = _red(dump)
             except Exception:
                 pass
-            if len(dump) > 6000:
-                dump = dump[:6000] + "\n... [TRUNCATED] ..."
+            # Rich 32768
+            if len(dump) > 31500:
+                dump = dump[:31500] + "\n... [TRUNCATED at 32768 rich limit] ..."
             logger.info(f"🖱 **[BALE CALLBACK QUERY]**\n{dump}")
         except Exception:
             pass

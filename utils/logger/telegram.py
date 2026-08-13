@@ -36,8 +36,11 @@ class TelegramChannelHandler(logging.Handler):
             elif level in ["ERROR", "CRITICAL"]:
                 emoji = "🚨"
             escaped_entry = html.escape(log_entry)
-            if len(escaped_entry) > 3500:
-                escaped_entry = escaped_entry[:3500] + "\n... [TRUNCATED] ..."
+            # Rich messages via sendRichMessage allow 32768 UTF-8 chars (vs 4096 for sendMessage).
+            # Previous 3500 was overly conservative and caused premature [TRUNCATED] on detailed
+            # admin console dumps (your 17003 example). Keep ~100 chars overhead for wrapper.
+            if len(escaped_entry) > 31500:
+                escaped_entry = escaped_entry[:31500] + "\n... [TRUNCATED at 32768 rich limit] ..."
             rich_html = (
                 f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n"
                 f"<pre>{escaped_entry}</pre>"
