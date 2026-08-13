@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import config
-from pyrogram import Client, filters
+from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from utils.propagation import stop
 
 from utils.subscription.tiers import TIERS, TIER_ORDER
 from utils.subscription.store import get_settings, is_subscription_active, get_subscription
@@ -87,11 +88,7 @@ def register_subscription_handlers(app: Client):
             f"💳 **Subscription**\n\n{text}\n\nChoose a tier:",
             reply_markup=_tiers_keyboard()
         )
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     @app.on_message(filters.command("quota") & filters.private, group=0)
     async def quota_cmd(client: Client, message: Message):
         user_id = message.from_user.id
@@ -100,18 +97,11 @@ def register_subscription_handlers(app: Client):
         allowed, rem2, lim = check_quota(user_id)
         tier = sub.get("tier") if sub else "free"
         await message.reply_text(f"📊 **Quota:** {rem}/{lim} left today (tier: {tier}). {'✅ Can download' if allowed else '❌ Limit reached — resets at 00:00 UTC'}")
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     @app.on_message(filters.command("admin_token") & filters.private, group=0)
     async def admin_token_cmd(client: Client, message: Message):
         if message.from_user.id != getattr(config, "SYSTEM_CREATOR_ID", 0):
-            try:
-                message.stop_propagation()
-            except Exception:
-                pass
+            stop(message)
             return
         try:
             from modules.subscription.webapp import _admin_token
@@ -119,11 +109,7 @@ def register_subscription_handlers(app: Client):
             await message.reply_text(f"🔑 **Admin token** for `/admin/subscription` WebApp:\n`{tok}`\n\nSend as header `X-Admin-Token` or open the page inside Telegram (auto-auth via initData).")
         except Exception as e:
             await message.reply_text(f"❌ Could not generate token: {e}")
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     @app.on_callback_query(filters.regex(r"^sub:"))
     async def sub_callback(client: Client, cb: CallbackQuery):
         data = cb.data
@@ -205,12 +191,22 @@ def register_subscription_payments(app: Client):
     """Wire Stars pre_checkout (raw) + successful_payment handlers."""
     from pyrogram import filters
 
-    # Stars: answer pre_checkout_query via raw update — pyrogram 2.0.106 has no high-level filter
-    try:
-        from pyrogram.raw.types import UpdateBotPrecheckoutQuery
+    # Stars: answer pre_checkout_query via raw update — pyrogram 2.0.106 has no
+    # high-level filter. CRITICAL: this is a RawUpdateHandler, and pyrogram's
+    # dispatcher treats a RawUpdateHandler as matching EVERY update; if the
+    # callback returns normally the dispatcher `break`s the group and any
+    # handler registered AFTER it in the same group is starved before it ever
+    # sees the update — which is why the ported extras (translate/web/github/
+    # youtube) registered later in group 0 silently ignored /tr, /search etc.
+    # So the handler MUST raise pyrogram.ContinuePropagation so the dispatcher
+    # keeps iterating the rest of the group. It is raised OUTSIDE the try so the
+    # `except Exception` below never swallows it (ContinuePropagation subclasses
+    # Exception).
+    from pyrogram.raw.types import UpdateBotPrecheckoutQuery
 
-        @app.on_raw_update(group=0)
-        async def _raw_precheckout(client, update, users, chats):
+    @app.on_raw_update(group=0)
+    async def _raw_precheckout(client, update, users, chats):
+        try:
             if isinstance(update, UpdateBotPrecheckoutQuery):
                 # synthesize minimal query object for handler
                 class _Q:
@@ -239,8 +235,10 @@ def register_subscription_payments(app: Client):
                 q.answer = _answer
                 from utils.subscription.payments_stars import handle_pre_checkout
                 await handle_pre_checkout(client, q)
-    except Exception:
-        pass
+        except Exception:
+            raise
+        # Always let the dispatcher continue to the next handler in this group.
+        raise ContinuePropagation
 
     # successful_payment — message filter via custom create
     def _is_success(m):

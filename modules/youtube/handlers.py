@@ -9,6 +9,7 @@ import urllib.parse
 import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from utils.propagation import stop
 
 import config
 from utils.shared import queue
@@ -23,8 +24,7 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
         raw = (message.text or "")[3:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/yt <query>` or `/yt <limit> <query>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         parts = raw.split(None, 1)
         limit = 5; query = raw
@@ -35,16 +35,14 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
                 query = parts[1].strip() if len(parts) > 1 else ""
         if not query:
             await message.reply_text("⚠️ Please provide a search query.")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         status = await message.reply_text("🔍 Searching YouTube...")
         try:
             entries = await search_ytdlp_flat(query, limit)
             if not entries:
                 await status.edit_text("ℹ️ No videos found.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             lines = []
             for idx, e in enumerate(entries, 1):
@@ -57,16 +55,13 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
             await status.edit_text("🎬 **YouTube Results:**\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Search failed: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     @app.on_message(filters.command("ytrecent") & filters.private, group=0)
     async def ytrecent_handler(client: Client, message: Message):
         raw = (message.text or "")[9:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/ytrecent <@channel_handle> [count]`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         parts = raw.split()
         channel = parts[0].strip()
@@ -86,31 +81,26 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
             entries = info.get('entries', [])[:limit]
             if not entries:
                 await status.edit_text("ℹ️ No recent uploads found.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             lines = [f"{i}. **{e.get('title','Unknown')}**\n   🔗 https://youtu.be/{e.get('id')}" for i,e in enumerate(entries,1)]
             await status.edit_text(f"🎬 **Recent: {clean_channel}**\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Failed: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     @app.on_message(filters.command("ytch") & filters.private, group=0)
     async def ytch_handler(client: Client, message: Message):
         raw = (message.text or "")[5:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/ytch <@channel_handle> <query>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         parts = raw.split(None, 1)
         channel = parts[0].strip()
         query = parts[1].strip() if len(parts) > 1 else ""
         if not query:
             await message.reply_text("⚠️ Please specify a search keyword.")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         status = await message.reply_text(f"🔍 Searching `{query}` inside `{channel}`...")
         try:
@@ -119,31 +109,26 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
             entries = await search_ytdlp_flat(search_q, 5)
             if not entries:
                 await status.edit_text("ℹ️ No matching videos found.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             lines = [f"{i}. **{e.get('title','Unknown')}**\n   🔗 https://youtu.be/{e.get('id')}" for i,e in enumerate(entries,1)]
             await status.edit_text(f"🎬 **Results inside {clean_channel} matching `{query}`:**\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Failed: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     @app.on_message(filters.command("transcript") & filters.private, group=0)
     async def transcript_handler(client: Client, message: Message):
         url = (message.text or "")[11:].strip()
         if not url:
             await message.reply_text("⚠️ **Usage:** `/transcript <youtube_video_url>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         status = await message.reply_text("📥 Enqueueing transcript job...")
         user_id = message.from_user.id
         # check auth gate via is_authorized (security gate already did, but keep)
         if not is_authorized(user_id):
             await status.edit_text("🚫 Not authorized.")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         async def transcript_job():
             await status.edit_text("⚡ Requesting subtitle extraction...")
@@ -198,5 +183,4 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
                     try: shutil.rmtree(task_dir)
                     except: pass
         await queue.add_task(user_id, status, transcript_job)
-        try: message.stop_propagation()
-        except: pass
+        stop(message)

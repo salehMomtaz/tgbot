@@ -3,6 +3,7 @@ import os
 import uuid
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from utils.propagation import stop
 from modules.web.api import fetch_markdown_text
 from utils.gate import is_authorized
 
@@ -12,8 +13,7 @@ def register_web_handlers(app: Client, premium_app: Client | None = None):
         raw = (message.text or "")[4:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/web <url>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         # take first token as url
         url = raw.split()[0].strip()
@@ -24,8 +24,7 @@ def register_web_handlers(app: Client, premium_app: Client | None = None):
             title, md = await fetch_markdown_text(url)
             if not md.strip():
                 await status.edit_text("ℹ️ No readable markdown from this page.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             sanitized = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title)
             if len(md) > 3500:
@@ -46,5 +45,4 @@ def register_web_handlers(app: Client, premium_app: Client | None = None):
             await status.edit_text(f"❌ Failed to extract: `{e}`")
             from main import log_event
             await log_event(f"❌ **Web Error:** {url} {e}")
-        try: message.stop_propagation()
-        except: pass
+        stop(message)

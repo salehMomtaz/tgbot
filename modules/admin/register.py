@@ -10,6 +10,7 @@ import logging
 import config
 from pyrogram import Client, filters, ContinuePropagation
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from utils.propagation import stop
 from dotenv import set_key
 from main import log_event
 from utils.gate import (
@@ -617,10 +618,7 @@ def register_admin_handlers(app: Client):
             if cmd not in ("/start",):
                 # Let the command's own handler (group 0) handle it; don't show greeting.
                 # If no handler consumed it, swallow it quietly rather than spamming welcome.
-                try:
-                    message.stop_propagation()
-                except Exception:
-                    pass
+                stop(message)
                 return
 
         from modules.downloader_handler import is_link

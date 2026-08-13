@@ -527,6 +527,39 @@ invariants** so you don't have to rediscover them.
     The `+bestaudio` fallback selectors and `PLAYLIST_TIERS` are already
     language-aware via yt-dlp's sort — leave them alone.
 
+19. **`stop_propagation()` / `continue_propagation()` must NEVER be wrapped in a
+    bare `except Exception`/`except: pass`.** Both `pyrogram.StopPropagation`
+    and `pyrogram.ContinuePropagation` are **`Exception` subclasses**, so a
+    `try: message.stop_propagation() except Exception: pass` silently swallows
+    the signal and the dispatcher never acts on it. Consequences, depends on
+    where it happens:
+    - **group 0**: the handler returns normally → dispatcher `break`s the group
+      and control flows to the *next* group, so a link handled in group 0 (e.g.
+      the GitHub explorer) is ALSO grabbed by the group-1 downloader as a
+      direct-file upload → duplicate replies/processing.
+    - **group 1 greeting**: `/subscription` appears to "double-greet" (a
+      swallowed stop lets the command fall through to the welcome path; only the
+      group-1 `/`-swallow guard masked it).
+    Correct pattern — use the shared helper `utils/propagation.py`:
+    `from utils.propagation import stop, continue_` then `stop(message)` /
+    `continue_(message)`. The helper re-raises the real signal while still
+    swallowing genuinely-unexpected (non-propagation) errors. Applies to every
+    handler in `modules/{admin,subscription,github,youtube,translate,web}/`.
+
+20. **A `RawUpdateHandler` placed in the MIDDLE of a handler group starves every
+    handler registered AFTER it in that group.** pyrogram's dispatcher treats any
+    `RawUpdateHandler` (e.g. an `@app.on_raw_update(...)` for Stars
+    pre_checkout) as matching *every* update; if its callback returns normally
+    the dispatcher `break`s the whole group, so later handlers in the SAME group
+    never see the update. This is why the ported extras (`/tr`, `/yt`,
+    `/search`, github links, `/web`) silently ignored all input: they were
+    registered after the `on_raw_update` Stars pre_checkout handler in group 0.
+    A raw handler that does not own the current update MUST `raise
+    pyrogram.ContinuePropagation` so the group iterator keeps going (see
+    `modules/subscription/handlers.py::_raw_precheckout`). Deploy a new
+    `on_raw_update` in a shared group with this in mind — prefer an isolated
+    group or a raise-on-mismatch.
+
 
 ## Running / testing
 
@@ -733,4 +766,9 @@ aiogram↔pyrogram:
 - Do **not** port the Bale uploader (direct multipart for a 20 MB limit) —
   pyrogram's native `send_video`/`send_audio`/`send_document` handle Telegram's
   2 GB / 4 GB natively. Only port the splitter logic and disk guards.
-- Do **not** add GitHub-explorer or translate features — tgbot doesn't have them.
+- The balebot extras (GitHub explorer, YouTube search/recent/channel/transcript,
+  Google Translate, web→Markdown) are ALREADY ported into this repo as shared,
+  transport-free modules under `modules/github|youtube|translate|web/` — used by
+  the Telegram pyrogram side AND the Bale `modules/bale/runner.py`. Do not
+  duplicate an extra on the Telegram side; extend the shared module and let both
+  endpoints keep one copy.

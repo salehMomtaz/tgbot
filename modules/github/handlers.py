@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from utils.propagation import stop
 
 import config
 from utils.gate import is_authorized
@@ -197,11 +198,7 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             f"🐙 **GitHub Repository Browser**\n\n📁 **Repository:** `{owner}/{repo}`\n🔗 https://github.com/{owner}/{repo}\n\nSelect an action:",
             reply_markup=get_repo_menu_keyboard(gh_id),
         )
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     @app.on_message(filters.text & filters.private & filters.create(lambda _, __, m: SUB_REGEX.match((m.text or "").strip()) is not None), group=0)
     async def github_sub_link_handler(client: Client, message: Message):
         if not is_authorized(message.from_user.id):
@@ -227,18 +224,11 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             )
         except Exception as e:
             await status.edit_text(f"❌ Failed to fetch thread: {e}")
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     @app.on_message(filters.text & filters.private & filters.create(lambda _, __, m: GIST_REGEX.match((m.text or "").strip()) is not None), group=0)
     async def github_gist_link_handler(client: Client, message: Message):
         if not is_authorized(message.from_user.id):
-            try:
-                message.stop_propagation()
-            except Exception:
-                pass
+            stop(message)
             return
         m = GIST_REGEX.match(message.text.strip())
         if not m:
@@ -269,19 +259,14 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
                 pass
         except Exception as e:
             await status.edit_text(f"❌ Failed to fetch Gist: {e}")
-        try:
-            message.stop_propagation()
-        except Exception:
-            pass
-
+        stop(message)
     # ---- commands (group 0) ----
     @app.on_message(filters.command("search") & filters.private, group=0)
     async def github_search_handler(client: Client, message: Message):
         parts = message.text.split(None, 1)
         if len(parts) < 2 or not parts[1].strip():
             await message.reply_text("⚠️ **Usage:** `/search <query>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         query = parts[1].strip()
         status = await message.reply_text("🔍 Searching GitHub...")
@@ -290,8 +275,7 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             items = data.get("items", [])[:5]
             if not items:
                 await status.edit_text("ℹ️ No repositories found.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             lines = []
             for idx, item in enumerate(items, 1):
@@ -299,16 +283,13 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             await status.edit_text("🔍 **GitHub Top Results:**\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Search failed: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     @app.on_message(filters.command("user") & filters.private, group=0)
     async def github_user_handler(client: Client, message: Message):
         parts = message.text.split(None, 1)
         if len(parts) < 2 or not parts[1].strip():
             await message.reply_text("⚠️ **Usage:** `/user <username>`")
-            try: message.stop_propagation()
-            except: pass
+            stop(message)
             return
         username = parts[1].strip().split()[0]
         status = await message.reply_text("🔍 Fetching user repos...")
@@ -317,8 +298,7 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             repos = repos[:5]
             if not repos:
                 await status.edit_text("ℹ️ No repositories found.")
-                try: message.stop_propagation()
-                except: pass
+                stop(message)
                 return
             lines = []
             for idx, repo in enumerate(repos, 1):
@@ -326,9 +306,7 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             await status.edit_text(f"👤 **User:** `{username}`\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Failed to fetch user: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     @app.on_message(filters.command("trend") & filters.private, group=0)
     async def github_trend_handler(client: Client, message: Message):
         status = await message.reply_text("🔍 Fetching weekly trending...")
@@ -342,9 +320,7 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             await status.edit_text("🔥 **Weekly Trending:**\n\n" + "\n\n".join(lines))
         except Exception as e:
             await status.edit_text(f"❌ Failed to fetch trends: {e}")
-        try: message.stop_propagation()
-        except: pass
-
+        stop(message)
     # ---- callbacks (group 2, prefix gh:) ----
     @app.on_callback_query(filters.regex(r"^gh:"), group=2)
     async def github_callback_handler(client: Client, callback_query: CallbackQuery):
