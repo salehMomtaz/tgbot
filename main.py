@@ -554,7 +554,21 @@ async def main_engine():
     else:
         logging.info("[Bale] BALE_TOKEN empty — Bale frontend disabled")
 
-    # 9c. Launch the standalone system monitor as a DETACHED subprocess so it
+    # 9c. Headless cookie refresher (Playwright, sequential, 1 tab at a time).
+    # DM-only jars (IG/X/TT/YT) never get yt-dlp write-back, so they go stale
+    # after ~7 days and hit update_risky_contactpoint. This visits each site
+    # sequentially (not 4 tabs at once) every 24h, ~300 MB peak, safe on 4GB+8swap.
+    if getattr(config, "COOKIE_REFRESH_ENABLED", True):
+        try:
+            from utils.cookie_refresher import auto_refresh_cookies_loop
+            tasks.append(auto_refresh_cookies_loop())
+            logging.info("[CookieRefresh] scheduled (24h, sequential, 1 Chromium at a time)")
+        except Exception as e:
+            logging.warning(f"[CookieRefresh] Could not schedule: {e}")
+    else:
+        logging.info("[CookieRefresh] disabled via COOKIE_REFRESH_ENABLED=false")
+
+    # 9d. Launch the standalone system monitor as a DETACHED subprocess so it
     # survives this bot's own crash/restart (it talks to the log channel via the
     # raw Bot API, exactly like the logger does). If it is already running (e.g.
     # started by tgbot-monitor.service), this is a harmless no-op.

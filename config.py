@@ -129,6 +129,12 @@ PLAYLIST_MAX_VIDEOS = get_env_int("PLAYLIST_MAX_VIDEOS", 50)
 # ---------------------------------------------------------------------------
 COOKIE_WRITEBACK_ENABLED = os.getenv("COOKIE_WRITEBACK_ENABLED", "true").lower() in ("true", "1", "yes")
 COOKIE_STALE_WARNING_DAYS = get_env_int("COOKIE_STALE_WARNING_DAYS", 21)
+# Headless browser refresh for DM-only jars (utils/cookie_refresher.py):
+# When yt-dlp write-back cannot keep a jar warm (DM-only account), this visits
+# each site sequentially with Playwright (1 Chromium at a time, ~300 MB) every 24h.
+# 4 tabs at once would be ~1.2 GB → OOM on 4 GB box, so sequential is mandatory.
+COOKIE_REFRESH_ENABLED = os.getenv("COOKIE_REFRESH_ENABLED", "true").lower() in ("true", "1", "yes")
+COOKIE_REFRESH_HOURS = get_env_int("COOKIE_REFRESH_HOURS", 24)
 
 # =========================================================================
 # Direct-forward: relay media you DM to the bot's own Instagram / X accounts
