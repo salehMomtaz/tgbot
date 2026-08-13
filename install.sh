@@ -164,6 +164,27 @@ pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
 # ---------------------------------------------------------------------------
+# 4a. Playwright Chromium for the sequential cookie refresher (utils/cookie_refresher.py)
+# ---------------------------------------------------------------------------
+# The DM-only jars (IG/X/TT/YT) never get yt-dlp write-back, so they go stale
+# ~7 days. utils/cookie_refresher.py visits each site with one headless Chromium
+# at a time (~300 MB peak) every 24h. The `playwright` pip package comes from
+# requirements.txt; the browser binary itself must be downloaded here.
+# Best-effort: a missing browser only disables the refresher (it logs
+# "playwright not installed" and skips), so a failure must never block install.
+if python -c "import playwright" >/dev/null 2>&1; then
+    log "Provisioning Playwright Chromium for the cookie refresher..."
+    if python -m playwright install chromium >/dev/null 2>&1; then
+        log "Playwright Chromium installed."
+        note "playwright-chromium:$(python -m playwright --version 2>/dev/null)"
+    else
+        warn "playwright install chromium failed — cookie refresher disabled (DM-only jars will go stale). Run 'python -m playwright install chromium' manually."
+    fi
+else
+    warn "playwright pip package missing — cookie refresher disabled. (requirements.txt should have installed it.)"
+fi
+
+# ---------------------------------------------------------------------------
 # 4b. XChat bridge npm dependencies (emusks → cycletls) via node/npm
 # ---------------------------------------------------------------------------
 # The X direct-forward worker reads cache/xchat_inbox.jsonl, produced by the

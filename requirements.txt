@@ -31,3 +31,10 @@ websockets
 # Bale.ai frontend (optional, aiogram v3 → https://tapi.bale.ai). Only needed if BALE_TOKEN is set.
 # 3.30.0+ supports pydantic 2.13 needed by instagrapi 2.18.14's Realtime.
 aiogram==3.30.0
+# Sequential headless cookie refresher (utils/cookie_refresher.py, Phase 26).
+# Optional-ish: the refresher degrades gracefully (logs "playwright not installed
+# — skip"), but without it DM-only jars (IG/X/TT/YT) go stale ~7 days. The
+# Chromium browser itself is installed by install.sh (`python -m playwright
+# install chromium`), not pip. Keep in sync with the pinned browsers.json that
+# `playwright install` reads.
+playwright

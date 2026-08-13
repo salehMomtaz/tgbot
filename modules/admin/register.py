@@ -36,6 +36,7 @@ from .premium_gen import (
 )
 from .cookies import COOKIE_MAP
 from .callback_dispatch import _admin_callback_dispatch, _purge_active_prompt
+from modules.subscription.join import _greeting_text
 
 logger = logging.getLogger(__name__)
 
@@ -634,58 +635,39 @@ def register_admin_handlers(app: Client):
                 reply_markup=keyboard
             )
         else:
-            # subscription-aware welcome: if sub mode ON, show tailored prompt
+            # Single, self-contained greeting. It ALWAYS carries the normal intro
+            # guide and, when subscription mode is on, the right access prompt &
+            # keyboard in ONE message — never a second generic greeting.
             try:
                 from utils.subscription.store import get_settings
                 from utils.subscription.access import check_access
                 from utils.subscription.tiers import TIERS
                 from modules.subscription.handlers import _tiers_keyboard, _sub_status_text
+                from modules.subscription.join import _channel_rows, build_greeting_keyboard
                 s = get_settings()
                 if s.get("enabled"):
                     ok, reason = await check_access(client, user_id)
                     if not ok:
                         if reason == "need_channel":
-                            from utils.subscription.store import get_channels
-                            from utils.subscription.access import check_all_channels
-                            chans = get_channels()
-                            _, missing = await check_all_channels(client, user_id)
-                            if not missing:
-                                missing = chans
-                            lines = []
-                            kb_rows = []
-                            for ch in missing:
-                                cuser = ch.get("username") or ""
-                                cid = ch.get("id", 0)
-                                if cuser:
-                                    link = f"https://t.me/{cuser.lstrip('@')}"
-                                    lines.append(f"• {cuser} — {link}")
-                                    kb_rows.append([InlineKeyboardButton(f"📢 Join {cuser}", url=link)])
-                                else:
-                                    lines.append(f"• channel `{cid}`")
-                            kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
-                            await message.reply_text(
-                                f"👋 **Welcome!** Free access requires joining:\n" + "\n".join(lines) + "\n\nJoin all, then send a link. Or unlock unlimited with /subscription.",
-                                reply_markup=kb
+                            text = _greeting_text(user_id)
+                            lines, _ = _channel_rows()
+                            text += (
+                                "\n\n🔒 **Free access requires joining:**\n"
+                                + "\n".join(lines)
+                                + "\n\nJoin the channel(s) above, then tap **✅ I joined** to verify and unlock free downloads."
                             )
-                            message.stop_propagation()
+                            await message.reply_text(text, reply_markup=build_greeting_keyboard())
+                            stop(message)
                             return
                         if reason == "need_subscription":
-                            await message.reply_text(
-                                f"👋 **Welcome!**\n\n{_sub_status_text(user_id)}\n\nUse /subscription to choose a tier (Basic 100/d, Plus 500/d, Pro 2500/d) — or join required channels for free tier.",
-                                reply_markup=_tiers_keyboard()
-                            )
-                            message.stop_propagation()
+                            text = _greeting_text(user_id)
+                            text += f"\n\n💳 **Subscription required.**\n\n{_sub_status_text(user_id)}\n\nChoose a tier below — or join the required channels for free tier:"
+                            await message.reply_text(text, reply_markup=_tiers_keyboard())
+                            stop(message)
                             return
             except Exception:
                 pass
-            await message.reply_text(
-                "👋 **Hello! Welcome to your Private Downloader Bot.**\n\n"
-                "To get started:\n"
-                "• Send me any YouTube, Instagram, TikTok, or X/Twitter link to download it.\n"
-                "• Send me any direct file URL to upload it directly to Telegram.\n"
-                "• Forward me a Telegram file (video, document, music) to generate an instant direct stream link.\n\n"
-                "Use /subscription to see plans."
-            )
+            await message.reply_text(_greeting_text(user_id))
         message.stop_propagation()
 
     # =========================================================================

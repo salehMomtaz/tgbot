@@ -36,6 +36,8 @@ invariants** so you don't have to rediscover them.
 | Change playlist tiers / detection / per-video download | `utils/downloader/playlists.py` (`PLAYLIST_TIERS`), `utils/downloader/url_normalize.py` (`is_playlist_url`), `utils/downloader/playlists.py` (`extract_playlist_meta`), `utils/downloader/download.py` (`download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader/cookies.py`, `utils/downloader/download.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
+| Change logging / log channels / truncation | `utils/logger/` package (`local.py`, `telegram.py`, `bale.py`; re-exports from `utils/logger.py`) |
+| Change subscription / channel-join verification / greeting | `modules/subscription/join.py` (`_greeting_text`, `build_greeting_keyboard`, `register_join_handlers`) + `utils/subscription/access.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
@@ -653,23 +655,35 @@ monitor survive reboots unconditionally.
 
 ## Logging
 
+The logger is a Python package `utils/logger/` (split out of the old `utils/logger.py`
+monolith; re-exports keep `from utils.logger import ...` working):
+`local.py` (`ensure_local_log_handler`), `telegram.py`
+(`TelegramChannelHandler` → `LOG_CHANNEL_ID`), `bale.py`
+(`BaleChannelHandler` → `BALE_LOG_CHANNEL_ID`). All channel handlers send **rich
+messages** (`sendRichMessage`, `rich_message: {"html": ...}`) with a `sendMessage`
+fallback (byte-compatible with the pre-rich format) and truncate at **32768**
+chars (Rich Bot API limit — NOT 3500/6000/8000; those premature cuts broke log
+lines, fixed in `d2c3dcf`).
+
 Root logger gets two handlers (`main.py::setup_system_logger`): the
 `TelegramChannelHandler` (→ `LOG_CHANNEL_ID`) and a local rotating file mirror
 (`logs/bot.log`, 5 MB × 3). Both only attach when `LOG_CHANNEL_ID != 0`; the file
 mirror is added regardless inside `ensure_local_log_handler`. New code should use
 `logging.getLogger(__name__)` / `await log_event(...)`, not `print`.
 
-The `TelegramChannelHandler` sends log lines to the channel as **rich messages**
-(`sendRichMessage`, `rich_message: {"html": ...}`) with a `sendMessage` fallback
-that posts the identical HTML (kept byte-compatible with the pre-rich format), so
-log rendering is identical on any Bot API version.
+**Strict split (`d723798`):** the main `bale_log` Telegram channel gets ONLY
+Bale/aiogram logger lines, while the regular Telegram log channel gets
+pyrogram/direct-forward/queue lines — both at the same INFO level. Don't merge
+the streams. The split lives in `utils/logger/bale.py` (a `bale.`-prefixed child
+logger) and is what lets the Bale frontend be monitored without drowning the
+Telegram channel in duplicate Bale noise.
 
 ### Why the bot's logger is NOT written in Go (unlike the system monitor)
 
 The Go monitor exists because it must **outlive the bot** (report even when the
 bot is dead). The logger has the opposite requirement: it lives *inside* the bot
 process by design, and should die with it. The logger is a Python `logging`
-handler (`utils/logger.py::TelegramChannelHandler`) invoked by the root logger
+handler (`utils/logger/telegram.py::TelegramChannelHandler`) invoked by the root logger
 inside `main.py` — making it Go would mean a sidecar process, an IPC pipe, and a
 reconnect protocol just to replicate a 5-line fire-and-forget `requests.post`.
 There is no CPU/RAM/robustness win (the monitor's rationale) because the logger

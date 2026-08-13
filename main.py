@@ -450,11 +450,13 @@ async def main_engine():
     register_admin_handlers(app)
     register_downloader_handlers(app, premium_app)
     register_stream_interceptor_handlers(app)
-    # subscription: /subscription cmds + Stars/TON payments
+    # subscription: /subscription cmds + Stars/TON payments + channel-join verify
     try:
         from modules.subscription.handlers import register_subscription_handlers, register_subscription_payments
+        from modules.subscription.join import register_join_handlers
         register_subscription_handlers(app)
         register_subscription_payments(app)
+        register_join_handlers(app)
     except Exception as e:
         logging.warning(f"[Subscription] Could not register handlers: {e}")
     # balebot-originated extras now on Telegram too (pure HTTP, no Bale dep)

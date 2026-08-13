@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-08-12.
+code or the git log alone. Last updated: 2026-08-13.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -83,3 +83,22 @@ code or the git log alone. Last updated: 2026-08-12.
   `get_tweet_by_id`. Fixed by switching `_x_fallback_photos` to a raw
   `client.gql.tweet_detail` GraphQL walk scoped to the focal `tweet-<id>`
   entry (no model building, so the bug cannot fire).
+- [Dispatch-propagation bugs](tgbot-2026-08-13-propagation-dispatche-bugs.md) —
+  two dispatcher bugs: bare `except Exception` swallowed `StopPropagation`
+  (group-0 GitHub links ALSO grabbed by the group-1 downloader → duplicate
+  replies), and a `RawUpdateHandler` mid-group starved later handlers (fixed by
+  `raise ContinuePropagation` on non-owned updates). New shared helpers in
+  `utils/propagation.py` (`stop()`/`continue_()`).
+- [Balebot hardening](tgbot-balebot-hardening-2026-08-13.md) — the Bale.ai
+  frontend: aiogram 3.30 poller on `tapi.bale.ai`, LIMITED admin (no
+  cookies/premium/POT/direct-forward), real 20 MB limit (docs lie 50),
+  `getUpdates` drain (Bale `deleteWebhook` is NOOP). `bale_log` is a **Telegram**
+  channel (never `tapi.bale.ai` — government-owned messenger).
+- [Balebot merge](tgbot-balebot-merge-2026-08-13.md) — GitHub explorer,
+  YouTube search, Translate, Web→Markdown ported from balebot into shared
+  transport-free modules usable by both Telegram and Bale.
+- [Instagram risky + push](tgbot-instagram-risky-and-push-2026-08-13.md) —
+  IG gap recovery (pagination with cursor, at-least-once) + optional MQTToT
+  push via `instagrapi 2.18.14`.
+- [Subscription system](tgbot-subscription-system.md) — toggleable 3-tier
+  Stars/TON subscriptions + free tier with multi-channel force-join + WebApp.

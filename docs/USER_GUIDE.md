@@ -2,7 +2,7 @@
 
 This is the *how to use it* companion to `README.md` (overview) and `blueprint.md` (architecture). It assumes your bot is already running (`tgbot.service active`). For first-time install, do `docs/UBUNTU_VPS_SETUP.md` first, then come back here.
 
-> **Two frontends, one core:** Telegram (`pyrogram`, `t.me`/`api.telegram.org`, `2 GB` bot / `4 GB` Premium userbot) is primary. Bale (`aiogram 3.30`, `tapi.bale.ai`) is an **optional hardened mirror** in the same `tgbot.service` process (same `DownloadQueue`, PO provider `127.0.0.1:4417`, `is_ytdlp_supported` 1,786 patterns, `cookie_manager` snapshots). When `BALE_TOKEN` empty, zero Bale code runs. Bale is government-owned, so its admin is **LIMITED** and its logs go to a **separate** `bale_log` channel at the same `INFO` level (never to Telegram). Bale's real hard limit is `20 MB` (docs lie `50`), Telegram is `2 GB/4 GB`.
+> **Two frontends, one core:** Telegram (`pyrogram`, `t.me`/`api.telegram.org`, `2 GB` bot / `4 GB` Premium userbot) is primary. Bale (`aiogram 3.30`, `tapi.bale.ai`) is an **optional hardened mirror** in the same `tgbot.service` process (same `DownloadQueue`, PO provider `127.0.0.1:4417`, `is_ytdlp_supported` 1,786 patterns, `cookie_manager` snapshots). When `BALE_TOKEN` empty, zero Bale code runs. Bale is government-owned, so its admin is **LIMITED** and its logs go to a **separate** `bale_log` **Telegram** channel at the same `INFO` level (never to `tapi.bale.ai`). Bale's real hard limit is `20 MB` (docs lie `50`), Telegram is `2 GB/4 GB`.
 
 ---
 
@@ -101,7 +101,7 @@ One `direct_forward_state.json` shared `IG/X/TikTok`, written **merge-only per p
 
 ## Subscriptions & quotas (Telegram only)
 
-`SUB_ENABLED=false` -> legacy `is_authorized` only (stranger -> `blacklist`). `true` -> `check_access` (`is_subscription_active` or `free_enabled` + `check_all_channels` `is_channel_member` `member/administrator/creator` via `get_chat`/`get_chat_member`). No free tier on Bale.
+`SUB_ENABLED=false` -> legacy `is_authorized` only (stranger -> `blacklist`). `true` -> `check_access` (`is_subscription_active` or `free_enabled` + `check_all_channels` `is_channel_member` `member/administrator/creator` via `get_chat`/`get_chat_member`). The `/start` greeting shows one self-contained message (intro guide + access prompt) with a **"✅ I joined — verify"** button (`chkjoin:` callback, live membership re-check) when the user must join channels for free access. No free tier on Bale.
 
 Tiers (`tiers.py`): `free 5/d` `priority 0`, `basic 100/d 100⭐` `1`, `plus 500/250⭐` `2`, `pro 2500/500⭐` `3`. Daily `usage` `YYYY-MM-DD` per `user_id` in `database.json`, `increment_quota` thread-safe, prune `7` days. `DownloadQueue` priority `0->3` (free last). `Stars` via `sendInvoice` + `pre_checkout` raw `UpdateBotPrecheckoutQuery`, `TON` via `toncenter` inbound memo (`user_id`).
 
@@ -111,7 +111,7 @@ Flood: `is_flood(user, window 60s, limit)` tier-aware `free 5`, `basic 8`, `plus
 
 ## Logs you will see
 
-* `sudo journalctl -u tgbot -f` (systemd) + `tail -f logs/bot.log` (local `5 MB x3`) + **Telegram** `LOG_CHANNEL_ID` (required, `TelegramChannelHandler` `sendRichMessage` + `sendMessage` fallback, `html` escaped) + **Bale** `BALE_LOG_CHANNEL_ID` (`bale_log`, `angelbalzacbot` admin, `BaleChannelHandler` plain text to `tapi.bale.ai`, same `INFO` level, truncated `3500`). When `BALE_LOG_CHANNEL_ID=0`, Bale logs stay local only. System monitor `Go` (`build/tgbot-monitor`) posts `#system` `15 min` + `80%` warnings to **both** channels when set, even when bot is down.
+* `sudo journalctl -u tgbot -f` (systemd) + `tail -f logs/bot.log` (local `5 MB x3`) + **Telegram** `LOG_CHANNEL_ID` (required, `TelegramChannelHandler` `sendRichMessage` + `sendMessage` fallback, `html` escaped, `32768` Rich limit) + **Bale** `BALE_LOG_CHANNEL_ID` (`bale_log`, a separate private **Telegram** channel, `angelbalzac` admin, `BaleChannelHandler` rich HTML via `api.telegram.org` — never `tapi.bale.ai`, same `INFO` level, `32768` limit). When `BALE_LOG_CHANNEL_ID=0`, Bale logs stay local only. System monitor `Go` (`build/tgbot-monitor`) posts `#system` `15 min` + `80%` warnings to **both** channels when set, even when bot is down.
 
 ---
 
