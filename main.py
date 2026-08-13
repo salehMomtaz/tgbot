@@ -81,20 +81,25 @@ def setup_system_logger():
         except Exception as e:
             print(f"Warning: Failed to initialize Telegram logger: {e}")
 
-    # Bale log channel (separate, same level) — only if BALE_TOKEN + BALE_LOG_CHANNEL_ID set
-    if getattr(config, "BALE_TOKEN", "") and getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
+    # Bale log channel: user clarified `bale_log` IS A TELEGRAM CHANNEL (private, angelbalzac admin),
+    # not a Bale channel. Reason: Bale is government-owned, so Bale-side logs containing
+    # sensitive info must NOT go to tapi.bale.ai (security hole). They go to a *separate*
+    # Telegram channel `bale_log` via api.telegram.org with BOT_TOKEN, at the same INFO level
+    # as the main LOG_CHANNEL_ID. Both use Telegram API, just different channel IDs.
+    if getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
         try:
             from utils.logger import BaleChannelHandler
             bale_formatter = logging.Formatter('%(message)s')
-            b_handler = BaleChannelHandler(config.BALE_TOKEN, config.BALE_LOG_CHANNEL_ID)
+            # Use BOT_TOKEN (Telegram) even though this is "Bale logs" — destination is Telegram channel bale_log
+            b_handler = BaleChannelHandler(config.BOT_TOKEN, config.BALE_LOG_CHANNEL_ID)
             b_handler.setFormatter(bale_formatter)
             b_handler.setLevel(logging.INFO)
             logging.getLogger().addHandler(b_handler)
-            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID}")
+            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID} (Telegram bale_log)")
         except Exception as e:
             print(f"Warning: Failed to initialize Bale logger: {e}")
     elif getattr(config, "BALE_TOKEN", ""):
-        logging.info("[Logger] Bale logging disabled (BALE_LOG_CHANNEL_ID=0) — Bale logs stay local only")
+        logging.info("[Logger] Bale logging disabled (BALE_LOG_CHANNEL_ID=0) — Bale logs stay local only (bale_log is a Telegram channel, set BALE_LOG_CHANNEL_ID to enable)")
 
 async def log_event(text: str):
     """Log an event locally. The standalone root logger handles automatic Telegram routing."""
