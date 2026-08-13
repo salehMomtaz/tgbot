@@ -584,7 +584,14 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
             break
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
-            freeze = random.uniform(3 * 3600, 5 * 3600)
+            # User requested to break freeze and start immediately (VPN already matches VPS).
+            # For testing, shorten freeze to 60s instead of 4h; the gap recovery (200 items) will
+            # still deliver the stalled batch once login succeeds. If you see repeated PleaseWait,
+            # the durable fix is still to pass the challenge in the official app.
+            if getattr(config, "IG_DIRECT_MQTT_ENABLED", False):
+                freeze = random.uniform(60, 120)
+            else:
+                freeze = random.uniform(3 * 3600, 5 * 3600)
             logger.error(f"[DirectForward/IG] Instagram challenged the login: {e}. "
                          f"Pausing this worker for ~{freeze / 3600:.1f}h. "
                          f"Open the official Instagram app on the bot account and pass the "
