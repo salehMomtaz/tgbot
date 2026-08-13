@@ -68,7 +68,7 @@ def setup_system_logger():
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
 
-    # Telegram log channel (required)
+    # Telegram log channel (required) — gets Telegram/pyrogram/direct_forward logs, NOT Bale
     if config.LOG_CHANNEL_ID != 0:
         try:
             from utils.logger import TelegramChannelHandler
@@ -76,6 +76,22 @@ def setup_system_logger():
             handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
             handler.setFormatter(channel_formatter)
             handler.setLevel(logging.INFO)
+            def _tg_filter(record):
+                name = (getattr(record, "name", "") or "").lower()
+                try:
+                    msg = record.getMessage()
+                except Exception:
+                    msg = ""
+                msg_l = (msg.lower() if isinstance(msg, str) else "")
+                # Telegram channel must NOT get Bale logs (strict split per user request)
+                if "bale" in name:
+                    return False
+                if name.startswith("aiogram"):
+                    return False
+                if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
+                    return False
+                return True
+            handler.addFilter(_tg_filter)
             logging.getLogger().addHandler(handler)
             logging.info("[Logger] Telegram logging linked to LOG_CHANNEL_ID")
         except Exception as e:
@@ -86,6 +102,8 @@ def setup_system_logger():
     # sensitive info must NOT go to tapi.bale.ai (security hole). They go to a *separate*
     # Telegram channel `bale_log` via api.telegram.org with BOT_TOKEN, at the same INFO level
     # as the main LOG_CHANNEL_ID. Both use Telegram API, just different channel IDs.
+    # Direct forwards (Instagram/X/TikTok via pyrogram) are Telegram-only (balebot was aiogram,
+    # tgbot is pyrogram) — they must NOT appear in bale_log.
     if getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
         try:
             from utils.logger import BaleChannelHandler
@@ -94,8 +112,29 @@ def setup_system_logger():
             b_handler = BaleChannelHandler(config.BOT_TOKEN, config.BALE_LOG_CHANNEL_ID)
             b_handler.setFormatter(bale_formatter)
             b_handler.setLevel(logging.INFO)
+            # Standard architecture: split loggers — bale_log gets ONLY Bale-related records
+            # at same INFO level, not the pyrogram/direct_forward spam that belongs to Telegram.
+            def _bale_filter(record):
+                name = (getattr(record, "name", "") or "").lower()
+                try:
+                    msg = record.getMessage()
+                except Exception:
+                    msg = ""
+                msg_l = msg.lower() if isinstance(msg, str) else ""
+                # Allow: modules.bale.*, aiogram, and explicit [Bale] tagged logs
+                if "bale" in name:
+                    return True
+                if name.startswith("aiogram"):
+                    return True
+                if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
+                    return True
+                # Also allow the setup line that confirms linkage
+                if "bale logging" in msg_l:
+                    return True
+                return False
+            b_handler.addFilter(_bale_filter)
             logging.getLogger().addHandler(b_handler)
-            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID} (Telegram bale_log)")
+            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID} (Telegram bale_log) — filtered to bale/aiogram only")
         except Exception as e:
             print(f"Warning: Failed to initialize Bale logger: {e}")
     elif getattr(config, "BALE_TOKEN", ""):
