@@ -21,6 +21,134 @@ from modules.bale.uploader import clean_caption_text, process_split_and_upload_b
 
 logger = logging.getLogger(__name__)
 
+# Telegram has patch_pyrogram_send_methods + incoming handlers at group -2 for very
+# detailed logs (full JSON). Bale was only getting the tiny aiogram dispatcher line
+# "Update is handled. Duration 2 ms". User wants same very detailed level on Bale
+# (Telegram channel bale_log, same INFO). So we mirror the same detailed interceptors
+# for aiogram.
+
+def _patch_aiogram_send_methods():
+    """Monkey-patch aiogram Bot send/edit methods to log full JSON like Telegram does."""
+    try:
+        from aiogram import Bot as _Bot
+    except Exception:
+        return
+    # Keep originals
+    orig_send_message = _Bot.send_message
+    orig_send_video = getattr(_Bot, "send_video", None)
+    orig_send_document = getattr(_Bot, "send_document", None)
+    orig_send_audio = getattr(_Bot, "send_audio", None)
+    orig_edit_text = getattr(_Bot, "edit_message_text", None)
+
+    async def _wrap_send_message(self, *args, **kwargs):
+        # aiogram send_message signature: send_message(chat_id, text, ...)
+        # Log after actual send, like Telegram
+        res = await orig_send_message(self, *args, **kwargs)
+        try:
+            # res is Message
+            import json as _json
+            # Use model_dump_json if available (pydantic), else str
+            try:
+                dump = res.model_dump_json(indent=2) if hasattr(res, "model_dump_json") else str(res)
+            except Exception:
+                dump = str(res)
+            # Redact token
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            # Only log if not to bale_log itself (avoid loop) -- same as Telegram skips LOG_CHANNEL_ID
+            target = str(kwargs.get("chat_id") or (args[0] if args else ""))
+            if target != str(getattr(config, "BALE_LOG_CHANNEL_ID", 0)) and target != str(getattr(config, "LOG_CHANNEL_ID", 0)):
+                logger.info(f"📤 **[BALE SENT MESSAGE]**\n{dump}")
+        except Exception:
+            pass
+        return res
+
+    async def _wrap_send_video(self, *args, **kwargs):
+        if orig_send_video is None:
+            return None
+        res = await orig_send_video(self, *args, **kwargs)
+        try:
+            try:
+                dump = res.model_dump_json(indent=2) if hasattr(res, "model_dump_json") else str(res)
+            except Exception:
+                dump = str(res)
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            target = str(kwargs.get("chat_id") or (args[0] if args else ""))
+            if target != str(getattr(config, "BALE_LOG_CHANNEL_ID", 0)):
+                logger.info(f"📤 **[BALE SENT VIDEO]**\n{dump}")
+        except Exception:
+            pass
+        return res
+
+    async def _wrap_send_document(self, *args, **kwargs):
+        if orig_send_document is None:
+            return None
+        res = await orig_send_document(self, *args, **kwargs)
+        try:
+            try:
+                dump = res.model_dump_json(indent=2) if hasattr(res, "model_dump_json") else str(res)
+            except Exception:
+                dump = str(res)
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            target = str(kwargs.get("chat_id") or (args[0] if args else ""))
+            if target != str(getattr(config, "BALE_LOG_CHANNEL_ID", 0)):
+                logger.info(f"📤 **[BALE SENT DOCUMENT]**\n{dump}")
+        except Exception:
+            pass
+        return res
+
+    async def _wrap_send_audio(self, *args, **kwargs):
+        if orig_send_audio is None:
+            return None
+        res = await orig_send_audio(self, *args, **kwargs)
+        try:
+            try:
+                dump = res.model_dump_json(indent=2) if hasattr(res, "model_dump_json") else str(res)
+            except Exception:
+                dump = str(res)
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            target = str(kwargs.get("chat_id") or (args[0] if args else ""))
+            if target != str(getattr(config, "BALE_LOG_CHANNEL_ID", 0)):
+                logger.info(f"📤 **[BALE SENT AUDIO]**\n{dump}")
+        except Exception:
+            pass
+        return res
+
+    async def _wrap_edit_text(self, *args, **kwargs):
+        if orig_edit_text is None:
+            return None
+        res = await orig_edit_text(self, *args, **kwargs)
+        # Edit logs are less critical, but keep parity with pyrogram's edit wrapper
+        return res
+
+    _Bot.send_message = _wrap_send_message
+    if orig_send_video:
+        _Bot.send_video = _wrap_send_video
+    if orig_send_document:
+        _Bot.send_document = _wrap_send_document
+    if orig_send_audio:
+        _Bot.send_audio = _wrap_send_audio
+    if orig_edit_text:
+        _Bot.edit_message_text = _wrap_edit_text
+
+# Apply patch once at import time (like Telegram's patch_pyrogram_send_methods)
+_patch_aiogram_send_methods()
+
 # Reuse downloader core (same as Telegram)
 from utils.downloader import extract_formats, download_media, extract_playlist_meta, normalize_url, is_playlist_url, is_pure_playlist_url, PLAYLIST_TIERS
 from utils.downloader.supported_sites import is_ytdlp_supported
@@ -99,6 +227,51 @@ async def _drain_bale_backlog(bot: Bot):
 
 def create_bale_dispatcher(bot: Bot) -> Dispatcher:
     dp = Dispatcher()
+
+    # --- Detailed incoming log interceptor (mirrors Telegram group -2) ---
+    # Telegram logs full JSON via pyrogram group -2 + patch_pyrogram_send_methods.
+    # Bale was only getting the tiny "Update is handled. Duration 2 ms" line.
+    # This middleware logs every incoming Bale Update with full JSON at same INFO level,
+    # so bale_log (Telegram channel) gets the same very detailed level as Telegram.
+    @dp.update.outer_middleware()
+    async def _bale_update_log_middleware(handler, event, data):
+        try:
+            # event is Update
+            try:
+                dump = event.model_dump_json(indent=2) if hasattr(event, "model_dump_json") else str(event)
+            except Exception:
+                dump = str(event)
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            if len(dump) > 8000:
+                dump = dump[:8000] + "\n... [TRUNCATED] ..."
+            logger.info(f"📥 **[BALE RECEIVED UPDATE]**\n{dump}")
+        except Exception:
+            pass
+        return await handler(event, data)
+
+    @dp.callback_query.outer_middleware()
+    async def _bale_callback_log_middleware(handler, event, data):
+        try:
+            cb: CallbackQuery = event
+            try:
+                dump = cb.model_dump_json(indent=2) if hasattr(cb, "model_dump_json") else str(cb)
+            except Exception:
+                dump = str(cb)
+            try:
+                from utils.security import redact_token as _red
+                dump = _red(dump)
+            except Exception:
+                pass
+            if len(dump) > 6000:
+                dump = dump[:6000] + "\n... [TRUNCATED] ..."
+            logger.info(f"🖱 **[BALE CALLBACK QUERY]**\n{dump}")
+        except Exception:
+            pass
+        return await handler(event, data)
 
     # --- /start /console --- (must be registered BEFORE generic link handler)
     @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().lower() in ("/start","/admin","console","🛠 console","hi!","hey"))
