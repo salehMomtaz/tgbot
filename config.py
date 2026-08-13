@@ -213,6 +213,24 @@ SYSMON_HISTORY_SAMPLES = get_env_int("SYSMON_HISTORY_SAMPLES", 240)
 SYSMON_DISK_PATHS = os.getenv("SYSMON_DISK_PATHS", ".")
 
 # =========================================================================
+# Bale.ai frontend (optional, government-owned messenger — hardened)
+# =========================================================================
+# When BALE_TOKEN is set, a second aiogram bot (tapi.bale.ai) runs in the SAME
+# process, sharing the download core, queue and PO provider. When empty, zero
+# Bale code runs. See docs/memory/tgbot-balebot-integration.md for the full
+# threat model: Bale traffic is treated as untrusted input; the Bale admin
+# console is intentionally limited (no cookies / premium / POT / direct-forward);
+# and there is NO Bale log channel — logs stay on Telegram + local file only.
+BALE_TOKEN = os.getenv("BALE_TOKEN", "")
+BALE_SYSTEM_CREATOR_ID = get_env_int("BALE_SYSTEM_CREATOR_ID", 0)
+# Bale file ceiling is 20 MB per message (docs claims 50, real is 20). The uploader
+# splits at 19 MB target / 20 MB hard, with Bale-safe filename + caption sanitizers.
+BALE_HARD_LIMIT_MB = get_env_int("BALE_HARD_LIMIT_MB", 20)
+BALE_SPLIT_TARGET_MB = get_env_int("BALE_SPLIT_TARGET_MB", 19)
+# When true, Bale frontend accepts direct-file HTTP downloads (otherwise only yt-dlp sites)
+BALE_DIRECT_DOWNLOAD = os.getenv("BALE_DIRECT_DOWNLOAD", "true").lower() in ("true", "1", "yes")
+
+# =========================================================================
 # GitHub explorer (ported from balebot — pure HTTP API, no Bale dependency)
 # =========================================================================
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")

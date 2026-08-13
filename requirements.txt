@@ -27,3 +27,5 @@ twikit
 # (_tiktok_worker in modules/direct_forward/). Also pulled in by
 # yt-dlp[default], but declared here because we import it directly.
 websockets
+# Bale.ai frontend (optional, aiogram v3 → https://tapi.bale.ai). Only needed if BALE_TOKEN is set.
+aiogram==3.12.0

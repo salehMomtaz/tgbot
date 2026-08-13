@@ -532,7 +532,29 @@ async def main_engine():
     except Exception as e:
         logging.warning(f"[DirectForward] Could not start: {e}")
 
-    # 9b. Launch the standalone system monitor as a DETACHED subprocess so it
+    # 9b. Optional Bale.ai frontend (tapi.bale.ai) — same process, shared queue / PO
+    # provider, but LIMITED admin (no cookies/premium/POT/direct) and NO Bale log
+    # channel (government-owned messenger, logs stay on Telegram only). Isolated
+    # task: Bale crash never kills Telegram poller.
+    if getattr(config, "BALE_TOKEN", ""):
+        try:
+            from modules.bale.runner import start_bale_bot
+            # Isolated wrapper so Bale exceptions don't propagate to asyncio.gather
+            async def _bale_wrapper():
+                try:
+                    await start_bale_bot()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.exception("[Bale] Poller died unexpectedly — will not auto-restart until next bot restart. Check BALE_TOKEN / network.")
+            tasks.append(_bale_wrapper())
+            logging.info("[Bale] Frontend enabled (bale admin limited, no log channel)")
+        except Exception as e:
+            logging.warning(f"[Bale] Could not start Bale frontend: {e}")
+    else:
+        logging.info("[Bale] BALE_TOKEN empty — Bale frontend disabled")
+
+    # 9c. Launch the standalone system monitor as a DETACHED subprocess so it
     # survives this bot's own crash/restart (it talks to the log channel via the
     # raw Bot API, exactly like the logger does). If it is already running (e.g.
     # started by tgbot-monitor.service), this is a harmless no-op.
