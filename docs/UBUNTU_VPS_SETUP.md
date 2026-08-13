@@ -283,6 +283,8 @@ optional. To set it up:
 Without it the bot exits immediately with `FATAL: LOG_CHANNEL_ID is required`.
 Logs are also written to `logs/bot.log` on the VPS regardless.
 
+> **Using Bale as well?** Create a **second private channel** `bale_log` **on Bale** (not Telegram), add `angelbalzacbot` as admin (Post Messages), get its numeric ID the same way: post a message in `bale_log`, then either forward it to `@userinfobot` on Bale, or call `https://tapi.bale.ai/bot<your-BALE_TOKEN>/getUpdates` after posting and read `result[0].channel_post.chat.id` (or `message.chat.id`). Put it in `.env` `BALE_LOG_CHANNEL_ID=-100...` (leave `0` to keep Bale logs local only). Both channels get the **same `INFO` level** (`TelegramChannelHandler` + `BaleChannelHandler`); Telegram logs stay on Telegram, Bale logs on `bale_log`, shared logs (downloader, PO) go to **both** when both are set -- that is the "same logging level" you asked for. See `docs/USER_GUIDE.md#logs`.
+
 ---
 
 ## 10. Get YouTube / Instagram / TikTok cookies

@@ -226,49 +226,103 @@ tgbot/
 ├── run.sh                    # Safe startup wrapper (loads .env, venv, PATH; exec python main.py)
 ├── uninstall.sh              # Reverses install.sh (prompts for each step)
 ├── deploy/
-│   └── tgbot.service         # systemd unit TEMPLATE (rendered by install.sh with real user + RAM)
-├── .env.example              # Copy to .env and fill in tokens
-├── requirements.txt          # pyrogram stack + yt-dlp[default] + bgutil PO plugin + dotenv
-├── config.py                 # Reads .env via python-dotenv; all settings live here
+│   ├── tgbot.service         # systemd unit TEMPLATE (rendered by install.sh with real user + RAM)
+│   ├── tgbot-monitor.service # System monitor (standalone Go binary, detached)
+│   └── tgbot-xchat-bridge.service # XChat E2EE sidecar (Deno, resident supervisor)
+├── .env.example              # Copy to .env and fill in tokens (Telegram + optional Bale)
+├── requirements.txt          # pyrogram + aiogram (Bale) + yt-dlp[default,curl-cffi] + bgutil PO plugin
+├── config.py                 # Reads .env via python-dotenv; all settings live here (BALE_*, GITHUB_TOKEN, etc.)
 ├── generate_session.py       # Local utility: generate a Premium userbot session string
-├── main.py                   # Bootloader: logger, cookie init+lock, PO provider, FastAPI, SIGTERM
+├── main.py                   # Bootloader: logger (dual Telegram+Bale), cookie init+lock, PO provider, FastAPI, SIGTERM
 ├── database.json             # Whitelisted / blacklisted / settings registries (runtime)
-├── ytcookies.txt … xcookies.txt  # Site cookie jars (live jars are read-only)
-├── cookies.txt               # Global fallback cookie jar
+├── cookies/                  # Live jars (read-only at rest, write-back via snapshots)
+│   ├── youtube/ytcookies.txt # YouTube (plus .backup)
+│   ├── instagram/igcookies.txt
+│   ├── tiktok/ttcookies.txt
+│   ├── twitter/xcookies.txt
+│   └── ytdlp/<site>.txt      # Per-site jars (90+ auto-generated) + cookies.txt fallback
+├── direct_ig_session.json    # Instagram private-API session (cleared on fresh igcookies upload)
+├── direct_forward_state.json # DM cursors (merge-only per platform, shared IG/X/TikTok)
+├── cache/                    # Download snapshots, splits, xchat inbox (protected), github cache
+├── logs/bot.log              # Local rotating mirror (5 MB x3)
 ├── bgutil-provider/          # PO-token provider source (cloned by install.sh, git-ignored)
+├── cmd/tgbot-monitor/        # Go system monitor (standalone, survives bot)
 ├── utils/
-    ├── pot_provider.py       # PotProviderManager: install/patch/start/supervise the Deno server
-    ├── downloader/           # Strategy ladder, PO injection, snapshots, diagnosis, splitters
-    │   ├── cookies.py        # Cookie resolution, YouTube diagnosis, site context
-    │   ├── url_normalize.py  # TikTok shortlinks, IG highlights, PO options
-    │   ├── sizing.py         # Size estimation, CDN probes, disk space
-    │   ├── errors.py         # yt-dlp error classification
-    │   ├── formats.py        # Format extraction & sorting (extract_formats)
-    │   ├── playlists.py      # Playlist metadata & tier selectors
-    │   ├── thumbnails.py     # Thumbnails, ffmpeg metadata, video probing
-    │   ├── download.py       # Single-media download pipeline (download_media)
-    │   └── split.py          # Binary & video splitting generators
-    ├── uploader_handler.py   # On-demand sequential splitter + 2 GB / 4 GB uploader
-    ├── logger.py             # TelegramChannelHandler + local rotating file mirror
-    ├── updater.py            # 6-hour yt-dlp nightly updater (preserves [default] extras)
-    ├── shared.py             # In-memory registries: queue, caches, PO state, runtime settings
-    ├── queue_manager.py      # Non-blocking serializing task queue
-    ├── gate.py               # Security access control + settings registry
-    └── id_validator.py       # Telegram ID format checks
-└── modules/
-    ├── admin/                # Admin Console: users, cookies (test/backup/restore), PO Token menu
-    │   ├── keyboards.py      # Console/premium/cookies/PO/direct keyboards
-    │   ├── state.py          # Module-level state (USER_STATES, PREMIUM_GEN, etc.)
-    │   ├── premium_gen.py    # In-chat Premium session generation flow
-    │   ├── cookies.py        # Cookie jar validation & atomic write
-    │   ├── cookie_test.py    # Live cookie-jar test (yt-dlp probe)
-    │   ├── pot_menu.py       # PO Token Provider menu & actions
-    │   ├── direct_menu.py    # Direct-Forward menu rendering
-    │   ├── callback_dispatch.py  # Callback query dispatcher (admin UI)
-    │   └── register.py       # Handler registration & text/command routing
-    ├── downloader_handler.py # Link & direct-URL queue worker + format grid selector
-    ├── stream_interceptor.py # Forwarded-file → stream-link generator (24h validity)
-    └── stream_handler.py     # FastAPI stream bridge (24h token check)
+│   ├── pot_provider.py       # PotProviderManager: install/patch/start/supervise Deno 127.0.0.1
+│   ├── cookie_manager.py     # Snapshot + overlay merge + meta.json freshness
+│   ├── cookie_refresher.py   # Sequential headless Playwright refresher (1 tab at a time, 24h, 300MB)
+│   ├── downloader/           # Strategy ladder, PO injection, snapshots, diagnosis, splitters
+│   │   ├── cookies.py        # Cookie resolution, YouTube diagnosis, site context
+│   │   ├── url_normalize.py  # TikTok shortlinks (vt/vm/vn -> embed), IG highlights, PO options
+│   │   ├── sizing.py         # Size estimation, CDN probes, disk space
+│   │   ├── errors.py         # yt-dlp error classification
+│   │   ├── formats.py        # Format extraction & sorting (extract_formats, language-aware audio)
+│   │   ├── playlists.py      # Playlist metadata & tier selectors (PLAYLIST_TIERS)
+│   │   ├── thumbnails.py     # Thumbnails, ffmpeg metadata, video probing (frame fallback)
+│   │   ├── download.py       # Single-media download pipeline (download_media)
+│   │   ├── split.py          # Binary & video splitting generators (keyframe -c copy)
+│   │   └── supported_sites.py # 1,786 yt-dlp _VALID_URL patterns (generic excluded), is_ytdlp_supported
+│   ├── uploader_handler.py   # Telegram on-demand sequential splitter + 2 GB / 4 GB (target 1900/3900)
+│   ├── logger.py             # TelegramChannelHandler + BaleChannelHandler + local file
+│   ├── updater.py            # 6-hour yt-dlp nightly updater (preserves [default,curl-cffi], --pre)
+│   ├── shared.py             # In-memory registries: queue, DOWNLOAD_CACHE, POT_AVAILABLE, RUNTIME_SETTINGS
+│   ├── queue_manager.py      # Non-blocking serializing task queue (single worker, priority)
+│   ├── gate.py               # Security access control + settings registry (authorized/blacklisted/premium)
+│   ├── id_validator.py       # Telegram/Bale ID format checks (5-11 digits)
+│   ├── security.py           # SSRF guard (_is_ssrf_target), is_safe_url, flood, redact_token
+│   ├── rich_stream.py        # RichStream (Bot API 10.1+ streaming drafts, 30s ephemeral)
+│   ├── keyboard_expiry.py    # Auto-expiry of dead inline keyboards
+│   ├── premium_session.py    # In-chat Premium session generation (dial pad, no chat-typed code)
+│   ├── ig_anti_detect.py     # CurlCffiAdapter chrome136, echo headers, geo pin, warmup
+│   ├── system_monitor.py     # Spawner for Go monitor (detached)
+│   └── cookie_refresher.py   # (see above)
+├── modules/
+│   ├── admin/                # Admin Console (Telegram, full): users, cookies, PO, premium, direct, subs
+│   │   ├── keyboards.py      # Console/premium/cookies/PO/direct/sub keyboards
+│   │   ├── state.py          # USER_STATES, ACTIVE_PROMPTS, PREMIUM_GEN
+│   │   ├── premium_gen.py    # Premium generation flow (phone->code dial pad->2FA)
+│   │   ├── cookies.py        # Cookie jar validation & atomic write (clears IG session on fresh upload)
+│   │   ├── cookie_test.py    # Live cookie-jar test (yt-dlp probe, format counts)
+│   │   ├── pot_menu.py       # PO Token Provider menu & actions
+│   │   ├── direct_menu.py    # Direct-Forward menu rendering
+│   │   ├── callback_dispatch.py  # Callback dispatcher (admin UI, now fixed UnboundLocalError)
+│   │   └── register.py       # Handler registration & text/command routing (group -1,0,1,2)
+│   ├── bale/                 # Bale.ai frontend (government messenger, optional, LIMITED)
+│   │   ├── runner.py         # Aiogram poller tapi.bale.ai + drain, LIMITED admin, 20MB split, extras
+│   │   ├── uploader.py       # Bale direct multipart (19/20 MB, sanitize, clean_caption)
+│   │   └── admin.py          # Bale limited admin keyboard (no cookies/premium/POT)
+│   ├── github/               # GitHub explorer (Telegram + Bale): repo panel, ZIP, branches/tags
+│   │   ├── api.py            # GitHub API (headers + PAT)
+│   │   ├── keyboards.py      # Repo menu, branches/releases/tags/file explorer
+│   │   └── handlers.py       # Link intercept + /search /user /trend + gh: callbacks (queue)
+│   ├── youtube/              # YouTube search + transcript (Telegram + Bale via /yt)
+│   │   ├── scraper.py        # search_ytdlp_flat, clean_vtt_subtitles
+│   │   └── handlers.py       # /yt, /ytrecent, /ytch, /transcript (yt-dlp flat + queue)
+│   ├── translate/            # Google Translate (Telegram + Bale)
+│   │   ├── api.py            # google_translate_async (gtx)
+│   │   └── handlers.py       # /tr src:dst text
+│   ├── web/                  # Webpage -> Markdown (Telegram + Bale)
+│   │   ├── api.py            # fetch_markdown_text (urltomarkdown)
+│   │   └── handlers.py       # /web <url> (cache + split)
+│   ├── subscription/         # Subscription (Telegram only, no Bale free tier)
+│   │   ├── tiers.py          # free 5, basic 100/100⭐, plus 500/250⭐, pro 2500/500⭐
+│   │   ├── store.py          # subscriptions, usage, sub_settings (channels[])
+│   │   ├── quota.py          # daily limit, remaining, increment
+│   │   ├── access.py         # check_access (channel force-join, free_enabled)
+│   │   ├── handlers.py       # /subscription, /quota, Stars/TON, gate_and_quota_check
+│   │   ├── payments_stars.py # Bot API sendInvoice, pre_checkout
+│   │   ├── payments_ton.py   # toncenter inbound memo
+│   │   └── webapp.py         # FastAPI mount for /app, /admin/subscription
+│   ├── direct_forward/       # DM relay (shared IG/X/TikTok, merge-only state)
+│   │   ├── supervisor.py     # Starts IG/X/TikTok workers
+│   │   ├── state.py          # _load_state, _merge_state_save, _state_save_owned
+│   │   ├── common.py         # _poll_interval, _enqueue_relay, _download_and_deliver
+│   │   ├── instagram.py      # IG private API (instagrapi, gap-aware 200, MQTT hybrid optional)
+│   │   ├── twitter.py        # X self-DM twikit + _is_ssrf_target, magic-bytes, xchat bridge
+│   │   └── tiktok.py         # TikTok IM WSS (wss://im-ws-sg.tiktok.com, protobuf, prime)
+│   ├── downloader_handler.py # Telegram link & direct-URL worker + format grid (group 1)
+│   ├── stream_interceptor.py # Forwarded-file -> stream-link (24h token)
+│   └── stream_handler.py     # FastAPI stream bridge (Telegram file -> HTTP chunked)
 ```
 
 ---
@@ -399,3 +453,8 @@ per-file by the uploader.
 - [x] Phase 20 — **Per-site cookie jars + IG DM cookie freshness** (2026-08-12): auto-generated empty per-site cookie jars for all 90+ yt-dlp domains at boot (`cookies/ytdlp/<site>.txt`); Admin Console "➕ Per-Site Jar" flow documented; special cases cataloged in `docs/cookie_site_special_cases.md`. IG DM relay diagnosed: stale `igcookies.txt` with expired `sessionid` (duplicated entries) — worker retries login on poll cadence but needs fresh cookies or fallback credentials. Direct-forward workers don't participate in yt-dlp cookie write-back; jars for sites only accessed via DM will go stale without manual refresh.
 - [x] Phase 21 — **Subscription system + WebApp + multi-channel + hardening** (2026-08-13): toggleable subscription layer with legacy whitelist fallback (intruder → blacklist preserved; toggle OFF keeps old behaviour; whitelist add auto-removes blacklist). Three tiers Basic 100/d (100⭐), Plus 500/d (250⭐), Pro 2500/d (500⭐) + free 5/d (priority 0) with queue priority 0→3; daily quota + mid-playlist limit abort; Stars via Bot API `sendInvoice`/`pre_checkout` + TON/Gram via toncenter inbound memo verification (`SUB_TON_ADDRESS`); multi-channel force-join (`channels[]`) with `check_all_channels` (missing list + per-channel join buttons); flood guard tier-aware (free 5/min) + URL sanity + log token redaction + SSRF already; flood + security in `utils/security.py`. Mini App at `https://tgbot.southpark.ir:8080` (direct TLS on `:8080` via `certs/fullchain.pem`+`privkey.pem` wildcard `*.southpark.ir`, `DOMAIN=https://tgbot.southpark.ir:8080`, no nginx — `deploy/tgbot.southpark.ir.conf` kept as reference, `install.sh` now copies `southpark.ir` wildcard via certbot hook): admin console `/admin/subscription` (HMAC `admin-sub` token or creator initData) + user portal `/app` & `/api/user/status` (any valid initData, quota/history) + landing `/` auto-redirect (Telegram→role, browser→landing). Professional fullscreen UI with `safeAreaInset`, native `showPopup`/`showAlert` + fallback modal/toast (`_SHARED_UI`). IG fallback creds wired via `.env` (`IG_DIRECT_*`, TOTP seed). See `docs/memory/tgbot-subscription-system.md`; polished WebApp handles `401/403` as bounded cards + native popups.
 - [x] Phase 22 — **Balebot extras merged into Telegram + subscription double-reply fix** (2026-08-13): fixed `/subscription` (and `/quota`) double-reply bug — `register_subscription_handlers` now calls `message.stop_propagation()` so the Group 1 greeting never fires after the tier keyboard, plus a defensive guard in `admin_start_text_handler` (`/start` is the only command that intentionally falls through to the greeting). Ported balebot-only modules as native pyrogram handlers: `modules/github/` (full explorer: `/search`, `/user`, `/trend`, github.com links → repo panel with branches/tags/releases/issues/PRs/commits/languages/license/readme/file explorer + ZIP delivery), `modules/youtube/` (`/yt`, `/ytrecent`, `/ytch`, `/transcript`), `modules/translate/` (`/tr src:dst text` via Google translate API), `modules/web/` (`/web <url>` → Markdown via urltomarkdown). All respect `is_authorized` (security gate) and use the shared `DownloadQueue` + `process_split_and_upload` (Telegram 2 GB / 4 GB native), not Bale's 39 MB splitter. Added `GITHUB_TOKEN` to `config.py` + `.env.example`. Bale's 50 MB claim is actually 20 MB post-2024 — documented; Telegram keeps 2 GB/4 GB. See `docs/memory/tgbot-balebot-merge-2026-08-13.md`.
+- [x] Phase 23 — **Bale hardened frontend (government messenger) + optional dual logging** (2026-08-13): added `modules/bale/` (`runner.py` aiogram `tapi.bale.ai` poller with manual `getUpdates` drain, `uploader.py` 19/20 MB split + `sanitize_filename_for_bale`/`clean_caption_text`, `admin.py` LIMITED console). Bale shares PO provider, queue, yt-dlp, `is_ytdlp_supported` but has **no Bale log channel by default** (Telegram logs stay on Telegram). Now optional `BALE_LOG_CHANNEL_ID` + `BaleChannelHandler` (same `INFO` level as `TelegramChannelHandler`, plain text to `tapi.bale.ai`) — user created private `bale_log` channel with `angelbalzac` admin. Fixed Bale `no-response` (catch-all stole updates before `/start`, `F.text.func` invalid) and added Bale extras (`/search`, `/yt`, `/tr`, `/web`, `github.com` panel via 20 MB split) so `https://github.com/salehMomtaz/tgbot` now replies on Bale too. No free tier on Bale (only `is_authorized` or `BALE_SYSTEM_CREATOR_ID`). See `docs/memory/tgbot-balebot-hardening-2026-08-13.md`.
+- [x] Phase 24 — **Free-tier Instagram no-response fix** (2026-08-13): free users (`free_enabled=true`, not in `authorized`, 5/day) passed `gate_and_quota_check` (`check_access` ok) then were immediately dropped by legacy `if not is_authorized: return` in `downloader_handler.py` -> silent no-response for `https://www.instagram.com/reel/DVjNXkOkVxC/` on alt `8022375512`. Fixed to `if not _sub_enabled and not is_authorized` so subscription is source of truth when ON. Bale intentionally keeps no free tier.
+- [x] Phase 25 — **Instagram gap recovery + hybrid MQTToT push (TikTok-like)** (2026-08-13): IG worker now paginates `direct_v2/threads/{id}/` with `cursor` until `oldest_id <= last_id` (`8 pages x25 = 200` cap, `gap fetch: X had Y new` log) and **only bumps cursor on success** (failed items stay behind for retry → at-least-once, fixing the stalled `DVjNXkOkVxC` batch of 9). Upgraded `instagrapi 2.1.2 -> 2.18.14` + `aiogram 3.12 -> 3.30` for `realtime_*` MQTToT on `edge-mqtt.facebook.com` (`~5 MB`, no headless browser). Added `IG_DIRECT_MQTT_ENABLED` (default `false`, `tools/test_ig_mqtt.py` probe). When true, `polling + MQTToT` hybrid (`60s` PleaseWait backoff for testing). X left polling per request.
+- [x] Phase 26 — **Sequential headless cookie refresher (1 tab at a time, 24h, 4GB safe)** (2026-08-13): DM-only jars (IG/X/TT/YT) never get `yt-dlp` write-back, so they go stale `~7 days` and hit `update_risky_contactpoint` / `login_required` (weekly IG stall). Added `utils/cookie_refresher.py` that visits each site sequentially with `Playwright` (one Chromium at a time, `~300 MB` peak, not 4 tabs → your `4GB+8swap` stays safe, `chromium-1234` already cached). Each site: load Netscape jar -> `add_cookies` -> `goto` homepage -> `networkidle 15s + 5s settle` -> `context.cookies()` -> Netscape write via `_write_cookie_jar` (atomic, `0o444`, purge snapshots, `touch meta`, clear `direct_ig_session.json` for IG). Proxy-aware (`DIRECT_FORWARD_PROXY`/`PROXY_URL`). Scheduled as `auto_refresh_cookies_loop` in `main.py` (`300s + jitter` first run, then `24h ±1h`) as isolated task. Enabled by `COOKIE_REFRESH_ENABLED=true` (`config.py`, `.env.example`). Also fixed `fresh igcookies upload now clears stale direct_ig_session.json` so next login goes straight to new `sessionid` (your "stuck on a copy" report).
+- [x] Phase 27 — **Bale logging + extras parity + docs overhaul** (2026-08-13): same `INFO` level for Bale via `BaleChannelHandler` -> `BALE_LOG_CHANNEL_ID` (`bale_log`), `TelegramChannelHandler` stays on `LOG_CHANNEL_ID`. Added `BALE_LOG_CHANNEL_ID` to `config.py` + `.env.example`. Fixed Bale `github.com` panel to reply via `process_split_and_upload_bale` (20 MB splits). Overhauled `README`, `blueprint` directory map, `docs/UBUNTU_VPS_SETUP.md` (Bale private channel steps), and added `docs/USER_GUIDE.md` (feature table + how to use each).
