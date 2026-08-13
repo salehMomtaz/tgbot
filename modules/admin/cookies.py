@@ -87,3 +87,17 @@ def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
         os.chmod(file_path, 0o444)
     _purge_cookie_snapshots(file_path)
     cookie_manager.touch_cookie_uploaded(file_path)
+    # Instagram: fresh jar invalidates the persisted private-API session.
+    # If we keep direct_ig_session.json, the next _ig_login will try to resume
+    # that stale session first (account_info -> 403), waste a cycle, then fall
+    # back to sessionid. Deleting it makes the next login go straight to the
+    # new sessionid you just uploaded (the one you verified via Cookie-Editor
+    # injection). This is why you saw "maybe stuck on a copy from before".
+    if cookie_key == "igcookies":
+        for stale in ("direct_ig_session.json", "direct_ig_session.json.bak"):
+            try:
+                if os.path.exists(stale):
+                    os.remove(stale)
+                    logger.info(f"[Cookies] Removed stale {stale} after igcookies upload — next IG login will use fresh sessionid")
+            except Exception:
+                pass
