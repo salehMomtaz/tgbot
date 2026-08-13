@@ -166,6 +166,13 @@ IG_DIRECT_COUNTRY_CODE = get_env_int("IG_DIRECT_COUNTRY_CODE", 1) or 1
 IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
 IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
 IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
+# Experimental MQTT push (pure Python, NO headless browser) — TikTok-like instant.
+# Instagram web + app use MQTToT on mqtt-mini.facebook.com; instagrapi's Realtime
+# mixin or standalone instagram_mqtt can listen steady. Current venv instagrapi
+# 2.1.2 has NO Realtime (see tools/test_ig_mqtt.py), so this stays OFF by default.
+# If you upgrade instagrapi or pip install instagram_mqtt, enable to trial:
+# same sessionid/proxy, ~5 MB RAM, needs keepalive + reconnect, experimental.
+IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # X / Twitter direct-forward (self-DM method). The X worker boots from the
 # shared xcookies jar (config.X_COOKIES) that yt-dlp keeps warm via write-back
