@@ -171,10 +171,23 @@ HTML_ADMIN = r"""<!doctype html><meta charset=utf-8><meta name=viewport content=
 </div>
 <script>
 let token = localStorage.getItem('admin_token')||'';
+function getInitData(){
+  try { if(tg && tg.initData) return tg.initData; } catch(e){}
+  try {
+    const h = (location.hash||'').replace(/^#/, '');
+    const v = new URLSearchParams(h).get('tgWebAppData');
+    if(v) return v;
+  } catch(e){}
+  try {
+    const v = new URLSearchParams(location.search||'').get('tgWebAppData');
+    if(v) return v;
+  } catch(e){}
+  return '';
+}
 async function api(method, body){
   const h={'Content-Type':'application/json'};
   if(token) h['X-Admin-Token']=token;
-  const initData = tg?.initData||'';
+  const initData = getInitData();
   if(initData) h['X-Telegram-Init-Data']=initData;
   const r = await fetch('/admin/subscription/api', {method, headers:h, body: body? JSON.stringify(body):undefined});
   if(!r.ok){
@@ -289,7 +302,7 @@ async function loadRoot(){
       const r=await fetch('/api/user/status', {headers:h});
       if(r.ok){
         const j=await r.json();
-        if(j.subscription && j.subscription.is_creator){ location.href='/admin'; return; }
+        if(j.subscription && j.subscription.is_creator){ location.href='/admin'+location.hash; return; }
       }
     }catch(e){}
     location.href='/app'; return;

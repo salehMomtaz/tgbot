@@ -124,9 +124,7 @@ const ADM = {
     ]);
   },
   async api(path, method='GET', body=null, isForm=false){
-    const h={};
-    if(tg && tg.initData) h['X-Telegram-Init-Data']=tg.initData;
-    if(ADM_TOKEN) h['X-Admin-Token']=ADM_TOKEN;
+    const h={}; const idd=ADM.initData(); if(idd) h['X-Telegram-Init-Data']=idd; if(ADM_TOKEN) h['X-Admin-Token']=ADM_TOKEN;
     const opts={method, headers:h};
     if(body && isForm){ opts.body=body; }
     else if(body){ h['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
@@ -153,7 +151,25 @@ const ADM = {
     return Math.floor(d/86400)+'d ago';
   },
   esc(s){
-    return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&','<':'<','>':'>','"':'"'}[c]));
+  },
+  // Gather WebApp initData from every place Telegram/the SDK may put it.
+  // The official telegram-web-app.js populates tg.initData from the URL hash
+  // synchronously, but if that SDK fails/slow to load (e.g. telegram.org
+  // blocked) or populates late, we still pull tgWebAppData out of the hash
+  // (where Telegram always appends it) or the query string ourselves.
+  initData(){
+    try { if(tg && tg.initData) return tg.initData; } catch(e){}
+    try {
+      const h = (location.hash||'').replace(/^#/, '');
+      const v = new URLSearchParams(h).get('tgWebAppData');
+      if(v) return v;
+    } catch(e){}
+    try {
+      const v = new URLSearchParams(location.search||'').get('tgWebAppData');
+      if(v) return v;
+    } catch(e){}
+    return '';
   }
 };
 const TABS = ['Overview','Users','Cookies','PO Token','Premium','Subscriptions','Direct','System'];
@@ -349,7 +365,7 @@ async function loadCookies(){
 }
 async function cookieDownload(key){
   try{
-    const h={}; if(tg&&tg.initData) h['X-Telegram-Init-Data']=tg.initData; if(ADM_TOKEN) h['X-Admin-Token']=ADM_TOKEN;
+    const h={}; const idd=ADM.initData(); if(idd) h['X-Telegram-Init-Data']=idd; if(ADM_TOKEN) h['X-Admin-Token']=ADM_TOKEN;
     const r=await fetch(`/admin/api/cookies/${key}/download`,{headers:h});
     if(!r.ok){ let d=`HTTP ${r.status}`; try{const j=await r.json(); d=j.detail||d;}catch(_){} throw new Error(d); }
     const blob=await r.blob();
