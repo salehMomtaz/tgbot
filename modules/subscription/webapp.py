@@ -19,74 +19,18 @@ Professional UI: native tg.showPopup/showAlert + fallback modal/toast, safe-area
 """
 from __future__ import annotations
 
-import hmac, hashlib, json, time, urllib.parse
+import time
 import config
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.requests import Request
 
-
-def _admin_token() -> str:
-    tok = getattr(config, "BOT_TOKEN", "") or ""
-    return hmac.new(tok.encode(), b"admin-sub", hashlib.sha256).hexdigest()[:16]
-
-
-def _verify_init_data(init_data: str):
-    """Validate Telegram WebApp initData per docs; return parsed user dict or None."""
-    if not init_data:
-        return None
-    try:
-        params = dict(urllib.parse.parse_qsl(init_data, strict_parsing=True))
-        recv_hash = params.pop("hash", None)
-        if not recv_hash:
-            return None
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
-        secret = hmac.new(b"WebAppData", (config.BOT_TOKEN or "").encode(), hashlib.sha256).digest()
-        calc = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(calc, recv_hash):
-            return None
-        try:
-            auth_date = int(params.get("auth_date", "0"))
-            if auth_date and abs(int(time.time()) - auth_date) > 86400 * 2:
-                pass
-        except Exception:
-            pass
-        user_json = json.loads(params.get("user", "{}")) if "user" in params else {}
-        return user_json
-    except Exception:
-        return None
-
-
-def _is_admin_auth(request: Request) -> bool:
-    tok = request.headers.get("X-Admin-Token", "")
-    if tok and hmac.compare_digest(tok, _admin_token()):
-        return True
-    init_data = request.headers.get("X-Telegram-Init-Data", "") or request.query_params.get("tgWebAppData", "") or ""
-    user = _verify_init_data(init_data) if init_data else None
-    if user:
-        try:
-            uid = int(user.get("id", 0))
-            if uid == int(getattr(config, "SYSTEM_CREATOR_ID", 0) or 0):
-                return True
-        except Exception:
-            pass
-    return False
-
-
-def _parse_user_from_request(request: Request):
-    init_data = request.headers.get("X-Telegram-Init-Data", "") or request.headers.get("X-Telegram-Initdata", "") or request.query_params.get("tgWebAppData", "") or ""
-    if not init_data:
-        init_data = request.headers.get("x-telegram-init-data", "") or ""
-    if init_data:
-        u = _verify_init_data(init_data)
-        if u:
-            return u
-    qs = str(request.query_params.get("tgWebAppData", "") or "")
-    if qs:
-        u = _verify_init_data(qs)
-        if u:
-            return u
-    return None
+from utils.webapp_auth import (
+    admin_token as _admin_token,
+    verify_init_data as _verify_init_data,
+    is_admin_auth as _is_admin_auth,
+    parse_user_from_request as _parse_user_from_request,
+)
 
 
 # --- Shared UI helpers (injected into each page) ---
@@ -345,7 +289,7 @@ async function loadRoot(){
       const r=await fetch('/api/user/status', {headers:h});
       if(r.ok){
         const j=await r.json();
-        if(j.subscription && j.subscription.is_creator){ location.href='/admin/subscription'; return; }
+        if(j.subscription && j.subscription.is_creator){ location.href='/admin'; return; }
       }
     }catch(e){}
     location.href='/app'; return;
@@ -360,12 +304,12 @@ async function loadRoot(){
     <a class=btn href="${botLink}" target="_blank">🤖 Open bot in Telegram</a>
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <a class=btn style="flex:1;background:#242836" href="/app">👤 User Portal</a>
-      <a class=btn style="flex:1;background:#242836" href="/admin/subscription">🛠 Admin</a>
+      <a class=btn style="flex:1;background:#242836" href="/admin">🛠 Admin Console</a>
     </div>
     <p class=muted>Tip: set BotFather Menu Button to <code>https://tgbot.southpark.ir:8080/</code> — this page auto-detects Telegram and sends users/admins correctly.</p>
   </div>
   <div class=card><h3 style="margin:0 0 8px">Plans</h3><table><tr><th>Tier</th><th>Daily</th><th>Price</th></tr>${Object.entries(tiers).map(([k,v])=>`<tr><td><b>${v.label}</b> <span class=muted>(${k})</span></td><td>${v.daily_limit}</td><td>${v.price_stars? v.price_stars+' ⭐':''} ${v.price_ton? '/ '+v.price_ton+' TON':''}</td></tr>`).join('')||'<tr><td colspan=3 class=muted>loading…</td></tr>'}</table><p class=muted>Free 5/d (last) → Basic 100/d → Plus 500/d → Pro 2500/d. Pay via Stars (XTR) or TON memo = user ID. Use <code>/subscription</code> in bot.</p></div>
-  <div class=card><h3 style="margin:0 0 8px">Links</h3><ul style="margin:0 0 0 18px;font-size:13px;opacity:.9"><li><code>/app</code> — user portal (needs Telegram)</li><li><code>/admin/subscription</code> — admin (creator only)</li><li><code>/api/tiers</code> — public JSON</li><li><code>/stream/...</code> — file streams (24h)</li></ul></div>`;
+  <div class=card><h3 style="margin:0 0 8px">Links</h3><ul style="margin:0 0 0 18px;font-size:13px;opacity:.9"><li><code>/app</code> — user portal (needs Telegram)</li><li><code>/admin</code> — full admin console (creator only)</li><li><code>/admin/subscription</code> — subscription admin (legacy)</li><li><code>/api/tiers</code> — public JSON</li><li><code>/stream/...</code> — file streams (24h)</li></ul></div>`;
 }
 loadRoot();
 </script>
@@ -488,7 +432,7 @@ def mount(fastapi_app):
                             _botinfo_cache["username"] = username
         except Exception:
             username = ""
-        return JSONResponse({"username": username, "domain": getattr(config, "DOMAIN", ""), "webapp_root": "/", "webapp_app": "/app", "webapp_admin": "/admin/subscription"})
+        return JSONResponse({"username": username, "domain": getattr(config, "DOMAIN", ""), "webapp_root": "/", "webapp_app": "/app", "webapp_admin": "/admin"})
 
     @fastapi_app.get("/admin/subscription/api")
     async def _api_get(request: Request):

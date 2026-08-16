@@ -2,6 +2,7 @@ pyrogram
 tgcrypto
 fastapi
 uvicorn
+python-multipart
 # [default] keeps certifi/brotli extras; [curl-cffi] gives yt-dlp TLS/browser
 # impersonation — REQUIRED for TikTok's proof-of-work webpage challenge solver
 # (without it TikTok interstitials surface as "malformed site" failures).

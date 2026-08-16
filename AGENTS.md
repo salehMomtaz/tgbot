@@ -32,6 +32,8 @@ invariants** so you don't have to rediscover them.
 | Change upload/splitting | `utils/uploader_handler.py` |
 | Change the PO-token provider lifecycle | `utils/pot_provider.py` |
 | Add an admin-console feature | `modules/admin/` (see sub-modules below) |
+| Change the admin **WebApp** console (Mini App) | `modules/admin_webapp/` (see sub-modules below) |
+| Change Mini App / webapp auth | `utils/webapp_auth.py` (shared by admin console + subscription webapp) |
 | Change how links/messages are handled | `modules/downloader_handler.py` |
 | Change playlist tiers / detection / per-video download | `utils/downloader/playlists.py` (`PLAYLIST_TIERS`), `utils/downloader/url_normalize.py` (`is_playlist_url`), `utils/downloader/playlists.py` (`extract_playlist_meta`), `utils/downloader/download.py` (`download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader/cookies.py`, `utils/downloader/download.py`) |
@@ -72,6 +74,29 @@ invariants** so you don't have to rediscover them.
 | Callback query dispatcher (admin UI) | `modules/admin/callback_dispatch.py` |
 | Handler registration & text/command routing | `modules/admin/register.py` |
 | Module-level state (USER_STATES, PREMIUM_GEN, etc.) | `modules/admin/state.py` |
+
+### `modules/admin_webapp/` package (Full admin console as a Telegram Mini App)
+
+The whole in-chat admin console is mirrored as a webapp at `/admin` (FastAPI
+mounted in `main.py`; auth via `utils/webapp_auth.py` — Telegram initData of the
+creator OR `X-Admin-Token`, an HMAC(BOT_TOKEN,"admin-sub")[:16] that is never
+stored). The "🌐 WebApp Console" inline button in the console keyboard
+(`modules/admin/keyboards.py::_admin_webapp_url`) opens it; the creator landing
+`/` auto-redirects there. Server-side actions deliberately reuse the same
+storage/utility code as the in-chat console so the two can never drift.
+
+| Want to… | Edit |
+|---|---|
+| Server-side action implementations (transport-free core) | `modules/admin_webapp/actions.py` |
+| FastAPI endpoints (prefix `/admin/api`, all creator-gated) | `modules/admin_webapp/api.py` |
+| SPA HTML/CSS/JS (single page, all console tabs) | `modules/admin_webapp/ui.py` |
+| Mount + `/admin` page serving | `modules/admin_webapp/__init__.py` (`mount(fastapi_app)`) |
+| WebApp auth (initData verify + admin token) | `utils/webapp_auth.py` |
+
+WebApp Premium session-generation uses its OWN `WEB_PREMIUM_GEN` state keyed by
+user id (never the in-chat `modules/admin/state.py::PREMIUM_GEN`); same TTL and
+temp-client discard discipline. Never persist long probes inline — run them via
+`run_in_executor` (cookie test / PO diagnose / X test) exactly like the console.
 
 ### `modules/direct_forward/` package (replaces `modules/direct_forward.py`)
 

@@ -34,9 +34,13 @@ async def is_channel_member(client, user_id: int, channel_id: int) -> bool:
     try:
         member = await client.get_chat_member(channel_id, user_id)
         status = getattr(member, "status", None)
-        # status can be string or enum
-        s = str(status).lower() if status else ""
-        return s in ("member", "administrator", "creator", "owner")
+        # pyrogram 2.x returns a ChatMemberStatus enum whose str() is
+        # "ChatMemberStatus.MEMBER" — str(status).lower() never equals "member",
+        # so a joined user was always reported as "not joined". Compare against
+        # the enum's .value ("member", "administrator", ...) instead.
+        s = (getattr(status, "value", None) or str(status)) if status else ""
+        # restricted users are still members (e.g. slow-mode limited).
+        return s.lower() in ("member", "administrator", "creator", "owner", "restricted")
     except Exception:
         return False
 

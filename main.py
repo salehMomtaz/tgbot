@@ -549,6 +549,11 @@ async def main_engine():
         _sub_web.mount(fastapi_app)
     except Exception as e:
         logging.warning(f"[Subscription] Webapp mount failed: {e}")
+    try:
+        import modules.admin_webapp as _adm_web
+        _adm_web.mount(fastapi_app)
+    except Exception as e:
+        logging.warning(f"[AdminWebApp] Mount failed: {e}")
 
     uvicorn_args = {
         "app": fastapi_app,
