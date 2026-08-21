@@ -29,13 +29,20 @@ def _is_nightly(version: str) -> bool:
 async def auto_update_ytdlp():
     """Keep yt-dlp on the latest nightly build.
 
-    `pip install -U --pre "yt-dlp[default,curl-cffi]"`:
+    `pip install -U --pre "yt-dlp[default,curl-cffi]" "curl_cffi<0.14"`:
       * `--pre` allows pre-releases — yt-dlp publishes nightly timestamp builds
         to PyPI as pre-releases, so this stays on the nightly channel.
       * `[default]` preserves the default extras (certifi, etc.) across upgrades
         — plain `yt-dlp` would silently strip them.
       * `[curl-cffi]` preserves the impersonation extra yt-dlp needs for
         TikTok's proof-of-work webpage challenge solver.
+      * `"curl_cffi<0.14"` is a HARD PIN — do NOT drop it. yt-dlp's TikTok
+        extractor hardcodes `impersonate=True`, which resolves to curl_cffi's
+        newest chrome target; curl_cffi >= 0.14 ships chrome142+ fingerprints
+        that TikTok now blocks with a "Site Maintenance" page ("Unexpected
+        response from webpage request", yt-dlp#17403). 0.13.x's newest chrome is
+        131, which TikTok accepts. Without the pin, a fresh `[curl-cffi]`
+        resolution on the next nightly check would silently break TikTok again.
     Runs every 6 hours.
     """
     # One initial delay (30 s) so we don't fight with boot-time provider startup.
@@ -45,7 +52,8 @@ async def auto_update_ytdlp():
         logger.info(f"[Updater] Checking for yt-dlp nightly updates (current: {before or 'unknown'})...")
         try:
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp[default,curl-cffi]",
+                sys.executable, "-m", "pip", "install", "-U", "--pre",
+                "yt-dlp[default,curl-cffi]", "curl_cffi<0.14",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

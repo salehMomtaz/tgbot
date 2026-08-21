@@ -12,61 +12,135 @@ HTML = r"""<!doctype html><meta charset=utf-8><meta name=viewport content="width
 <title>Admin Console — tgbot</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
- :root{ --tg-safe-top:0px; --tg-safe-bottom:0px; --bg:#0f1115; --card:#1a1d24; --card-b:#232735; --text:#e6e6e6; --muted:#9aa0b3; --accent:#2ea6ff; --ok:#30d158; --warn:#ff9f0a; --err:#ff453a; color-scheme: dark; }
- *{box-sizing:border-box} html,body{margin:0;min-height:100%} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;background:var(--bg);color:var(--text);line-height:1.45}
- a{color:var(--accent)}
- .page{max-width:840px;margin:0 auto;padding:16px;padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top));padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom))}
- .hdr{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.88);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);margin:-12px -16px 12px;padding:12px 16px;border-bottom:1px solid #22262f;padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top));display:flex;align-items:center;justify-content:space-between;gap:12px}
- .hdr h1{font-size:18px;margin:0;font-weight:800}
- .hdr small{opacity:.6;font-size:12px}
- .card{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 1px 0 rgba(0,0,0,.28)}
- .muted{color:var(--muted);font-size:12px}
- .row{display:flex;justify-content:space-between;gap:12px;margin:8px 0;flex-wrap:wrap}
- .btn{appearance:none;border:0;background:var(--accent);color:#fff;padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;font-size:13px}
- .btn:active{transform:scale(.98)} .btn:disabled{opacity:.5}
- .btn-alt{background:#242836;color:var(--text);border:1px solid var(--card-b)}
- .btn-ghost{background:transparent;border:1px solid var(--card-b);color:var(--text)}
- .btn-danger{background:#3a1616;color:#ff6b5e;border:1px solid #5a2323}
- .btn-sm{padding:6px 10px;font-size:12px;border-radius:8px}
- input,textarea,select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #2a2e38;background:#0f1115;color:#fff;font:inherit}
- textarea{resize:vertical;min-height:72px}
- table{width:100%;border-collapse:collapse} th,td{padding:7px 10px;border-bottom:1px solid var(--card-b);text-align:left;font-size:13px} th{opacity:.7}
- .pill{display:inline-block;background:#242836;border:1px solid #2a2e38;border-radius:999px;padding:3px 9px;font-size:12px;margin:3px}
- .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
- .stat{border:1px solid var(--card-b);border-radius:12px;padding:12px 14px;background:#15181f}
- .stat b{font-size:20px;display:block;margin-top:2px}
- .stat small{opacity:.6;font-size:11px}
- .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
- .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)} .acc{color:var(--accent)}
- .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
- .tab{appearance:none;border:1px solid var(--card-b);background:transparent;color:var(--muted);padding:8px 14px;border-radius:999px;font-size:13px;font-weight:600;cursor:pointer}
- .tab.on{background:var(--accent);color:#fff;border-color:var(--accent)}
- .inrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
- .inrow input{width:auto;flex:1;min-width:120px}
- .inrow .btn{width:auto}
- .divider{border:0;border-top:1px solid var(--card-b);margin:14px 0}
- code{background:#232735;padding:2px 6px;border-radius:6px;font-size:12px}
- .skeleton{background:linear-gradient(90deg,#1a1d24 25%,#232735 37%,#1a1d24 63%);background-size:400% 100%;animation:shimmer 1.2s ease infinite;border-radius:10px;height:14px}
- @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
- #toast-stack{position:fixed;left:50%;bottom:calc(16px + var(--tg-safe-bottom) + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:100;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;max-width:min(92vw,560px);width:100%}
- .toast{pointer-events:auto;background:#1e232f;border:1px solid #2a2e38;color:var(--text);padding:12px 14px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.4);display:flex;gap:10px;align-items:flex-start;animation:toastIn .22s ease;white-space:pre-wrap;font-size:13px}
- .toast.ok{border-color:rgba(48,209,88,.35)} .toast.err{border-color:rgba(255,69,58,.35)} .toast.warn{border-color:rgba(255,159,10,.35)}
- .toast .t-ic{font-size:16px;flex:0 0 auto;margin-top:1px}
- .toast .t-msg{flex:1;line-height:1.35}
- @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
- #tg-modal{position:fixed;inset:0;z-index:90;display:none}
- #tg-modal.open{display:block}
- .modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
- .modal-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(94vw,440px);background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:18px;box-shadow:0 18px 48px rgba(0,0,0,.5);max-height:min(84vh,640px);overflow:auto}
- .modal-card h3{margin:0 0 10px;font-size:16px;display:flex;align-items:center;gap:8px}
- .modal-card pre{white-space:pre-wrap;word-break:break-all;font-size:11px;background:#0f1115;border:1px solid var(--card-b);border-radius:8px;padding:10px;max-height:180px;overflow:auto}
- .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
- .mstep{font-size:13px;opacity:.9;margin:0 0 12px}
+  :root{
+    --tg-safe-top:0px; --tg-safe-bottom:0px;
+    --accent:#2ea6ff; --ok:#30d158; --warn:#ff9f0a; --err:#ff453a;
+    --bg:#0f1115; --card:#1a1d24; --card-b:#232735; --text:#e6e6e6; --muted:#9aa0b3;
+    --hdr-bg:rgba(15,17,21,.88);
+    --btn-text:#fff; --btn-alt-bg:#242836;
+    --input-bg:#0f1115; --input-border:#2a2e38; --code-bg:#232735;
+    --stat-bg:#15181f; --pill-bg:#242836; --pill-border:#2a2e38;
+    --skeleton-1:#1a1d24; --skeleton-2:#232735;
+    --toast-bg:#1e232f; --toast-border:#2a2e38;
+    --danger-bg:#3a1616; --danger-text:#ff6b5e; --danger-border:#5a2323;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box} html,body{margin:0;min-height:100%} body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;background:var(--bg);color:var(--text);line-height:1.45;transition:background .2s,color .2s}
+  a{color:var(--accent)}
+  .page{max-width:840px;margin:0 auto;padding:16px;padding-top:calc(12px + var(--tg-safe-top) + env(safe-area-inset-top));padding-bottom:calc(24px + var(--tg-safe-bottom) + env(safe-area-inset-bottom))}
+  .hdr{position:sticky;top:0;z-index:10;background:var(--hdr-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);margin:-12px -16px 12px;padding:12px 16px;border-bottom:1px solid var(--card-b);padding-top:calc(10px + var(--tg-safe-top) + env(safe-area-inset-top));display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .hdr h1{font-size:18px;margin:0;font-weight:800}
+  .hdr small{opacity:.6;font-size:12px}
+  .card{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 1px 0 rgba(0,0,0,.5)}
+  .muted{color:var(--muted);font-size:12px}
+  .row{display:flex;justify-content:space-between;gap:12px;margin:8px 0;flex-wrap:wrap}
+  .btn{appearance:none;border:0;background:var(--accent);color:var(--btn-text);padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;font-size:13px}
+  .btn:active{transform:scale(.98)} .btn:disabled{opacity:.5}
+  .btn-alt{background:var(--btn-alt-bg);color:var(--text);border:1px solid var(--card-b)}
+  .btn-ghost{background:transparent;border:1px solid var(--card-b);color:var(--text)}
+  .btn-danger{background:var(--danger-bg);color:var(--danger-text);border:1px solid var(--danger-border)}
+  .btn-sm{padding:6px 10px;font-size:12px;border-radius:8px}
+  input,textarea,select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--input-border);background:var(--input-bg);color:var(--text);font:inherit}
+  textarea{resize:vertical;min-height:72px}
+  table{width:100%;border-collapse:collapse} th,td{padding:7px 10px;border-bottom:1px solid var(--card-b);text-align:left;font-size:13px} th{opacity:.7}
+  .pill{display:inline-block;background:var(--pill-bg);border:1px solid var(--pill-border);border-radius:999px;padding:3px 9px;font-size:12px;margin:3px}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+  .stat{border:1px solid var(--card-b);border-radius:12px;padding:12px 14px;background:var(--stat-bg)}
+  .stat b{font-size:20px;display:block;margin-top:2px}
+  .stat small{opacity:.6;font-size:11px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)} .acc{color:var(--accent)}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
+  .tab{appearance:none;border:1px solid var(--card-b);background:transparent;color:var(--muted);padding:8px 14px;border-radius:999px;font-size:13px;font-weight:600;cursor:pointer}
+  .tab.on{background:var(--accent);color:var(--btn-text);border-color:var(--accent)}
+  .inrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .inrow input{width:auto;flex:1;min-width:120px}
+  .inrow .btn{width:auto}
+  .divider{border:0;border-top:1px solid var(--card-b);margin:14px 0}
+  code{background:var(--code-bg);padding:2px 6px;border-radius:6px;font-size:12px}
+  .skeleton{background:linear-gradient(90deg,var(--skeleton-1) 25%,var(--skeleton-2) 37%,var(--skeleton-1) 63%);background-size:400% 100%;animation:shimmer 1.2s ease infinite;border-radius:10px;height:14px}
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
+  #toast-stack{position:fixed;left:50%;bottom:calc(16px + var(--tg-safe-bottom) + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:100;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;max-width:min(92vw,560px);width:100%}
+  .toast{pointer-events:auto;background:var(--toast-bg);border:1px solid var(--toast-border);color:var(--text);padding:12px 14px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.8);display:flex;gap:10px;align-items:flex-start;animation:toastIn .22s ease;white-space:pre-wrap;font-size:13px}
+  .toast.ok{border-color:rgba(48,209,88,.5)} .toast.err{border-color:rgba(255,69,58,.5)} .toast.warn{border-color:rgba(255,159,10,.5)}
+  .toast .t-ic{font-size:16px;flex:0 0 auto;margin-top:1px}
+  .toast .t-msg{flex:1;line-height:1.35}
+  @keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  #tg-modal{position:fixed;inset:0;z-index:90;display:none}
+  #tg-modal.open{display:block}
+  .modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.85);backdrop-filter:blur(2px)}
+  .modal-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(94vw,440px);background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:18px;box-shadow:0 18px 48px rgba(0,0,0,.8);max-height:min(84vh,640px);overflow:auto}
+  .modal-card h3{margin:0 0 10px;font-size:16px;display:flex;align-items:center;gap:8px}
+  .modal-card pre{white-space:pre-wrap;word-break:break-all;font-size:11px;background:var(--code-bg);border:1px solid var(--card-b);border-radius:8px;padding:10px;max-height:180px;overflow:auto}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+  .mstep{font-size:13px;opacity:.9;margin:0 0 12px}
+
+  /* Theme: Light (Day) */
+  [data-theme="light"]{
+    --bg:#e8e8e8; --card:#f0f0f0; --card-b:#d0d0d0; --text:#1a1a1a; --muted:#666; --hdr-bg:rgba(232,232,232,.88);
+    --btn-text:#000; --btn-alt-bg:#d8d8d8;
+    --input-bg:#fff; --input-border:#ccc; --code-bg:#f5f5f5;
+    --stat-bg:#f5f5f5; --pill-bg:#e0e0e0; --pill-border:#ccc;
+    --skeleton-1:#e0e0e0; --skeleton-2:#d0d0d0;
+    --toast-bg:#f0f0f0; --toast-border:#ddd;
+    --danger-bg:#f5c6cb; --danger-text:#721c24; --danger-border:#f1aeb5;
+    color-scheme: light;
+  }
+  /* Theme: Dark (AMOLED) */
+  [data-theme="dark"]{
+    --bg:#000000; --card:#050505; --card-b:#1a1a1a; --text:#ffffff; --muted:#a0a0a0; --hdr-bg:rgba(0,0,0,.88);
+    --btn-text:#000; --btn-alt-bg:#1a1a1a;
+    --input-bg:#000; --input-border:#1a1a1a; --code-bg:#000;
+    --stat-bg:#000; --pill-bg:#1a1a1a; --pill-border:#1a1a1a;
+    --skeleton-1:#000; --skeleton-2:#1a1a1a;
+    --toast-bg:#050505; --toast-border:#1a1a1a;
+    --danger-bg:#3a0000; --danger-text:#ff6b5e; --danger-border:#5a0000;
+    color-scheme: dark;
+  }
+  /* Theme: System — follows the Telegram app. Inline themeParams override the
+     :root fallback via Theme.applyTelegram() in JS. */
+  [data-theme="system"]{ color-scheme: light dark; }
 </style>
 <div id="toast-stack" aria-live="polite"></div>
 <div id="tg-modal" aria-hidden="true"><div class="modal-backdrop" onclick="ADM.closeModal()"></div><div class="modal-card" role="dialog" aria-modal="true"><h3 id="modal-title"></h3><div id="modal-body" style="font-size:13px;opacity:.9"></div><div class="modal-actions" id="modal-actions"></div></div></div>
 <script>
 const tg = window.Telegram?.WebApp;
+const THEME_KEY = 'admin_theme';
+const THEME_VARS = ['--bg','--card','--card-b','--text','--muted','--accent','--hdr-bg'];
+
+const Theme = {
+  // Load saved preference or default to 'system'
+  get(){ return localStorage.getItem(THEME_KEY) || 'system'; },
+  // Push Telegram's themeParams onto <html> inline style (system mode).
+  applyTelegram(){
+    if(!tg) return;
+    const tp = tg.themeParams || {};
+    if(tp.bg_color) document.documentElement.style.setProperty('--bg', tp.bg_color);
+    if(tp.secondary_bg_color) document.documentElement.style.setProperty('--card', tp.secondary_bg_color);
+    if(tp.text_color) document.documentElement.style.setProperty('--text', tp.text_color);
+    if(tp.hint_color) document.documentElement.style.setProperty('--muted', tp.hint_color);
+    if(tp.button_color) document.documentElement.style.setProperty('--accent', tp.button_color);
+    if(tp.button_text_color) document.documentElement.style.setProperty('--btn-text', tp.button_text_color);
+    // Translucent header from the same base colour (solid fallback otherwise).
+    if(tp.bg_color) document.documentElement.style.setProperty('--hdr-bg', 'color-mix(in srgb, '+tp.bg_color+' 88%, transparent)');
+  },
+  // Drop the inline overrides so the [data-theme] CSS palettes apply again.
+  clearTelegram(){
+    THEME_VARS.forEach(v=> document.documentElement.style.removeProperty(v));
+  },
+  set(mode){
+    localStorage.setItem(THEME_KEY, mode);
+    document.documentElement.setAttribute('data-theme', mode);
+    if(mode === 'system') this.applyTelegram();
+    else this.clearTelegram();
+  },
+  init(){
+    const mode = this.get();
+    document.documentElement.setAttribute('data-theme', mode);
+    if(mode === 'system') this.applyTelegram();
+  }
+};
+
 (function(){
   if(!tg) return;
   try{ tg.ready(); tg.expand(); }catch(e){}
@@ -75,17 +149,12 @@ const tg = window.Telegram?.WebApp;
       const sa=tg.safeAreaInset||{top:0,bottom:0};
       document.documentElement.style.setProperty('--tg-safe-top',(sa.top||0)+'px');
       document.documentElement.style.setProperty('--tg-safe-bottom',(sa.bottom||0)+'px');
-      const tp=tg.themeParams||{};
-      if(tp.bg_color) document.documentElement.style.setProperty('--bg',tp.bg_color);
-      if(tp.secondary_bg_color) document.documentElement.style.setProperty('--card',tp.secondary_bg_color);
-      if(tp.text_color) document.documentElement.style.setProperty('--text',tp.text_color);
-      if(tp.hint_color) document.documentElement.style.setProperty('--muted',tp.hint_color);
-      if(tp.button_color) document.documentElement.style.setProperty('--accent',tp.button_color);
     }catch(e){}
   }
   applySafe();
-  try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe); tg.onEvent('themeChanged',applySafe);}catch(e){}
+  try{ tg.onEvent('viewportChanged',applySafe); tg.onEvent('safeAreaChanged',applySafe); tg.onEvent('contentSafeAreaChanged',applySafe); tg.onEvent('themeChanged',()=>Theme.set(Theme.get()));}catch(e){}
 })();
+
 let ADM_TOKEN = localStorage.getItem('admin_token')||'';
 const ADM = {
   toast(msg,type='info',ms=3800){
@@ -174,7 +243,9 @@ const ADM = {
 };
 const TABS = ['Overview','Users','Cookies','PO Token','Premium','Subscriptions','Direct','System'];
 let CUR = 'Overview';
-const APP = document.getElementById('app') || (document.body.innerHTML += '<div id="app"></div>', document.getElementById('app'));
+// Never re-parse the body via `innerHTML +=` to create #app — that reserialises
+// the whole <body> (including this script) and can duplicate markup. Append it.
+const APP = document.getElementById('app') || (()=>{ const d=document.createElement('div'); d.id='app'; document.body.appendChild(d); return d; })();
 
 function navHtml(){
   return `<div class="tabs">` + TABS.map(t=>`<button class="tab ${CUR===t?'on':''}" onclick="ADM.goto('${t}')">${t}</button>`).join('') + `</div><div id="view"></div>`;
@@ -182,7 +253,8 @@ function navHtml(){
 function setBody(){
   const app = document.getElementById('app');
   if(!app) return;
-  app.innerHTML = `<div class="page"><header class="hdr"><div><h1>🛠 Admin Console</h1><small>tgbot · full control in a Mini App</small></div><a href="/" style="font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap">← Home</a></header>${navHtml()}</div>`;
+  const savedTheme = localStorage.getItem('admin_theme') || 'system';
+  app.innerHTML = `<div class="page"><header class="hdr"><div><h1>🛠 Admin Console</h1><small>tgbot · full control in a Mini App</small></div><div style="display:flex;gap:8px;align-items:center"><select id="theme-select" style="padding:6px 10px;border-radius:8px;border:1px solid var(--card-b);background:var(--input-bg);color:var(--text);font-size:12px" onchange="Theme.set(this.value)"><option value="system" ${savedTheme==='system'?'selected':''}>🖥️ System</option><option value="light" ${savedTheme==='light'?'selected':''}>☀️ Day</option><option value="dark" ${savedTheme==='dark'?'selected':''}>🌙 Night</option></select><button class="btn btn-sm" onclick="ADM.clearCache()" title="Force refresh (clears cache)">🔄 Clear Cache</button><a href="/" style="font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap">← Home</a></div></header>${navHtml()}</div>`;
 }
 function showAuth(err){
   const app = document.getElementById('app'); if(!app) return;
@@ -226,7 +298,14 @@ function clearToken(){
   if(el) el.value='';
   ADM.toast('Token cleared','warn');
 }
-ADM.setToken=setToken; ADM.clearToken=clearToken;
+async function clearCache(){
+  // Purge Cache Storage (service-worker / fetch caches), keep the theme and
+  // admin-token preferences, then hard-reload to pick up fresh HTML/CSS/JS.
+  try{ const ks = await caches.keys(); await Promise.all(ks.map(k=>caches.delete(k))); }catch(e){}
+  ADM.toast('Cache cleared — reloading…','ok');
+  setTimeout(()=>location.reload(), 400);
+}
+ADM.setToken=setToken; ADM.clearToken=clearToken; ADM.clearCache=clearCache;
 
 // ---------- view plumbing ----------
 ADM.goto = function(tab, force){
@@ -756,6 +835,7 @@ async function boot(){
   if(!app){
     const div=document.createElement('div'); div.id='app'; document.body.appendChild(div);
   }
+  Theme.init();
   try{
     await ADM.api('/state');
     setBody(); loadOverview().catch(e=>{ if(e.status===403) showAuth(e.message); });

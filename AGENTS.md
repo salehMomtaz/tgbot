@@ -155,12 +155,21 @@ temp-client discard discipline. Never persist long probes inline — run them vi
    Freshness: `freshness_warnings()` powers the startup watchdog + the admin
    Cookies menu status line; knob: `COOKIE_STALE_WARNING_DAYS` (default 21).
 
-5. **Keep `[default,curl-cffi]` on yt-dlp upgrades.** `utils/updater.py` runs
-   `pip install -U --pre "yt-dlp[default,curl-cffi]"` — plain `yt-dlp` would
-   silently strip the certifi/curllib extras, and dropping `curl-cffi` removes
-   the impersonation engine yt-dlp's TikTok proof-of-work challenge solver
-   needs (its absence resurfaces as "malformed site" failures on TikTok).
-   The `--pre` channel is what keeps it on nightly.
+5. **Keep `[default,curl-cffi]` on yt-dlp upgrades AND pin `curl_cffi<0.14`.**
+   `utils/updater.py` runs `pip install -U --pre "yt-dlp[default,curl-cffi]"
+   "curl_cffi<0.14"` — plain `yt-dlp` would silently strip the certifi/curllib
+   extras, and dropping `curl-cffi` removes the impersonation engine yt-dlp's
+   TikTok proof-of-work challenge solver needs (its absence resurfaces as
+   "malformed site" failures on TikTok). The `curl_cffi<0.14` pin is a HARD
+   constraint that must stay: yt-dlp's TikTok extractor hardcodes
+   `impersonate=True`, which resolves to curl_cffi's **newest** chrome target;
+   curl_cffi >= 0.14 ships chrome142+ TLS fingerprints that TikTok blocks with a
+   "Site Maintenance" page ("Unexpected response from webpage request",
+   yt-dlp#17403). 0.13.x's newest chrome is 131 (136/133 are
+   yt-dlp-deprioritized) and TikTok accepts it. `requirements.txt` pins
+   `curl_cffi<0.14` + `curl-adapter==1.1.0` (curl-adapter 1.2.x needs
+   curl_cffi>=0.14). If TikTok hardens chrome131, re-test newer targets before
+   bumping the pin. The `--pre` channel is what keeps it on nightly.
 
 6. **`.env` parsing in `run.sh` must stay dotenv-style**, never `source .env`.
    Values like `YTDLP_USER_AGENT` contain characters bash treats as code. The

@@ -19,8 +19,7 @@ def _is_youtube(url: str) -> bool:
 
 
 # TikTok embed URL workaround (yt-dlp issue #17403)
-# The embed page bypasses the challenge page. Requires Chrome 140 user agent.
-_TIKTOK_EMBED_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+# The embed page bypasses the challenge page.
 _TIKTOK_VIDEO_RE = re.compile(r"https?://(?:www\.)?tiktok\.com/@[^/]+/video/(\d+)", re.IGNORECASE)
 
 
@@ -56,8 +55,10 @@ def _to_tiktok_embed_url(url: str) -> str:
     """Convert TikTok video URL to embed URL to bypass challenge page (yt-dlp#17403).
 
     The embed page (www.tiktok.com/embed/<video_id>) doesn't serve the
-    anti-bot challenge, allowing yt-dlp to extract video data directly.
-    Requires Chrome 140 user agent which is set in _apply_pot_options for TikTok.
+    anti-bot challenge, allowing yt-dlp to extract video data directly. The
+    TLS impersonation engine (curl_cffi pinned <0.14) supplies its own matching
+    UA — never override it with a custom http_headers UA or TikTok blocks the
+    fingerprint/UA mismatch.
     """
     if not url:
         return url
@@ -165,11 +166,11 @@ def _apply_pot_options(ydl_opts: dict, url: str) -> dict:
         return opts
 
     # TikTok embed URL workaround (yt-dlp issue #17403)
-    # Set Chrome 140 user agent via http_headers for embed page to bypass challenge
-    # Using http_headers instead of user_agent param works with Python API
-    if "tiktok.com/embed/" in url:
-        opts = dict(ydl_opts)
-        opts["http_headers"] = {"User-Agent": _TIKTOK_EMBED_UA}
-        return opts
-
+    # Do NOT set a custom UA here: curl_cffi (pinned <0.14, see AGENTS.md #5)
+    # impersonates a real chrome131 TLS fingerprint during extraction, and an
+    # explicit Chrome 140 UA header would MISMATCH that fingerprint — TikTok
+    # then blocks the request with a "Site Maintenance" page. Let the
+    # impersonation engine speak its own matching UA. (The old Chrome-140 UA
+    # override predates the curl_cffi pin and only worked on the plain-requests
+    # path.)
     return ydl_opts

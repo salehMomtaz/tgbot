@@ -7,6 +7,15 @@ python-multipart
 # impersonation — REQUIRED for TikTok's proof-of-work webpage challenge solver
 # (without it TikTok interstitials surface as "malformed site" failures).
 yt-dlp[default,curl-cffi]
+# PIN curl_cffi < 0.14: yt-dlp's TikTok extractor hardcodes impersonate=True,
+# which resolves to curl_cffi's NEWEST chrome target. curl_cffi >= 0.14 ships
+# chrome142+ TLS fingerprints that TikTok now blocks ("Site Maintenance" page →
+# "Unexpected response from webpage request", yt-dlp#17403). 0.13.x's newest
+# chrome is 131 (136/133 are yt-dlp-deprioritized), which TikTok accepts. The
+# bot venv MUST stay on this pin — utils/updater.py enforces it on every nightly
+# refresh. If TikTok hardens chrome131 too, bump the pin back after confirming
+# the newer target works again.
+curl_cffi<0.14
 ffmpeg-python
 aiohttp
 aiofiles
@@ -23,7 +32,9 @@ instagrapi==2.18.14
 # curl-backed requests adapter giving instagrapi's PRIVATE session a real
 # Chrome TLS fingerprint (utils/ig_anti_detect.py). The private API previously
 # rode plain Python requests TLS — an easy "this is a script" signal.
-curl-adapter>=1.2.1
+# 1.2.x requires curl_cffi>=0.14 (breaking the TikTok pin above); 1.1.0 works
+# with curl_cffi 0.13.x. Keep in sync with the curl_cffi pin.
+curl-adapter==1.1.0
 twikit
 # Async WebSocket client for the TikTok IM push channel
 # (_tiktok_worker in modules/direct_forward/). Also pulled in by
