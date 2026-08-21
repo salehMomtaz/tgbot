@@ -3,7 +3,7 @@
 These are stripped, repo-local copies of the project's long-term memory
 (originally kept in the AI coding agent's private memory store across sessions).
 They capture non-obvious invariants and history that are not obvious from the
-code or the git log alone. Last updated: 2026-08-13.
+code or the git log alone. Last updated: 2026-08-21.
 
 > **Sensitive values have been redacted.** Where you see `<vps-ip>`,
 > `<ssh-port>`, `<vps-user>`, or `<redacted>`, substitute your own. No real
@@ -101,4 +101,8 @@ code or the git log alone. Last updated: 2026-08-13.
   IG gap recovery (pagination with cursor, at-least-once) + optional MQTToT
   push via `instagrapi 2.18.14`.
 - [Subscription system](tgbot-subscription-system.md) — toggleable 3-tier
-  Stars/TON subscriptions + free tier with multi-channel force-join + WebApp.
+   Stars/TON subscriptions + free tier with multi-channel force-join + WebApp.
+- [Full admin WebApp + channel-join fix](tgbot-2026-08-16-admin-webapp-and-join-fix.md) — entire in-chat admin console mirrored as Mini App `/admin` (`modules/admin_webapp`, `utils/webapp_auth`), plus `is_channel_member` enum `.value` fix.
+- [TikTok chrome pin + IG shim + webapp theme](tgbot-2026-08-21-tiktok-pin-and-webapp.md) — `curl_cffi<0.14` HARD pin (chrome142 blocked, `yt-dlp#17403`), UA mismatch drop, IG `CurlStreamResponse._decode` shim, admin theme/no-store/clear-cache.
+- [kurigram open issues](kurigram-open-issues.md) — 15 open issues, risk assessment for tgbot.
+- [PTB vs pyrogram architecture](architecture-ptb-vs-pyrogram.md) — why tgbot stays on kurigram, not PTB+Telethon.
