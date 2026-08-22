@@ -88,7 +88,7 @@ async def archive_instagram_stories(key, friend, bot=None):
         stories = await loop.run_in_executor(None, _fetch)
 
         bot_c = bot or common.bot_client()
-        dest = config.SYSTEM_CREATOR_ID
+        dest = common.resolve_destination()
 
         def _download_one(story):
             d = tempfile.mkdtemp(prefix="fmig_")

@@ -281,9 +281,11 @@ SUB_RATE_LIMIT_SECONDS = get_env_int("SUB_RATE_LIMIT_SECONDS", 3)
 # =========================================================================
 FRIEND_MEDIA_ENABLED = os.getenv("FRIEND_MEDIA_ENABLED", "true").lower() in ("true", "1", "yes")
 # Where archived Telegram media is delivered by the connected user account:
-#   "saved"    -> the account's own Saved Messages (default; NEVER messages anyone)
-#   <chat_id>  -> a numeric chat id you own (private channel / your own chat)
-FRIEND_MEDIA_DESTINATION = os.getenv("FRIEND_MEDIA_DESTINATION", "saved")
+#   "logchannel" -> the account posts media to the operator-owned LOG_CHANNEL_ID,
+#                   then forwards it to you (admin) as a DM (default; like self-DMs)
+#   "saved"      -> the account's own Saved Messages
+#   <chat_id>    -> a numeric chat id you own (private channel / your own chat)
+FRIEND_MEDIA_DESTINATION = os.getenv("FRIEND_MEDIA_DESTINATION", "logchannel")
 # Instagram current stories (best-effort). Requires a valid igcookies jar AND
 # that the connected IG account is allowed to view the target's stories. No
 # older/highlight history is fetched (per user request: "for instagram we don't

@@ -38,7 +38,12 @@ def _enabled():
 
 def _blurb():
     dest = fm_common.resolve_destination()
-    dest_label = "Saved Messages (your account)" if dest == "me" else str(dest)
+    if dest == "logchannel":
+        dest_label = "Log channel → DM to you"
+    elif dest == "me":
+        dest_label = "Saved Messages"
+    else:
+        dest_label = str(dest)
     ig = "🟢" if getattr(config, "FRIEND_MEDIA_IG_ENABLED", False) else "🔴"
     sched = int(getattr(config, "FRIEND_MEDIA_SCHEDULE_MINUTES", 0) or 0)
     sched_label = f"every {sched}m" if sched > 0 else "manual only"
@@ -82,7 +87,12 @@ async def render_menu(client, callback_query):
 
 def _settings_keyboard():
     dest = fm_common.resolve_destination()
-    dest_label = "Saved Messages" if dest == "me" else str(dest)
+    if dest == "logchannel":
+        dest_label = "Log channel → DM"
+    elif dest == "me":
+        dest_label = "Saved Messages"
+    else:
+        dest_label = str(dest)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"📥 Destination: {dest_label}", callback_data="fm_dest")],
         [InlineKeyboardButton(
@@ -182,8 +192,10 @@ async def fm_callback_dispatch(client, callback_query):
     if data == "fm_dest":
         USER_STATES[user_id] = "waiting_for_friend_dest"
         await callback_query.message.edit_text(
-            "📥 **Set destination**\n\nSend `saved` (your account's Saved Messages) "
-            "or a numeric chat id you own (e.g. a private channel).",
+            "📥 **Set destination**\n\n"
+            "• `logchannel` — post to your Log Channel, then DM you (default; like self-DMs)\n"
+            "• `saved` — your account's Saved Messages\n"
+            "• `<chat_id>` — a numeric chat id you own",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("◀️ Cancel", callback_data="fm_settings")]]))
         await callback_query.answer()
@@ -401,7 +413,9 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 
     if state == "waiting_for_friend_dest":
         v = txt.strip().lower()
-        if v in ("saved", "me", ""):
+        if v == "logchannel":
+            resolved = "logchannel"
+        elif v in ("saved", "me", ""):
             resolved = "saved"
         else:
             try:
@@ -409,7 +423,8 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                 resolved = v
             except Exception:
                 await message.reply_text(
-                    "❌ Send `saved` or a numeric chat id you own.", reply_markup=back_markup)
+                    "❌ Send `logchannel`, `saved`, or a numeric chat id you own.",
+                    reply_markup=back_markup)
                 return
         config.FRIEND_MEDIA_DESTINATION = resolved
         USER_STATES.pop(user_id, None)
@@ -418,7 +433,12 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                 await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
             except Exception:
                 pass
-        label = "Saved Messages" if resolved == "saved" else resolved
+        if resolved == "logchannel":
+            label = "Log channel → DM to you"
+        elif resolved == "saved":
+            label = "Saved Messages"
+        else:
+            label = resolved
         await message.reply_text(f"✅ Destination set to **{label}**.", reply_markup=back_markup)
         return
 
