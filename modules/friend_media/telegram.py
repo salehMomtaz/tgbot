@@ -77,8 +77,11 @@ async def archive_telegram_profile_photos(user, key, max_photos=None):
             out = await client.download_media(photo, file_name=path)
             if not out or not os.path.exists(out):
                 continue
+            # The connected user account only DOWNLOADS (a bot can't read the
+            # friend's profile-photo history). DELIVERY is done by the BOT: it
+            # posts to the log channel, then DMs you in its own chat with you.
             ok = await common._safe_deliver(
-                client, out, "photo",
+                common.bot_client(), out, "photo",
                 caption=f"📸 Profile picture {idx}/{total} · {key}"
             )
             if ok:
@@ -126,8 +129,10 @@ async def archive_telegram_stories(user, key, max_stories=None):
             out = await client.download_media(media, file_name=path)
             if not out or not os.path.exists(out):
                 continue
+            # Downloaded by the user account; delivered by the BOT (see profile
+            # photos above for why the split exists).
             ok = await common._safe_deliver(
-                client, out, kind,
+                common.bot_client(), out, kind,
                 caption=f"📖 Story {idx}/{total} · {key}"
             )
             if ok:

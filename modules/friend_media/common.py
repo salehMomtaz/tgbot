@@ -6,12 +6,13 @@ the program may message anyone"):
   * The ONLY operation that touches a *friend* is ``add_contact`` on the
     connected user account — that adds them to the account's contacts and sends
     NOTHING (no message, no notification to the friend).
-  * Every fetched media item is delivered ONLY to the configured destination,
+    * Every fetched media item is delivered ONLY to the configured destination,
     which is:
-      - "logchannel" (default): the connected account posts the media to the
-        operator-owned LOG_CHANNEL_ID, then forwards it to the admin (you) as a
-        DM from the connected account — exactly how you already receive the
-        self-DM relays. Nothing lands in Saved Messages.
+      - "logchannel" (default): the BOT posts the media to the operator-owned
+        LOG_CHANNEL_ID, then DMs it to the admin (you) in the bot's own existing
+        chat with you. The connected *user* account never delivers — it only
+        downloads (a bot can't read a friend's profile-photo history) and adds
+        the friend to contacts. Nothing lands in Saved Messages.
       - "saved": the connected account's own Saved Messages.
       - a numeric chat id the operator owns.
     A friend's id is NEVER passed as a send target anywhere in this package.
