@@ -42,6 +42,7 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu")],
         [InlineKeyboardButton(f"💳 Subscriptions: {sub_badge}", callback_data="admin_sub_menu"),
          InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
+        [InlineKeyboardButton("📸 Friend Media", callback_data="admin_friend_media_menu")],
         [InlineKeyboardButton("🌐 WebApp Console", web_app=WebAppInfo(url=_admin_webapp_url()))],
         [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"),
          InlineKeyboardButton("🔄 Restart Bot", callback_data="admin_restart")],

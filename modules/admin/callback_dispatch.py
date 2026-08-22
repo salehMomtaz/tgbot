@@ -739,6 +739,11 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         )
         await callback_query.answer()
 
+    elif data == "admin_friend_media_menu":
+        from modules.friend_media.admin import render_menu
+        await render_menu(client, callback_query)
+        await callback_query.answer()
+
     elif data == "admin_sub_toggle":
         if not _sub_rate_ok(user_id):
             await callback_query.answer("Too fast — wait a moment.", show_alert=False)

@@ -264,3 +264,35 @@ SUB_TON_API_KEY = os.getenv("SUB_TON_API_KEY", "")
 SUB_WEBAPP_SECRET = os.getenv("SUB_WEBAPP_SECRET", "")
 # Rate-limit for subscription callbacks (per user, seconds)
 SUB_RATE_LIMIT_SECONDS = get_env_int("SUB_RATE_LIMIT_SECONDS", 3)
+
+# =========================================================================
+# Friend Media Archiver (📸)
+# -------------------------------------------------------------------------
+# Archives YOUR FRIENDS' Telegram profile pictures + stories (and, best-effort,
+# their current Instagram stories) into a place ONLY YOU can see — the connected
+# user account's own Saved Messages (or a chat id you own). It NEVER messages the
+# friends: the only operation that touches a friend is `add_contact` (which adds
+# them to your contacts and sends nothing). All fetched media is delivered to the
+# destination below, which must be "me"/"saved" or a chat id you control.
+#
+# Requires a connected *user* account (`PREMIUM_STRING_SESSION`): a bot account
+# cannot read another user's full profile-photo history. We reuse that same
+# connected kurigram user client rather than a separate telethon dependency.
+# =========================================================================
+FRIEND_MEDIA_ENABLED = os.getenv("FRIEND_MEDIA_ENABLED", "true").lower() in ("true", "1", "yes")
+# Where archived Telegram media is delivered by the connected user account:
+#   "saved"    -> the account's own Saved Messages (default; NEVER messages anyone)
+#   <chat_id>  -> a numeric chat id you own (private channel / your own chat)
+FRIEND_MEDIA_DESTINATION = os.getenv("FRIEND_MEDIA_DESTINATION", "saved")
+# Instagram current stories (best-effort). Requires a valid igcookies jar AND
+# that the connected IG account is allowed to view the target's stories. No
+# older/highlight history is fetched (per user request: "for instagram we don't
+# need older contents").
+FRIEND_MEDIA_IG_ENABLED = os.getenv("FRIEND_MEDIA_IG_ENABLED", "false").lower() in ("true", "1", "yes")
+# Per-run safety caps (protect the VPS from a runaway 1927-photo fetch).
+FRIEND_MEDIA_MAX_PHOTOS = get_env_int("FRIEND_MEDIA_MAX_PHOTOS", 2000)
+FRIEND_MEDIA_MAX_STORIES = get_env_int("FRIEND_MEDIA_MAX_STORIES", 100)
+# Optional auto-archive loop (minutes). 0 = manual only (recommended for large lists).
+FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 0)
+# Per-item send delay (seconds) to reduce FloodWait risk when archiving hundreds.
+FRIEND_MEDIA_SEND_DELAY = get_env_int("FRIEND_MEDIA_SEND_DELAY", 1)

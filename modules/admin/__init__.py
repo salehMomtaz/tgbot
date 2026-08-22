@@ -63,6 +63,12 @@ from .register import (
     register_admin_handlers,
 )
 
+from modules.friend_media.admin import (
+    render_menu,
+    handle_friend_text,
+    start_friend_media_task,
+)
+
 __all__ = [
     # keyboards
     "build_console_keyboard",
@@ -104,4 +110,8 @@ __all__ = [
     "back_markup",
     # register
     "register_admin_handlers",
+    # friend_media
+    "render_menu",
+    "handle_friend_text",
+    "start_friend_media_task",
 ]

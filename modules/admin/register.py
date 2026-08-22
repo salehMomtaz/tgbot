@@ -390,6 +390,28 @@ def register_admin_handlers(app: Client):
             message.stop_propagation()
             return
 
+        # 1f. Friend Media Archiver free-form states (handled before the telegram-ID
+        # gate so a friend's numeric id / handle can be entered without being
+        # parsed as an authorized-user id). Delegates to the friend_media package.
+        if state == "waiting_for_friend_add" or state.startswith("waiting_for_friend_ig:") \
+                or state == "waiting_for_friend_dest" or state == "waiting_for_friend_schedule":
+            try:
+                from modules.friend_media.admin import handle_friend_text
+                await handle_friend_text(
+                    client=client, message=message, user_id=user_id,
+                    state=state, input_text=input_text, prompt_id=prompt_id,
+                    app=app, back_markup=back_markup,
+                )
+            except Exception as e:
+                logger.exception(f"[FriendMedia] text-state error {state}: {e}")
+                await message.reply_text(
+                    "❌ Something went wrong processing that input. Please try again "
+                    "from the 📸 Friend Media menu.",
+                    reply_markup=back_markup
+                )
+            message.stop_propagation()
+            return
+
         # 2. Handle User ID Input States (Add, Remove, Unban)
         if not is_valid_telegram_id(input_text):
             USER_STATES.pop(user_id, None)
@@ -692,6 +714,27 @@ def register_admin_handlers(app: Client):
                     pass
                 return
             logger.exception(f"[AdminCallback] Error handling {callback_query.data!r}: {e}")
+            try:
+                await callback_query.answer("⚠️ An internal error occurred. See log channel.", show_alert=True)
+            except Exception:
+                pass
+
+    # =========================================================================
+    # Group 2 (sibling): Friend Media Archiver callback dispatcher (^fm_)
+    # =========================================================================
+    @app.on_callback_query(filters.regex(r"^fm_"))
+    async def friend_media_callback_handler(client: Client, callback_query: CallbackQuery):
+        try:
+            from modules.friend_media.admin import fm_callback_dispatch
+            await fm_callback_dispatch(client, callback_query)
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" in str(e) or "MessageNotModified" in type(e).__name__:
+                try:
+                    await callback_query.answer()
+                except Exception:
+                    pass
+                return
+            logger.exception(f"[FriendMediaCallback] Error handling {callback_query.data!r}: {e}")
             try:
                 await callback_query.answer("⚠️ An internal error occurred. See log channel.", show_alert=True)
             except Exception:

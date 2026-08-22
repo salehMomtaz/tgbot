@@ -295,7 +295,7 @@ async def auto_clean_cache_directory():
     (``direct_forward_state.json``), outside ``cache/``, so it is already safe.
     """
     from utils.shared import RUNTIME_SETTINGS
-    protected_files = {"xchat_bridge_state.json", "xchat_inbox.jsonl"}
+    protected_files = {"xchat_bridge_state.json", "xchat_inbox.jsonl", "friend_media_state.json"}
     while True:
         print("[Cleaner] Running periodic cache sweep...")
         cache_dir = "cache"
@@ -606,6 +606,18 @@ async def main_engine():
             tasks.append(df_task)
     except Exception as e:
         logging.warning(f"[DirectForward] Could not start: {e}")
+
+    # Friend Media Archiver optional auto-archive loop. Only schedules when
+    # FRIEND_MEDIA_ENABLED and FRIEND_MEDIA_SCHEDULE_MINUTES > 0; requires a
+    # connected user account (premium_app). Never messages the friends.
+    if getattr(config, "FRIEND_MEDIA_ENABLED", False):
+        try:
+            from modules.friend_media.admin import start_friend_media_task
+            fm_task = start_friend_media_task(app, premium_app)
+            if fm_task:
+                tasks.append(fm_task)
+        except Exception as e:
+            logging.warning(f"[FriendMedia] Could not start: {e}")
 
     # 9b. Optional Bale.ai frontend (tapi.bale.ai) — same process, shared queue / PO
     # provider, but LIMITED admin (no cookies/premium/POT/direct) and NO Bale log
