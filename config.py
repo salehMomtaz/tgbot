@@ -294,6 +294,8 @@ FRIEND_MEDIA_IG_ENABLED = os.getenv("FRIEND_MEDIA_IG_ENABLED", "false").lower() 
 # Per-run safety caps (protect the VPS from a runaway 1927-photo fetch).
 FRIEND_MEDIA_MAX_PHOTOS = get_env_int("FRIEND_MEDIA_MAX_PHOTOS", 2000)
 FRIEND_MEDIA_MAX_STORIES = get_env_int("FRIEND_MEDIA_MAX_STORIES", 100)
+# Max IG feed posts delivered per check (new-posts-only; watermark primed on link).
+FRIEND_MEDIA_MAX_POSTS_PER_RUN = get_env_int("FRIEND_MEDIA_MAX_POSTS_PER_RUN", 10)
 # Optional auto-archive loop (minutes). 0 = manual only (recommended for large lists).
 FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 0)
 # Per-item send delay (seconds) to reduce FloodWait risk when archiving hundreds.

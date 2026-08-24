@@ -394,7 +394,8 @@ def register_admin_handlers(app: Client):
         # gate so a friend's numeric id / handle can be entered without being
         # parsed as an authorized-user id). Delegates to the friend_media package.
         if state == "waiting_for_friend_add" or state.startswith("waiting_for_friend_ig:") \
-                or state == "waiting_for_friend_dest" or state == "waiting_for_friend_schedule":
+                or state == "waiting_for_friend_dest" or state == "waiting_for_friend_schedule" \
+                or state == "waiting_for_friend_search" or state == "waiting_for_friend_phone":
             try:
                 from modules.friend_media.admin import handle_friend_text
                 await handle_friend_text(

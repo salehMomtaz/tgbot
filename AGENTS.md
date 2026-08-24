@@ -45,6 +45,7 @@ invariants** so you don't have to rediscover them.
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
 | Change GitHub explorer / YouTube search / Translate / Web Markdown (balebot extras) | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers; see `docs/memory/tgbot-balebot-merge-2026-08-13.md`) |
 | Change Bale.ai frontend (government messenger, optional) | `modules/bale/` (`runner.py` aiogram poller `tapi.bale.ai` + `uploader.py` 20MB split + `admin.py` LIMITED console) + `config.py` (`BALE_TOKEN`, `BALE_SYSTEM_CREATOR_ID`, `BALE_HARD_LIMIT_MB`) — see `docs/memory/tgbot-balebot-hardening-2026-08-13.md` |
+| Change Friend Media Archiver (profile pics/stories/IG archive of friends) | `modules/friend_media/` (`admin.py` console + state persistence, `telegram.py` photos/stories via premium account, `instagram.py` cached instagrapi client, `state.py`, `common.py`) + `.env` (`FRIEND_MEDIA_*`) — see `docs/memory/tgbot-friend-media.md` |
 
 ### `utils/downloader/` package (replaces `utils/downloader.py`)
 
@@ -798,6 +799,34 @@ Don't port it to Go.
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`
   etc.; they don't apply to Telegram.
+- **`from main import X` must never re-execute main.py.** Running as a script,
+  main.py is `__main__`; a submodule importing `main` would execute a SECOND
+  module copy whose pyrogram Clients were never started ("Client has not been
+  started yet"). Guard: `sys.modules.setdefault('main', sys.modules[__name__])`
+  immediately after the imports in main.py. Consequence: the `if __name__ ==
+  "__main__":` entry block MUST stay at the VERY BOTTOM of main.py (after
+  `schedule_self_restart` is defined) — a partially-initialized duplicate
+  module otherwise breaks `from main import schedule_self_restart` and the bot
+  crash-loops on every start (seen: ~31 restarts during friend-media testing).
+- **aiogram's `start_polling` installs its own SIGTERM handler** and would
+  overwrite main.py's `_on_sigterm`, so SIGTERM only stopped Bale polling and
+  the process hung alive (Restart Bot button dead, systemd restarts hung).
+  `modules/bale/runner.py` therefore passes **`handle_signals=False`** — keep it.
+  On this box there is no passwordless sudo; restart via
+  `kill -TERM $(systemctl show tgbot --property=MainPID --value)` and let
+  `Restart=always` relaunch (~20 s).
+- **Friend Media Archiver (`modules/friend_media/`) NEVER messages anyone** —
+  the only friend-touching call is a silent `add_contact`. Reads ride the
+  premium user session (`premium_app`), delivery goes through the BOT to the
+  configured destination (default log channel → forward to creator). All state
+  lives in `cache/friend_media_state.json` (exempt from the cache cleaner):
+  seen photo/story/IG-pk ids + IG posts watermark — the first IG run primes
+  the watermark and delivers NOTHING (never fetch older IG content). Archives
+  serialize behind one asyncio.Lock; the watcher task starts unconditionally
+  and self-gates each cycle on live `FRIEND_MEDIA_ENABLED` /
+  `FRIEND_MEDIA_SCHEDULE_MINUTES` (jittered sleep, no fixed cadence). Console
+  settings persist via `dotenv.set_key('.env')` + `setattr(config)`. Kurigram
+  treats digit-string ids as PHONE numbers — pass user ids as `int`.
 
 ## When porting from balebot
 

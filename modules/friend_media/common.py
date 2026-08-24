@@ -107,6 +107,11 @@ async def _deliver_via_logchannel(client, path, kind, caption):
         elif msg and admin == lc:
             # log channel IS the admin — already there, no forward needed.
             pass
+        # Pace bulk deliveries (same knob as direct sends) so a 1900-photo
+        # backfill doesn't hammer the Bot API into FloodWaits.
+        delay = int(getattr(config, "FRIEND_MEDIA_SEND_DELAY", 1) or 1)
+        if delay > 0:
+            await asyncio.sleep(delay)
         return bool(msg)
     except FloodWait as fw:
         wait = int(getattr(fw, "value", 0) or 0)

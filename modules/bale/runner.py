@@ -908,7 +908,11 @@ async def start_bale_bot():
     await _drain_bale_backlog(bot)
     logger.info("[Bale] Polling started (tapi.bale.ai), admin LIMITED, no log channel")
     try:
-        await dp.start_polling(bot, handle_as_tasks=False)
+        # handle_signals=False: aiogram must NOT install its own SIGTERM/SIGINT
+        # handlers — it would overwrite main.py's _on_sigterm (registered in
+        # __main__) and the systemd/self-restart path would only stop Bale
+        # polling instead of tearing the whole process down gracefully.
+        await dp.start_polling(bot, handle_as_tasks=False, handle_signals=False)
     except asyncio.CancelledError:
         pass
     except Exception as e:

@@ -12,6 +12,14 @@ from pyrogram.types import Message, CallbackQuery  # Fixed: Imported missing typ
 import config
 from utils.shared import queue, DOWNLOAD_CACHE, LAST_UPDATE_TIME
 
+# Running as `python main.py` puts this module in sys.modules['__main__'] ONLY.
+# Any later `import main` would RE-EXECUTE this file and hand back a second
+# copy whose Client objects are never .start()ed (surfacing as "Client has not
+# been started yet" in code that imports clients from main — e.g. the Friend
+# Media Archiver's premium user session). Alias 'main' to '__main__' so every
+# importer shares this one, live instance. Must run before any submodule import.
+sys.modules.setdefault("main", sys.modules[__name__])
+
 # =========================================================================
 # Monkey-Patch: Resolves Pyrogram's internal 'Peer id invalid' Channel Bug
 # =========================================================================
@@ -607,17 +615,18 @@ async def main_engine():
     except Exception as e:
         logging.warning(f"[DirectForward] Could not start: {e}")
 
-    # Friend Media Archiver optional auto-archive loop. Only schedules when
-    # FRIEND_MEDIA_ENABLED and FRIEND_MEDIA_SCHEDULE_MINUTES > 0; requires a
-    # connected user account (premium_app). Never messages the friends.
-    if getattr(config, "FRIEND_MEDIA_ENABLED", False):
-        try:
-            from modules.friend_media.admin import start_friend_media_task
-            fm_task = start_friend_media_task(app, premium_app)
-            if fm_task:
-                tasks.append(fm_task)
-        except Exception as e:
-            logging.warning(f"[FriendMedia] Could not start: {e}")
+    # Friend Media Archiver background watcher. ALWAYS started — it self-gates
+    # on the live FRIEND_MEDIA_ENABLED / FRIEND_MEDIA_SCHEDULE_MINUTES config
+    # every cycle, so in-chat toggles apply with no restart. Requires a
+    # connected user account (premium_app) for actual reads; never messages the
+    # friends.
+    try:
+        from modules.friend_media.admin import start_friend_media_task
+        fm_task = start_friend_media_task(app, premium_app)
+        if fm_task:
+            tasks.append(fm_task)
+    except Exception as e:
+        logging.warning(f"[FriendMedia] Could not start: {e}")
 
     # 9b. Optional Bale.ai frontend (tapi.bale.ai) — same process, shared queue / PO
     # provider, but LIMITED admin (no cookies/premium/POT/direct) and NO Bale log
@@ -672,30 +681,16 @@ async def main_engine():
         if pot_manager:
             await pot_manager.stop()
 
-if __name__ == "__main__":
-    # systemd sends SIGTERM on stop/restart. Translate it into the graceful
-    # KeyboardInterrupt path below so pyrogram drains, the PO-token provider is
-    # torn down (PotProviderManager.stop), and cookie locks are released —
-    # instead of dying hard mid-request. Harmless under tmux (no SIGTERM there).
-    def _on_sigterm(_signum, _frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, _on_sigterm)
-    try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main_engine())
-    except KeyboardInterrupt:
-        print("Stopping bot gracefully...")
-
-
 def schedule_self_restart(delay: float = 3.0) -> None:
     """Restart this process on its own after `delay` seconds.
 
     The bot runs under systemd with `Restart=always`. Sending SIGTERM to our own
-    PID trips the KeyboardInterrupt path in `__main__` above: pyrogram drains,
-    the PO-token provider is stopped, cookie locks are released, the process
-    exits, and systemd relaunches `run.sh` — which re-reads `.env`, so a freshly
-    saved PREMIUM_STRING_SESSION takes effect. This is exactly what
-    `sudo systemctl restart tgbot` does, without needing shell access.
+    PID trips the KeyboardInterrupt path in the __main__ block at the very
+    bottom: pyrogram drains, the PO-token provider is stopped, cookie locks are
+    released, the process exits, and systemd relaunches `run.sh` — which
+    re-reads `.env`, so a freshly saved PREMIUM_STRING_SESSION takes effect.
+    This is exactly what `sudo systemctl restart tgbot` does, without needing
+    shell access.
 
     When INVOCATION_ID is absent (not running under systemd, e.g. a tmux/foreground
     dev run), fall back to re-execing the process image in place.
@@ -713,3 +708,21 @@ def schedule_self_restart(delay: float = 3.0) -> None:
         _restart_now()
 
     asyncio.get_running_loop().create_task(_delayed_restart())
+
+
+if __name__ == "__main__":
+    # systemd sends SIGTERM on stop/restart. Translate it into the graceful
+    # KeyboardInterrupt path so pyrogram drains, the PO-token provider is torn
+    # down (PotProviderManager.stop), and cookie locks are released — instead
+    # of dying hard mid-request. Harmless under tmux (no SIGTERM there).
+    # NOTE: this block MUST stay at the very bottom (below every def) so that
+    # main_engine()'s submodule imports see a fully-populated '__main__' — the
+    # sys.modules alias at the top makes `import main` resolve HERE.
+    def _on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main_engine())
+    except KeyboardInterrupt:
+        print("Stopping bot gracefully...")
