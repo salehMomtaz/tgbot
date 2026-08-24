@@ -469,17 +469,26 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
     parts = []
     async with _ARCHIVE_LOCK:
         try:
-            if friend.get("telegram_user_id") and (friend.get("profile_photos") or friend.get("stories")):
+            # NOTE: no telegram_user_id gate here — archive_friend_telegram
+            # self-heals friends stored unresolved by re-resolving their
+            # @username/handle and persisting the id.
+            if friend.get("profile_photos") or friend.get("stories"):
                 parts.append(await fm_tg.archive_friend_telegram(
                     key, friend, status_msg=status_msg, full=full))
             if (friend.get("ig_enabled") and friend.get("ig_username")
                     and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)):
                 if friend.get("ig_stories"):
-                    n = await fm_ig.archive_instagram_stories(key, friend, bot=client)
-                    parts.append(f"{n} new IG stories")
+                    try:
+                        n = await fm_ig.archive_instagram_stories(key, friend, bot=client)
+                        parts.append(f"{n} new IG stories")
+                    except fm_ig.IGUnavailable as e:
+                        parts.append(f"⚠️ IG stories skipped: {e}")
                 if friend.get("ig_posts"):
-                    n = await fm_ig.archive_instagram_posts(key, friend, bot=client)
-                    parts.append(f"{n} new IG posts")
+                    try:
+                        n = await fm_ig.archive_instagram_posts(key, friend, bot=client)
+                        parts.append(f"{n} new IG posts")
+                    except fm_ig.IGUnavailable as e:
+                        parts.append(f"⚠️ IG posts skipped: {e}")
             summary = "; ".join(p for p in parts if p) or "nothing new"
             await fm_state.update_friend(key, {"last_run": int(time.time()),
                                                "last_count": summary})
@@ -511,10 +520,12 @@ async def _run_archives(client, friends, status_msg, full=False):
 
 
 async def _archive_all(client, status_msg):
-    if fm_common.user_client() is None:
+    _uc = fm_common.user_client()
+    if _uc is None or not getattr(_uc, "is_initialized", False):
         await status_msg.reply_text(
-            "⚠️ The connected user account (PREMIUM_STRING_SESSION) is not started. "
-            "I can't read friends' profile-photo history without a user account.")
+            "⚠️ The connected user account (PREMIUM_STRING_SESSION) is missing or "
+            "still starting. I can't read friends' profile-photo history without "
+            "it — try again in a minute.")
         return
     friends = await fm_state.list_friends()
     enabled = [(k, f) for k, f in friends

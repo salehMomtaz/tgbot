@@ -80,28 +80,33 @@ def setup_system_logger():
     if config.LOG_CHANNEL_ID != 0:
         try:
             from utils.logger import TelegramChannelHandler
-            channel_formatter = logging.Formatter('%(message)s')
-            handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
-            handler.setFormatter(channel_formatter)
-            handler.setLevel(logging.INFO)
-            def _tg_filter(record):
-                name = (getattr(record, "name", "") or "").lower()
-                try:
-                    msg = record.getMessage()
-                except Exception:
-                    msg = ""
-                msg_l = (msg.lower() if isinstance(msg, str) else "")
-                # Telegram channel must NOT get Bale logs (strict split per user request)
-                if "bale" in name:
-                    return False
-                if name.startswith("aiogram"):
-                    return False
-                if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
-                    return False
-                return True
-            handler.addFilter(_tg_filter)
-            logging.getLogger().addHandler(handler)
-            logging.info("[Logger] Telegram logging linked to LOG_CHANNEL_ID")
+            # Idempotence guard: a second handler instance (e.g. from a historic
+            # double module execution) delivered EVERY record twice to the channel.
+            already = any(isinstance(h, TelegramChannelHandler)
+                          for h in logging.getLogger().handlers)
+            if not already:
+                channel_formatter = logging.Formatter('%(message)s')
+                handler = TelegramChannelHandler(config.BOT_TOKEN, config.LOG_CHANNEL_ID)
+                handler.setFormatter(channel_formatter)
+                handler.setLevel(logging.INFO)
+                def _tg_filter(record):
+                    name = (getattr(record, "name", "") or "").lower()
+                    try:
+                        msg = record.getMessage()
+                    except Exception:
+                        msg = ""
+                    msg_l = (msg.lower() if isinstance(msg, str) else "")
+                    # Telegram channel must NOT get Bale logs (strict split per user request)
+                    if "bale" in name:
+                        return False
+                    if name.startswith("aiogram"):
+                        return False
+                    if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
+                        return False
+                    return True
+                handler.addFilter(_tg_filter)
+                logging.getLogger().addHandler(handler)
+                logging.info("[Logger] Telegram logging linked to LOG_CHANNEL_ID")
         except Exception as e:
             print(f"Warning: Failed to initialize Telegram logger: {e}")
 
@@ -115,38 +120,42 @@ def setup_system_logger():
     if getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
         try:
             from utils.logger import BaleChannelHandler
-            bale_formatter = logging.Formatter('%(message)s')
-            # Use BOT_TOKEN (Telegram) even though this is "Bale logs" — destination is Telegram channel bale_log
-            b_handler = BaleChannelHandler(config.BOT_TOKEN, config.BALE_LOG_CHANNEL_ID)
-            b_handler.setFormatter(bale_formatter)
-            b_handler.setLevel(logging.INFO)
-            # Standard architecture: split loggers — bale_log gets ONLY Bale-related records
-            # at same INFO level, not the pyrogram/direct_forward spam that belongs to Telegram.
-            def _bale_filter(record):
-                name = (getattr(record, "name", "") or "").lower()
-                try:
-                    msg = record.getMessage()
-                except Exception:
-                    msg = ""
-                msg_l = msg.lower() if isinstance(msg, str) else ""
-                # Allow: modules.bale.*, aiogram, and explicit [Bale] tagged logs
-                if "bale" in name:
-                    return True
-                if name.startswith("aiogram"):
-                    return True
-                if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
-                    return True
-                if "bale logging" in msg_l:
-                    return True
-                # Shared logs (utils.*, pot_provider, downloader) are okay to be in both
-                # per user: "if something is shared then it is okay to be send in both channels"
-                if name.startswith("utils."):
-                    return True
-                if "pot" in name or "cookie" in name:
-                    return True
-                return False
-            b_handler.addFilter(_bale_filter)
-            logging.getLogger().addHandler(b_handler)
+            # Same idempotence rule as the Telegram channel handler above.
+            already_b = any(isinstance(h, BaleChannelHandler)
+                            for h in logging.getLogger().handlers)
+            if not already_b:
+                bale_formatter = logging.Formatter('%(message)s')
+                # Use BOT_TOKEN (Telegram) even though this is "Bale logs" — destination is Telegram channel bale_log
+                b_handler = BaleChannelHandler(config.BOT_TOKEN, config.BALE_LOG_CHANNEL_ID)
+                b_handler.setFormatter(bale_formatter)
+                b_handler.setLevel(logging.INFO)
+                # Standard architecture: split loggers — bale_log gets ONLY Bale-related records
+                # at same INFO level, not the pyrogram/direct_forward spam that belongs to Telegram.
+                def _bale_filter(record):
+                    name = (getattr(record, "name", "") or "").lower()
+                    try:
+                        msg = record.getMessage()
+                    except Exception:
+                        msg = ""
+                    msg_l = msg.lower() if isinstance(msg, str) else ""
+                    # Allow: modules.bale.*, aiogram, and explicit [Bale] tagged logs
+                    if "bale" in name:
+                        return True
+                    if name.startswith("aiogram"):
+                        return True
+                    if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
+                        return True
+                    if "bale logging" in msg_l:
+                        return True
+                    # Shared logs (utils.*, pot_provider, downloader) are okay to be in both
+                    # per user: "if something is shared then it is okay to be send in both channels"
+                    if name.startswith("utils."):
+                        return True
+                    if "pot" in name or "cookie" in name:
+                        return True
+                    return False
+                b_handler.addFilter(_bale_filter)
+                logging.getLogger().addHandler(b_handler)
             logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID} (Telegram bale_log) — filtered to bale/aiogram only")
         except Exception as e:
             print(f"Warning: Failed to initialize Bale logger: {e}")
@@ -333,6 +342,14 @@ async def auto_clean_cache_directory():
 # =========================================================================
 def patch_pyrogram_send_methods():
     """Overrides Pyrogram Client send methods to intercept and log raw JSON outputs of sent files/messages."""
+    # Idempotence guard: this ran TWICE in one process once (pre-sys.modules-alias
+    # double module execution) and every send was logged twice into the log
+    # channel. If the wrap marker is present, the orig_* locals below would
+    # capture already-wrapped methods and stack a second logging layer.
+    if getattr(Client, "_tgbot_send_methods_patched", False):
+        return
+    Client._tgbot_send_methods_patched = True
+
     orig_send_message = Client.send_message
     orig_send_video = Client.send_video
     orig_send_document = Client.send_document

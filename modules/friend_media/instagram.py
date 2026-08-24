@@ -61,9 +61,18 @@ def _ig_sessionid_from_jar():
     return None
 
 
+class IGUnavailable(Exception):
+    """Raised when Instagram archiving cannot run (no jar sessionid, login
+    failed, instagrapi missing). Carries an operator-actionable reason."""
+
+
 async def _ig_client():
     """Return a cached authenticated instagrapi client, rebuilding it when the
-    TTL lapses or the cookie jar changed on disk. None when unavailable."""
+    TTL lapses or the cookie jar changed on disk.
+
+    Raises IGUnavailable with the REASON when unavailable — a silent None made
+    the admin summary say "0 new IG stories" while the real problem was a dead
+    cookie jar."""
     async with _ig_lock:
         now = time.time()
         cl = _ig_client_cache["cl"]
@@ -74,24 +83,25 @@ async def _ig_client():
         try:
             from instagrapi import Client as IGClient
         except Exception:
-            logger.warning("[FriendMedia:ig] instagrapi not installed.")
-            return None
+            raise IGUnavailable("instagrapi not installed")
 
         def _build():
             c = IGClient()
             sid = _ig_sessionid_from_jar()
             if not sid:
-                raise RuntimeError("no sessionid in igcookies.txt")
+                raise RuntimeError(
+                    "no sessionid in cookies/instagram/igcookies.txt — "
+                    "re-upload a fresh jar via Admin → 🍪 Cookie Jars")
             if not c.login_by_sessionid(sid):
-                raise RuntimeError("login_by_sessionid failed")
+                raise RuntimeError("login_by_sessionid failed (session expired?) — "
+                                   "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
             return c
 
         loop = asyncio.get_event_loop()
         try:
             cl = await loop.run_in_executor(None, _build)
         except Exception as e:
-            logger.warning(f"[FriendMedia:ig] client build failed: {e}")
-            return None
+            raise IGUnavailable(str(e))
         _ig_client_cache["cl"] = cl
         _ig_client_cache["ts"] = now
         _ig_client_cache["mtime"] = _jar_mtime()
@@ -139,9 +149,7 @@ async def archive_instagram_stories(key, friend, bot=None):
     ig_user = friend.get("ig_username")
     if not ig_user:
         return 0
-    cl = await _ig_client()
-    if cl is None:
-        return 0
+    cl = await _ig_client()  # raises IGUnavailable with an actionable reason
     max_stories = int(getattr(config, "FRIEND_MEDIA_MAX_STORIES", 100) or 100)
     seen = {str(x) for x in (friend.get("seen_ig_story_pks") or [])}
     delivered = 0
@@ -201,9 +209,7 @@ async def archive_instagram_posts(key, friend, bot=None):
     ig_user = friend.get("ig_username")
     if not ig_user:
         return 0
-    cl = await _ig_client()
-    if cl is None:
-        return 0
+    cl = await _ig_client()  # raises IGUnavailable with an actionable reason
     max_posts = int(getattr(config, "FRIEND_MEDIA_MAX_POSTS_PER_RUN", 10) or 10)
     watermark = friend.get("last_ig_media_pk")
     delivered = 0

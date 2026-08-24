@@ -286,12 +286,33 @@ async def archive_friend_telegram(key, friend, bot=None, status_msg=None,
 
     Delivers to the safe destination. Returns a short human summary string.
     """
+    client = common.user_client()
+    if client is None or not getattr(client, "is_initialized", False):
+        return "user account not ready (premium session missing or still starting)"
     u_id = friend.get("telegram_user_id")
     if not u_id:
-        return "no telegram id"
-    client = common.user_client()
-    if client is None:
-        return "user account not started"
+        # Friend was stored UNRESOLVED (e.g. added while the user account was
+        # down): re-resolve by handle/@username now and persist the id so this
+        # repair runs at most once per friend.
+        handle = friend.get("handle") or friend.get("username")
+        if not handle:
+            return "no telegram id"
+        resolved = await resolve_telegram_user(handle)
+        new_id = getattr(resolved, "id", None) if resolved else None
+        if not new_id:
+            return f"could not resolve {handle} to a Telegram account"
+        u_id = int(new_id)
+        friend["telegram_user_id"] = u_id
+        patch = {"telegram_user_id": u_id}
+        fn = getattr(resolved, "first_name", None)
+        if fn:
+            friend["first_name"] = fn
+            patch["first_name"] = fn
+        un = getattr(resolved, "username", None)
+        if un:
+            friend["username"] = un
+            patch["username"] = un
+        await fm_state_safe_update(key, patch)
     # A friend that was never backfilled upgrades ANY check into its one-time
     # full backfill (auto-backfill-on-add may have been interrupted).
     if not full and not friend.get("backfilled"):
