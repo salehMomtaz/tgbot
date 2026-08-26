@@ -4,20 +4,10 @@ Keyboard builders for the admin console.
 Mirrors the original modules/admin.py keyboard functions exactly.
 """
 
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
 from .pot_menu import _pot_running
 from utils.gate import is_document_mode
-
-
-def _admin_webapp_url() -> str:
-    """HTTPS URL of the full admin WebApp console (creator auto-auths)."""
-    dom = getattr(config, "DOMAIN", "") or ""
-    if dom.startswith("https://"):
-        base = dom.rstrip("/")
-    else:
-        base = "https://tgbot.southpark.ir:8080"
-    return f"{base}/admin"
 
 
 def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -43,7 +33,6 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"💳 Subscriptions: {sub_badge}", callback_data="admin_sub_menu"),
          InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
         [InlineKeyboardButton("📸 Friend Media", callback_data="admin_friend_media_menu")],
-        [InlineKeyboardButton("🌐 WebApp Console", web_app=WebAppInfo(url=_admin_webapp_url()))],
         [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"),
          InlineKeyboardButton("🔄 Restart Bot", callback_data="admin_restart")],
         [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]

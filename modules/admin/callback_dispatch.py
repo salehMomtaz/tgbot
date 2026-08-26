@@ -725,16 +725,15 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             [InlineKeyboardButton(f"{'🔴 Disable' if s.get('enabled') else '🟢 Enable'} subscription mode", callback_data="admin_sub_toggle")],
             [InlineKeyboardButton(f"Free tier: {free}", callback_data="admin_sub_toggle_free")],
             [InlineKeyboardButton("➕ Add channel", callback_data="admin_sub_add_channel"), InlineKeyboardButton("➖ Remove channel", callback_data="admin_sub_remove_channel")],
-            [InlineKeyboardButton("🌐 WebApp", callback_data="admin_sub_webapp"), InlineKeyboardButton("📋 List subs", callback_data="admin_sub_list")],
             [InlineKeyboardButton("➕ Grant sub", callback_data="admin_sub_grant"), InlineKeyboardButton("➖ Revoke sub", callback_data="admin_sub_revoke")],
+            [InlineKeyboardButton("📋 List subs", callback_data="admin_sub_list")],
             [InlineKeyboardButton("🔄 Refresh", callback_data="admin_sub_menu"), InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
         ])
         await callback_query.message.edit_text(
             f"💳 **Subscriptions**\n\n"
             f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel(s): `{ch}`\n"
             f"Active subs: **{active_count}**\nTiers: {tier_lines}\n\n"
-            f"Free users go last in the download queue (priority 0 vs 1-3). "
-            f"WebApp at `https://tgbot.southpark.ir:8080/` (root auto-redirect, `/app` user, `/admin/subscription` admin).",
+            f"Free users go last in the download queue (priority 0 vs 1-3).",
             reply_markup=kb
         )
         await callback_query.answer()
@@ -795,24 +794,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             f"🗑 **Remove force-join channel**\n\nCurrent: `{cur_txt2}`\n\n"
             "Send the **@username** or numeric ID to remove (or `all` / `0` to clear).",
             reply_markup=back_markup
-        )
-        await callback_query.answer()
-
-    elif data == "admin_sub_webapp":
-        # Prefer current DOMAIN, fallback to generic
-        dom = getattr(config, "DOMAIN", "") or "https://tgbot.southpark.ir:8080"
-        hint = f"Open `{dom}/admin/subscription`  (or `{dom}/` landing, auto-redirects)"
-        try:
-            from modules.subscription.webapp import _admin_token
-            tok = _admin_token()
-            hint += f"\nAdmin-Token: `{tok}` (or use Telegram WebApp `initData`)"
-        except Exception:
-            pass
-        hint += "\n\nInside Telegram: root `https://tgbot.southpark.ir:8080/` auto-detects role (admin→/admin, user→/app). Outside: paste token in page."
-        await callback_query.message.edit_text(
-            f"🌐 **Subscription WebApp**\n\n{hint}\n\n"
-            "Best opened as Telegram WebApp — `initData` authenticates creator automatically. Outside Telegram, paste token.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="admin_sub_menu")]])
         )
         await callback_query.answer()
 

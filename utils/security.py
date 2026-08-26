@@ -11,8 +11,6 @@ import threading
 _LOCK = threading.Lock()
 # user_id -> list[timestamps]
 _FLOOD: dict[int, list[float]] = {}
-# global IP-style simple token bucket for webapp
-_WEBAPP_HITS: dict[str, list[float]] = {}
 
 
 def is_flood(user_id: int, window: int = 60, limit: int = 8) -> bool:
@@ -28,20 +26,6 @@ def is_flood(user_id: int, window: int = 60, limit: int = 8) -> bool:
         lst.append(now)
         _FLOOD[user_id] = lst
         return False
-
-
-def check_webapp_rate(ip: str, window: int = 60, limit: int = 30) -> bool:
-    """True if allowed, False if rate-limited. For FastAPI dependency."""
-    now = time.monotonic()
-    with _LOCK:
-        lst = _WEBAPP_HITS.get(ip, [])
-        lst = [t for t in lst if now - t < window]
-        if len(lst) >= limit:
-            _WEBAPP_HITS[ip] = lst
-            return False
-        lst.append(now)
-        _WEBAPP_HITS[ip] = lst
-        return True
 
 
 # Input sanitization helpers

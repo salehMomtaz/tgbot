@@ -363,29 +363,23 @@ def _ig_sessionid_from_jar() -> str | None:
     return None
 
 
-def _ig_login(cl, log_prefix: str = "[DirectForward/IG]",
-              allow_password_fallback: bool = True) -> None:
+def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
     """Authenticate the instagrapi client. Order:
     1. resume persisted session settings (cheapest, zero challenges),
-    2. login by the sessionid from the shared IG cookie jar,
-    3. username/password (+ TOTP) as last resort.
+    2. login by the sessionid from the shared IG cookie jar.
 
-    When a ``sessionid`` is present but ``login_by_sessionid`` fails, we DO NOT
-    silently fall through to username/password: that path hammers
+    There is deliberately NO username/password fallback: password login hammers
     ``accounts/login/`` and deepens Instagram's 429 rate-limit (the exact
-    failure mode observed 2026-08-24..26). Instead we raise, unless the caller
-    explicitly allows the password fallback (``allow_password_fallback``).
+    failure mode observed 2026-08-24..26). The operator disabled the password
+    method entirely — a stale sessionid means "upload a fresh igcookies.txt and
+    pass the checkpoint in the official app", never re-entering credentials.
     """
-    from instagrapi.exceptions import LoginRequired
-
     if os.path.exists("direct_ig_session.json") and os.path.getsize("direct_ig_session.json") > 0:
         try:
             cl.load_settings("direct_ig_session.json")
             # Validate the persisted session WITHOUT calling login(): instagrapi's
             # login() demands both username+password, but a good persisted session
-            # needs neither — account_info() alone proves it's alive. Requiring a
-            # password here made the resume path dead-on-arrival for setups that
-            # rely on cookie-jar sessionids (the common direct-forward config).
+            # needs neither — account_info() alone proves it's alive.
             cl.account_info()  # forces a session check
             logger.info(f"{log_prefix} Resumed persisted direct session.")
             return
@@ -393,53 +387,23 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]",
             logger.info(f"{log_prefix} Persisted session unusable ({e}); trying sessionid.")
 
     sessionid = _ig_sessionid_from_jar()
-    if sessionid:
+    if not sessionid:
+        raise RuntimeError(
+            "No sessionid in igcookies.txt. Upload a fresh igcookies.txt "
+            "(Admin → Cookies) — there is no password login fallback by design.")
+    if cl.login_by_sessionid(sessionid):
+        logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
+        # Persist the live session tokens Instagram just re-issued back into the
+        # shared jar so it stays warm (instagrapi discards them).
         try:
-            if cl.login_by_sessionid(sessionid):
-                logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
-                # Persist the live session tokens Instagram just re-issued back
-                # into the shared jar so it stays warm (instagrapi discards them).
-                try:
-                    ig_anti_detect.write_back_session(cl, config.IG_COOKIES)
-                except Exception as wb:
-                    logger.warning(f"{log_prefix} session write-back failed: {wb}")
-                return
-            else:
-                logger.warning(f"{log_prefix} login_by_sessionid returned falsy; "
-                               f"not falling through to password.")
-        except Exception as e:
-            # Explicitly surface the exact exception type so a future checkpoint
-            # vs rate-limit vs malformed-session is distinguishable at a glance.
-            logger.warning(f"{log_prefix} sessionid login FAILED "
-                           f"({type(e).__name__}: {e}); "
-                           f"{'falling back to password' if allow_password_fallback else 'NOT falling back to password'}).")
-            if allow_password_fallback:
-                sessionid = None  # clear so the password branch runs below
-            else:
-                raise
-
-    if sessionid is not None and not allow_password_fallback:
-        raise RuntimeError(
-            "Sessionid present but login_by_sessionid failed; refusing password "
-            "fallback to avoid deepening Instagram's login rate-limit. Upload a "
-            "fresh igcookies.txt (Admin → Cookies) or pass the checkpoint in the "
-            "official app, then restart.")
-
-    if not (config.IG_DIRECT_USERNAME and config.IG_DIRECT_PASSWORD):
-        raise RuntimeError(
-            "No usable IG session. Upload a fresh igcookies.txt (Admin → Cookies) "
-            "or set IG_DIRECT_USERNAME/IG_DIRECT_PASSWORD in .env.")
-
-    kwargs = {}
-    if config.IG_DIRECT_TOTP_SEED:
-        kwargs["verification_code"] = cl.totp_generate_code(config.IG_DIRECT_TOTP_SEED)
-    try:
-        if cl.login(config.IG_DIRECT_USERNAME, config.IG_DIRECT_PASSWORD, **kwargs):
-            logger.info(f"{log_prefix} Logged in with username/password.")
-            return
-    except LoginRequired:
-        raise
-    raise RuntimeError("Instagram login failed (all methods exhausted).")
+            ig_anti_detect.write_back_session(cl, config.IG_COOKIES)
+        except Exception as wb:
+            logger.warning(f"{log_prefix} session write-back failed: {wb}")
+        return
+    raise RuntimeError(
+        "login_by_sessionid failed (session expired/checkpointed). Upload a "
+        "fresh igcookies.txt (Admin → Cookies) or pass the checkpoint in the "
+        "official app — no password login fallback by design.")
 
 
 async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
@@ -628,12 +592,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
     login_attempt = 0
     while True:
         try:
-            # First attempt: sessionid-only (DO NOT fall through to password —
-            # a failing sessionid should freeze/alert, not hammer accounts/login/).
-            # Subsequent attempts may allow the password fallback if explicitly
-            # configured, but by default a present-but-failing sessionid raises
-            # (caught below) rather than silently deepening the 429.
-            await loop.run_in_executor(None, lambda: _ig_login(cl, allow_password_fallback=False))
+            # Sessionid-only: there is no password login fallback (it deepened the
+            # 429). A failing sessionid raises (caught below) → backoff/alert.
+            await loop.run_in_executor(None, lambda: _ig_login(cl))
             cl.dump_settings("direct_ig_session.json")
             os.chmod("direct_ig_session.json", 0o600)
             # Cold-start warmup: a few paced, benign reads so the first real

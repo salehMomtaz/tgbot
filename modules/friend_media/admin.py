@@ -115,22 +115,42 @@ def _settings_keyboard():
     ])
 
 
+def _friend_platform(friend):
+    """Return the friend's canonical platform: 'ig' when it is an Instagram
+    friend, else 'tg'. A record is IG only when it carries an ig_username AND is
+    not a Telegram entity (platform=="instagram" or no telegram_user_id)."""
+    if (friend or {}).get("ig_username") and (friend.get("platform") == "instagram"
+                                              or not friend.get("telegram_user_id")):
+        return "ig"
+    return "tg"
+
+
 def _friend_keyboard(key, friend):
+    """Platform-SPECIFIC per-friend menu: a Telegram friend menu never shows IG
+    controls, and an Instagram friend menu never shows Telegram controls. The
+    two are modelled separately by design (operator adds the same real person to
+    each list independently)."""
+    plat = _friend_platform(friend)
+    if plat == "ig":
+        igs = "✅" if friend.get("ig_stories") else "❌"
+        igp = "✅" if friend.get("ig_posts") else "❌"
+        rows = [
+            [InlineKeyboardButton("🔍 Check now (new)", callback_data=f"fm_arc:{key}")],
+            [InlineKeyboardButton(f"📷 IG stories: {igs}", callback_data=f"fm_ig_s:{key}"),
+             InlineKeyboardButton(f"🖼 IG posts: {igp}", callback_data=f"fm_ig_p:{key}")],
+            [InlineKeyboardButton("🗂 Archive (zip)", callback_data=f"fm_ig_archive:{key}")],
+            [InlineKeyboardButton("🗑 Remove", callback_data=f"fm_del:{key}"),
+             InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")],
+        ]
+        return InlineKeyboardMarkup(rows)
+
     pp = "✅" if friend.get("profile_photos") else "❌"
     st = "✅" if friend.get("stories") else "❌"
-    igs = "✅" if friend.get("ig_stories") else "❌"
-    igp = "✅" if friend.get("ig_posts") else "❌"
-    ig_en = "✅" if friend.get("ig_enabled") else "❌"
     rows = [
         [InlineKeyboardButton("🔍 Check now (new)", callback_data=f"fm_arc:{key}"),
          InlineKeyboardButton("⬇️ Full backfill", callback_data=f"fm_backfill:{key}")],
         [InlineKeyboardButton(f"📸 Pics: {pp}", callback_data=f"fm_tg_pp:{key}"),
          InlineKeyboardButton(f"📖 Stories: {st}", callback_data=f"fm_tg_st:{key}")],
-        [InlineKeyboardButton(f"🟣 IG: {ig_en}", callback_data=f"fm_ig_toggle:{key}"),
-         InlineKeyboardButton("✏️ Set IG @", callback_data=f"fm_ig_set:{key}")],
-        [InlineKeyboardButton(f"📷 IG stories: {igs}", callback_data=f"fm_ig_s:{key}"),
-         InlineKeyboardButton(f"🖼 IG posts: {igp}", callback_data=f"fm_ig_p:{key}")],
-        [InlineKeyboardButton("🗂 Archive (zip)", callback_data=f"fm_ig_archive:{key}")],
         [InlineKeyboardButton("🗑 Remove", callback_data=f"fm_del:{key}"),
          InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")],
     ]
@@ -138,22 +158,24 @@ def _friend_keyboard(key, friend):
 
 
 def _label(friend):
+    plat = _friend_platform(friend)
+    if plat == "ig":
+        ig = friend.get("ig_username")
+        sub = []
+        if friend.get("ig_stories"):
+            sub.append("📷")
+        if friend.get("ig_posts"):
+            sub.append("🖼")
+        bits = f"🟣@{ig}{''.join(sub)}"
+        return f"• `@{ig}`{''.join(' '+s for s in sub)}"
     name = friend.get("first_name") or friend.get("username") or friend.get("handle") or "?"
     tg = friend.get("telegram_user_id")
-    ig = friend.get("ig_username")
     bits = []
     if friend.get("profile_photos"):
         n = len(friend.get("seen_photo_ids") or [])
         bits.append(f"📸pics({n})")
     if friend.get("stories"):
         bits.append("📖stories")
-    if friend.get("ig_enabled") and ig:
-        sub = []
-        if friend.get("ig_stories"):
-            sub.append("📷")
-        if friend.get("ig_posts"):
-            sub.append("🖼")
-        bits.append(f"🟣@{ig}{''.join(sub)}")
     tog = " ".join(bits) if bits else "∅ nothing"
     mark = " ✓backfilled" if friend.get("backfilled") else ""
     return f"• `{name}` (tg:{tg or '?'}){mark} — {tog}"
@@ -495,26 +517,11 @@ async def fm_callback_dispatch(client, callback_query):
     if data.startswith("fm_tg_st:"):
         await _toggle("stories")
         return
-    if data.startswith("fm_ig_toggle:"):
-        await _toggle("ig_enabled")
-        return
     if data.startswith("fm_ig_s:"):
         await _toggle("ig_stories")
         return
     if data.startswith("fm_ig_p:"):
         await _toggle("ig_posts")
-        return
-
-    if data.startswith("fm_ig_set:"):
-        key = data.split(":", 1)[1]
-        USER_STATES[user_id] = f"waiting_for_friend_ig:{key}"
-        await callback_query.message.edit_text(
-            "✏️ **Set Instagram @username** for this friend.\n\n"
-            "Send the username WITHOUT the @ (e.g. `nature_lover`). Only content "
-            "posted AFTER linking is delivered — no older IG history is fetched.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Cancel", callback_data=f"fm_friend:{key}")]]))
-        await callback_query.answer()
         return
 
     if data.startswith("fm_del:"):
@@ -540,13 +547,13 @@ async def fm_callback_dispatch(client, callback_query):
 
 
 def _platform_of(friend):
-    """Derive which list a friend belongs to. A friend qualifies as IG if it
-    carries an Instagram username; TG if it carries a Telegram user id. A friend
-    with both appears in both lists (identity is not mutually exclusive here —
-    the record may hold a linked IG handle for a TG contact)."""
-    ig = bool((friend or {}).get("ig_username"))
-    tg = bool((friend or {}).get("telegram_user_id"))
-    return ("ig" if ig else None, "tg" if tg else None)
+    """Which list a friend belongs to. TG and IG are modelled as SEPARATE
+    friend records — a friend is either TG (telegram identity) or IG (instagram
+    identity), never both. (Operator adds the same real person to each list
+    independently when they exist on both.)"""
+    if _friend_platform(friend) == "ig":
+        return ("ig", None)
+    return (None, "tg")
 
 
 def _split_friends(friends, plat):
@@ -903,22 +910,6 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         await message.reply_text(
             f"✅ Added `{getattr(u, 'first_name', '') or u.id}` (tg:{u.id}) — "
             "full backfill starting.", reply_markup=back_markup)
-        return
-
-    if state.startswith("waiting_for_friend_ig:"):
-        key = state.split(":", 1)[1]
-        ig = txt.lstrip("@")
-        await fm_state.update_friend(key, {"ig_username": ig,
-                                           "ig_enabled": True,
-                                           "ig_stories": True,
-                                           "last_ig_media_pk": None,
-                                           "seen_ig_story_pks": []})
-        USER_STATES.pop(user_id, None)
-        await _clear_prompt()
-        await message.reply_text(
-            f"✅ Instagram set to `@{ig}`. First run records a watermark — only "
-            "content posted AFTER now will be delivered (no older IG history).",
-            reply_markup=back_markup)
         return
 
     if state == "waiting_for_friend_dest":

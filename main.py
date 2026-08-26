@@ -569,16 +569,6 @@ async def main_engine():
 
     # 9. Configure and launch Uvicorn (FastAPI Web Server) on port 8080
     from modules.stream_handler import fastapi_app
-    try:
-        import modules.subscription.webapp as _sub_web
-        _sub_web.mount(fastapi_app)
-    except Exception as e:
-        logging.warning(f"[Subscription] Webapp mount failed: {e}")
-    try:
-        import modules.admin_webapp as _adm_web
-        _adm_web.mount(fastapi_app)
-    except Exception as e:
-        logging.warning(f"[AdminWebApp] Mount failed: {e}")
 
     uvicorn_args = {
         "app": fastapi_app,
