@@ -32,8 +32,7 @@ invariants** so you don't have to rediscover them.
 | Change upload/splitting | `utils/uploader_handler.py` |
 | Change the PO-token provider lifecycle | `utils/pot_provider.py` |
 | Add an admin-console feature | `modules/admin/` (see sub-modules below) |
-| Change the admin **WebApp** console (Mini App) | `modules/admin_webapp/` (see sub-modules below) |
-| Change Mini App / webapp auth | `utils/webapp_auth.py` (shared by admin console + subscription webapp) |
+| Change the admin **WebApp** console (Mini App) | REMOVED 2026-08-26 — do not re-add without an explicit ask |
 | Change how links/messages are handled | `modules/downloader_handler.py` |
 | Change playlist tiers / detection / per-video download | `utils/downloader/playlists.py` (`PLAYLIST_TIERS`), `utils/downloader/url_normalize.py` (`is_playlist_url`), `utils/downloader/playlists.py` (`extract_playlist_meta`), `utils/downloader/download.py` (`download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader/cookies.py`, `utils/downloader/download.py`) |
@@ -76,28 +75,15 @@ invariants** so you don't have to rediscover them.
 | Handler registration & text/command routing | `modules/admin/register.py` |
 | Module-level state (USER_STATES, PREMIUM_GEN, etc.) | `modules/admin/state.py` |
 
-### `modules/admin_webapp/` package (Full admin console as a Telegram Mini App)
+### `modules/admin_webapp/` — REMOVED (2026-08-26)
 
-The whole in-chat admin console is mirrored as a webapp at `/admin` (FastAPI
-mounted in `main.py`; auth via `utils/webapp_auth.py` — Telegram initData of the
-creator OR `X-Admin-Token`, an HMAC(BOT_TOKEN,"admin-sub")[:16] that is never
-stored). The "🌐 WebApp Console" inline button in the console keyboard
-(`modules/admin/keyboards.py::_admin_webapp_url`) opens it; the creator landing
-`/` auto-redirects there. Server-side actions deliberately reuse the same
-storage/utility code as the in-chat console so the two can never drift.
-
-| Want to… | Edit |
-|---|---|
-| Server-side action implementations (transport-free core) | `modules/admin_webapp/actions.py` |
-| FastAPI endpoints (prefix `/admin/api`, all creator-gated) | `modules/admin_webapp/api.py` |
-| SPA HTML/CSS/JS (single page, all console tabs) | `modules/admin_webapp/ui.py` |
-| Mount + `/admin` page serving | `modules/admin_webapp/__init__.py` (`mount(fastapi_app)`) |
-| WebApp auth (initData verify + admin token) | `utils/webapp_auth.py` |
-
-WebApp Premium session-generation uses its OWN `WEB_PREMIUM_GEN` state keyed by
-user id (never the in-chat `modules/admin/state.py::PREMIUM_GEN`); same TTL and
-temp-client discard discipline. Never persist long probes inline — run them via
-`run_in_executor` (cookie test / PO diagnose / X test) exactly like the console.
+The Telegram Mini App admin console webapp (and the subscription webapp) were
+removed: `modules/admin_webapp/`, `modules/subscription/webapp.py`,
+`utils/webapp_auth.py` are deleted, and their mounts/buttons/commands were
+stripped (`🌐 WebApp Console` button, `admin_sub_webapp` handler, `/admin_token`).
+The FastAPI/uvicorn server still runs for the **streaming endpoints only**
+(`modules/stream_handler.py::fastapi_app`) — the `/stream` links the downloader
+hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
 
 ### `modules/direct_forward/` package (replaces `modules/direct_forward.py`)
 
@@ -321,7 +307,11 @@ temp-client discard discipline. Never persist long probes inline — run them vi
     sends photos, videos, reels, story shares, tweet shares and plain links
     into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi` (sync → always
     via `run_in_executor`; bootstraps its login from the `sessionid` in the
-    igcookies jar, falls back to user/pass). Each platform runs in its own
+    igcookies jar). **There is NO password login fallback (removed 2026-08-26)**
+    — password login hammered `accounts/login/` and deepened Instagram's 429
+    rate-limit on the VPS IP, so `_ig_login` is sessionid-only (resume persisted
+    session → `login_by_sessionid` from the jar → else raise, never credentials).
+    Each platform runs in its own
     contained loop (`try/except` per poll; LoginRequired → re-login once).
     **No third-party APIs.** Downloads route through the normal yt-dlp
     pipeline (with cookie jars — write-back keeps them warm) and enqueue on
