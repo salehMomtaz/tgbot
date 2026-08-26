@@ -100,6 +100,18 @@ Text states dispatched before the id gate in `register.py`:
   `archive_instagram_stories`/`_posts` now invalidate the cached client and
   retry once via `_ig_client_retry()` — the old code reported "IG stories
   skipped" and dropped live stories.
+- **The FM IG client MUST install the anti-detect transport.** A plain
+  `IGClient()` rides Python `requests` TLS (a JA3 "this is a script"
+  fingerprint) that Instagram answers with the same redirect loop. `_build()`
+  now applies `ig_anti_detect.install_transport` (curl_cffi chrome136) +
+  `pin_geo` + `install_token_echo`, mirroring the direct_forward worker.
+- **instagrapi discards session rotation → write it back.** After every
+  successful `login_by_sessionid`, `ig_anti_detect.write_back_session()` overlays
+  the live `sessionid`/`csrftoken`/`ds_user_id`/`mid`/`rur` back into
+  `igcookies.txt` via `cookie_manager.overlay_cookies()` (atomic, additive,
+  preserves 0o444). Without this the jar's sessionid went stale within hours
+  even though the file mtime looked fresh — the cookie-refresher's `mtime<20h`
+  skip then never re-warmed it.
 
 ## Config knobs (.env)
 
