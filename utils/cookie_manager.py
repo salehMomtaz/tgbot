@@ -357,6 +357,46 @@ def purge_snapshots(original_path: str | None = None) -> None:
                 pass
 
 
+def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> int:
+    """Overlay specific cookie value updates into a Netscape jar, atomically.
+
+    ``updates`` maps ``(domain, name) -> new_value``. Only the named cookies are
+    rewritten (rotated session tokens — e.g. the ``sessionid`` an instagrapi
+    login just re-issued); every other line is preserved byte-for-byte, and no
+    cookie is ever deleted. The jar's previous file mode (0o444 at rest) is
+    restored. Returns the number of lines actually changed, or -1 when the jar
+    was missing/unreadable and nothing could be safely written."""
+    if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
+        return -1
+    entries = _parse_cookie_lines(cookie_path)
+    if not entries:
+        return -1
+    changed = 0
+    for (domain, name), value in updates.items():
+        # Find the existing line for (domain, name) and swap in the new value.
+        # The key is (domain, path, name) in the entries map — locate by domain+name.
+        for key, line in list(entries.items()):
+            if key[0] == domain and key[2] == name:
+                parts = line.split("\t")
+                if len(parts) >= 7 and parts[6] != value:
+                    parts[6] = value
+                    entries[key] = "\t".join(parts)
+                    changed += 1
+                break
+        else:
+            # Cookie absent from the jar: append a new entry (session cookie form).
+            new_line = f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}"
+            entries[(domain, "/", name)] = new_line
+            changed += 1
+    if changed == 0:
+        return 0
+    prev_mode = get_jar_mode(cookie_path)
+    lines = [entries[k] for k in sorted(entries.keys())]
+    content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
+    _atomic_write(cookie_path, content, mode=prev_mode)
+    return changed
+
+
 # =========================================================================
 # Error classification (drives failure bookkeeping only, not control flow)
 # =========================================================================

@@ -397,6 +397,12 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]",
         try:
             if cl.login_by_sessionid(sessionid):
                 logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
+                # Persist the live session tokens Instagram just re-issued back
+                # into the shared jar so it stays warm (instagrapi discards them).
+                try:
+                    ig_anti_detect.write_back_session(cl, config.IG_COOKIES)
+                except Exception as wb:
+                    logger.warning(f"{log_prefix} session write-back failed: {wb}")
                 return
             else:
                 logger.warning(f"{log_prefix} login_by_sessionid returned falsy; "

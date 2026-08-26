@@ -126,6 +126,12 @@ async def _ig_client():
             if not c.login_by_sessionid(sid):
                 raise RuntimeError("login_by_sessionid failed (session expired?) — "
                                    "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
+            # Persist the live session tokens Instagram just re-issued back into
+            # the shared jar so it stays warm (instagrapi discards them).
+            try:
+                ig_anti_detect.write_back_session(c, _IG_JAR)
+            except Exception as wb:
+                logger.warning(f"[FriendMedia:ig] session write-back failed: {wb}")
             return c
 
         loop = asyncio.get_event_loop()

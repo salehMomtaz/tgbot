@@ -39,6 +39,7 @@ missing, so this file can never take the worker down.
 """
 
 import logging
+import os
 import random
 import time
 
@@ -335,7 +336,6 @@ def warmup(cl, steps: int = 3) -> None:
     a couple of ordinary reads and human pacing makes the transition look like
     an app open, not a bot starting a job.
     """
-
     def _do(label, fn):
         try:
             fn()
@@ -348,3 +348,41 @@ def warmup(cl, steps: int = 3) -> None:
     for _ in range(max(1, min(steps, 6))):
         _do("account_info", lambda: cl.account_info())
         _do("direct_threads(5)", lambda: cl.direct_threads(amount=5))
+
+
+def write_back_session(cl, jar_path: str) -> None:
+    """Persist the LIVE session tokens Instagram just re-issued back into the
+    Netscape jar, so the shared ``igcookies.txt`` (used by yt-dlp AND the DM
+    workers) stays warm between browser refreshes.
+
+    instagrapi stores every ``Set-Cookie`` rotation in ``cl.private.cookies``
+    but never writes them back to the jar — so a session Instagram rotates
+    during a private-API login was silently discarded, and the jar's
+    ``sessionid`` went stale within hours (surfacing as the "Exceeded 30
+    redirects" login-wall). This overlays the fresh ``sessionid`` /
+    ``csrftoken`` / ``ds_user_id`` / ``mid`` / ``rur`` values into the jar via
+    cookie_manager's atomic overlay — pure additive, never deletes, preserves
+    the 0o444 lock, refuses an empty jar. No-op on any failure.
+
+    NOTE: do NOT overlay the shbid/shbts pair or other echo tokens — those are
+    per-transport anti-bot markers, not session cookies; the jar only needs the
+    session identity for yt-dlp to reuse.
+    """
+    if not jar_path or not os.path.exists(jar_path):
+        return
+    try:
+        cookies = getattr(cl.private, "cookies", None)
+        updates: dict[tuple[str, str], str] = {}
+        for name in ("sessionid", "csrftoken", "ds_user_id", "mid", "rur"):
+            val = cookies.get(name) if cookies is not None else None
+            if val:
+                updates[(".instagram.com", name)] = str(val)
+        if not updates:
+            return
+        from utils import cookie_manager
+        changed = cookie_manager.overlay_cookies(jar_path, updates)
+        if changed:
+            logger.info(f"[IG anti-detect] wrote back {changed} live session "
+                        f"cookie(s) to {jar_path}")
+    except Exception as e:
+        logger.warning(f"[IG anti-detect] session write-back failed: {e}")
