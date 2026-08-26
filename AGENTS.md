@@ -818,15 +818,28 @@ Don't port it to Go.
 - **Friend Media Archiver (`modules/friend_media/`) NEVER messages anyone** —
   the only friend-touching call is a silent `add_contact`. Reads ride the
   premium user session (`premium_app`), delivery goes through the BOT to the
-  configured destination (default log channel → forward to creator). All state
-  lives in `cache/friend_media_state.json` (exempt from the cache cleaner):
-  seen photo/story/IG-pk ids + IG posts watermark — the first IG run primes
-  the watermark and delivers NOTHING (never fetch older IG content). Archives
+  configured destination. TM delivery = the premium user account uploads to
+  `LOG_CHANNEL_ID` (archive), then the BOT `copy_message`s it to the creator DM
+  — `copy_message` re-uses the file_id (no re-download, no size limit) and
+  carries NO "Forwarded from" header (sender shows as the BOT), and it can
+  quote-reply to an existing bot-chat message. Do NOT use `forward_messages`
+  (it stamps the "Forwarded from" header). This mirrors the >2 GB premium-upload
+  path in `utils/uploader_handler.py::_stage_and_relay`. All state lives in
+  `cache/friend_media_state.json` (exempt from the cache cleaner): seen
+  photo/story/IG-pk ids + IG posts watermark — the first IG run primes the
+  watermark and delivers NOTHING (never fetch older IG content). Archives
   serialize behind one asyncio.Lock; the watcher task starts unconditionally
   and self-gates each cycle on live `FRIEND_MEDIA_ENABLED` /
-  `FRIEND_MEDIA_SCHEDULE_MINUTES` (jittered sleep, no fixed cadence). Console
-  settings persist via `dotenv.set_key('.env')` + `setattr(config)`. Kurigram
-  treats digit-string ids as PHONE numbers — pass user ids as `int`.
+  `FRIEND_MEDIA_SCHEDULE_MINUTES` (default 60 min, jittered sleep, no fixed
+  cadence). Console: friends list is SPLIT into "TG Friends" / "IG Friends"
+  (derived from `telegram_user_id` vs `ig_username`); each list has ☑️ Select
+  (multi-select) + 🗑 Delete all. Per-friend "🗂 Archive (zip)" downloads the IG
+  profile pic + posts/reels + highlights (with per-step jitter) into a zip. IG
+  client re-fetches the jar sessionid and retries once on a mid-run session
+  rotation (`_ig_client_retry`). Console settings persist via
+  `dotenv.set_key('.env')` + `setattr(config)`. Kurigram treats digit-string
+  ids as PHONE numbers — pass user ids as `int`. `search_contacts` returns a
+  `FoundContacts` object (use `.users`, not a bare list).
 
 ## When porting from balebot
 

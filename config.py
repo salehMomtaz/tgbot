@@ -296,7 +296,8 @@ FRIEND_MEDIA_MAX_PHOTOS = get_env_int("FRIEND_MEDIA_MAX_PHOTOS", 2000)
 FRIEND_MEDIA_MAX_STORIES = get_env_int("FRIEND_MEDIA_MAX_STORIES", 100)
 # Max IG feed posts delivered per check (new-posts-only; watermark primed on link).
 FRIEND_MEDIA_MAX_POSTS_PER_RUN = get_env_int("FRIEND_MEDIA_MAX_POSTS_PER_RUN", 10)
-# Optional auto-archive loop (minutes). 0 = manual only (recommended for large lists).
-FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 0)
+# Optional auto-archive loop (minutes). 0 = manual only. Default 60 (one hour,
+# shared across both Telegram and Instagram checks).
+FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 60)
 # Per-item send delay (seconds) to reduce FloodWait risk when archiving hundreds.
 FRIEND_MEDIA_SEND_DELAY = get_env_int("FRIEND_MEDIA_SEND_DELAY", 1)

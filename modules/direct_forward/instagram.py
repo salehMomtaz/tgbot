@@ -157,8 +157,28 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
     from the CDN here. Returns False (so the caller can fall back to yt-dlp)
     when the media is actually a reel (clips product type)."""
     loop = asyncio.get_event_loop()
-    async with _ig_api_lock:
-        media = await loop.run_in_executor(None, cl.media_info, pk)
+    try:
+        async with _ig_api_lock:
+            media = await loop.run_in_executor(None, cl.media_info, pk)
+    except Exception as e:
+        # Story media objects route through instagrapi's ``user_stream_by_id_v1``,
+        # which is session-gated: if Instagram rotated the sessionid mid-run (the
+        # account is still flagged after the recent checkpoint), ``media_info``
+        # raises LoginRequired and the story is silently lost. Re-login once from
+        # the freshest jar sessionid and retry before giving up.
+        if type(e).__name__ == "LoginRequired":
+            logger.info(f"[DirectForward/IG] media_info for {pk} hit LoginRequired; "
+                        f"re-logging once and retrying.")
+            try:
+                await loop.run_in_executor(None, lambda: _ig_login(cl))
+                async with _ig_api_lock:
+                    media = await loop.run_in_executor(None, cl.media_info, pk)
+            except Exception as e2:
+                logger.warning(f"[DirectForward/IG] story/pk {pk} re-login retry failed "
+                               f"({type(e2).__name__}: {e2}); giving up.")
+                raise
+        else:
+            raise
 
     mt = getattr(media, "media_type", None)        # 1=photo, 2=video, 8=album
     product_type = getattr(media, "product_type", None)
@@ -325,7 +345,9 @@ def _ig_sessionid_from_jar() -> str | None:
     client can bootstrap from the exact session yt-dlp already uses (and keeps
     fresh via write-back)."""
     jar = config.IG_COOKIES
-    if not os.path.exists(jar):
+    if not jar or not os.path.exists(jar):
+        logger.warning(f"[DirectForward/IG] cookie jar missing (config.IG_COOKIES={jar!r}); "
+                       f"no sessionid available.")
         return None
     try:
         with open(jar, "r", encoding="utf-8", errors="replace") as f:
@@ -335,16 +357,25 @@ def _ig_sessionid_from_jar() -> str | None:
                 parts = raw.rstrip("\n").split("\t")
                 if len(parts) >= 7 and parts[5] == "sessionid" and parts[6]:
                     return parts[6]
-    except Exception:
-        pass
+        logger.warning(f"[DirectForward/IG] cookie jar {jar!r} has NO sessionid line.")
+    except Exception as e:
+        logger.warning(f"[DirectForward/IG] failed to read sessionid from {jar!r}: {e}")
     return None
 
 
-def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
+def _ig_login(cl, log_prefix: str = "[DirectForward/IG]",
+              allow_password_fallback: bool = True) -> None:
     """Authenticate the instagrapi client. Order:
     1. resume persisted session settings (cheapest, zero challenges),
     2. login by the sessionid from the shared IG cookie jar,
-    3. username/password (+ TOTP) as last resort."""
+    3. username/password (+ TOTP) as last resort.
+
+    When a ``sessionid`` is present but ``login_by_sessionid`` fails, we DO NOT
+    silently fall through to username/password: that path hammers
+    ``accounts/login/`` and deepens Instagram's 429 rate-limit (the exact
+    failure mode observed 2026-08-24..26). Instead we raise, unless the caller
+    explicitly allows the password fallback (``allow_password_fallback``).
+    """
     from instagrapi.exceptions import LoginRequired
 
     if os.path.exists("direct_ig_session.json") and os.path.getsize("direct_ig_session.json") > 0:
@@ -367,8 +398,26 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
             if cl.login_by_sessionid(sessionid):
                 logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
                 return
+            else:
+                logger.warning(f"{log_prefix} login_by_sessionid returned falsy; "
+                               f"not falling through to password.")
         except Exception as e:
-            logger.warning(f"{log_prefix} sessionid login failed ({e}); trying password.")
+            # Explicitly surface the exact exception type so a future checkpoint
+            # vs rate-limit vs malformed-session is distinguishable at a glance.
+            logger.warning(f"{log_prefix} sessionid login FAILED "
+                           f"({type(e).__name__}: {e}); "
+                           f"{'falling back to password' if allow_password_fallback else 'NOT falling back to password'}).")
+            if allow_password_fallback:
+                sessionid = None  # clear so the password branch runs below
+            else:
+                raise
+
+    if sessionid is not None and not allow_password_fallback:
+        raise RuntimeError(
+            "Sessionid present but login_by_sessionid failed; refusing password "
+            "fallback to avoid deepening Instagram's login rate-limit. Upload a "
+            "fresh igcookies.txt (Admin → Cookies) or pass the checkpoint in the "
+            "official app, then restart.")
 
     if not (config.IG_DIRECT_USERNAME and config.IG_DIRECT_PASSWORD):
         raise RuntimeError(
@@ -573,7 +622,12 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
     login_attempt = 0
     while True:
         try:
-            await loop.run_in_executor(None, lambda: _ig_login(cl))
+            # First attempt: sessionid-only (DO NOT fall through to password —
+            # a failing sessionid should freeze/alert, not hammer accounts/login/).
+            # Subsequent attempts may allow the password fallback if explicitly
+            # configured, but by default a present-but-failing sessionid raises
+            # (caught below) rather than silently deepening the 429.
+            await loop.run_in_executor(None, lambda: _ig_login(cl, allow_password_fallback=False))
             cl.dump_settings("direct_ig_session.json")
             os.chmod("direct_ig_session.json", 0o600)
             # Cold-start warmup: a few paced, benign reads so the first real
@@ -612,14 +666,20 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             cl = _make_client()
         except Exception as e:
             login_attempt += 1
+            # Exponential backoff: a transient login failure (e.g. 429) must not
+            # be retried on a fixed ~3h cadence forever — that cold-starts the
+            # account's rate-limit every cycle and is what produced the sustained
+            # 429 flood over 2026-08-24..26. Back off 2^n * base (capped at 24h).
+            backoff = min(_poll_interval() * (2 ** (login_attempt - 1)), 24 * 3600)
             if login_attempt == 1:
                 logger.error(f"[DirectForward/IG] login failed: {e}. "
-                             f"Retrying every ~{_poll_interval()}s — a fresh "
+                             f"Retrying in ~{backoff / 60:.0f}m (exponential backoff) — a fresh "
                              f"igcookies.txt upload will be picked up automatically.")
             else:
-                logger.warning(f"[DirectForward/IG] login retry {login_attempt} failed: {e}")
+                logger.warning(f"[DirectForward/IG] login retry {login_attempt} failed: {e} "
+                               f"(next retry in ~{backoff / 3600:.1f}h).")
             cl = _make_client()
-            await asyncio.sleep(_poll_interval())
+            await asyncio.sleep(backoff)
 
     state = _load_state()
 

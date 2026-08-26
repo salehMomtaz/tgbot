@@ -67,7 +67,7 @@ def _dest_label(dest=None):
 
 def _blurb():
     ig = "🟢" if getattr(config, "FRIEND_MEDIA_IG_ENABLED", False) else "🔴"
-    sched = int(getattr(config, "FRIEND_MEDIA_SCHEDULE_MINUTES", 0) or 0)
+    sched = int(getattr(config, "FRIEND_MEDIA_SCHEDULE_MINUTES", 60) or 0)
     sched_label = f"every {sched}m" if sched > 0 else "manual only"
     return (
         "📸 **Friend Media Archiver**\n\n"
@@ -88,7 +88,7 @@ def _menu_keyboard():
     feat = ("🔴 Disable feature" if _enabled() else "🟢 Enable feature")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
-         InlineKeyboardButton("📋 List Friends", callback_data="fm_list")],
+         InlineKeyboardButton("📋 List Friends", callback_data="fm_list_choose")],
         [InlineKeyboardButton("📇 Contacts", callback_data="fm_contacts"),
          InlineKeyboardButton("🚀 Check All (new)", callback_data="fm_archive_all")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="fm_settings"),
@@ -130,8 +130,9 @@ def _friend_keyboard(key, friend):
          InlineKeyboardButton("✏️ Set IG @", callback_data=f"fm_ig_set:{key}")],
         [InlineKeyboardButton(f"📷 IG stories: {igs}", callback_data=f"fm_ig_s:{key}"),
          InlineKeyboardButton(f"🖼 IG posts: {igp}", callback_data=f"fm_ig_p:{key}")],
+        [InlineKeyboardButton("🗂 Archive (zip)", callback_data=f"fm_ig_archive:{key}")],
         [InlineKeyboardButton("🗑 Remove", callback_data=f"fm_del:{key}"),
-         InlineKeyboardButton("◀️ Back", callback_data="fm_list")],
+         InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -262,10 +263,70 @@ async def fm_callback_dispatch(client, callback_query):
         await render_menu(client, callback_query)
         await callback_query.answer("Enabled." if new else "Disabled.")
         return
-    if data == "fm_list":
-        txt, kb = await _list_message()
+    if data == "fm_list_choose":
+        txt, kb = await _list_choose_message()
         await callback_query.message.edit_text(txt, reply_markup=kb)
         await callback_query.answer()
+        return
+    if data == "fm_list":
+        # Backwards-compatible entry: show the platform chooser.
+        txt, kb = await _list_choose_message()
+        await callback_query.message.edit_text(txt, reply_markup=kb)
+        await callback_query.answer()
+        return
+    if data.startswith("fm_list_view:"):
+        plat = data.split(":", 1)[1]
+        await _render_friend_list(callback_query, plat)
+        await callback_query.answer()
+        return
+    if data.startswith("fm_list_sel:"):
+        plat = data.split(":", 1)[1]
+        await _render_friend_list(callback_query, plat, select_mode=True)
+        await callback_query.answer()
+        return
+    if data.startswith("fm_sel_toggle:"):
+        _, plat, key = data.split(":", 2)
+        sel = _SELECT.setdefault(user_id, {"plat": plat, "selected": set()})
+        if key in sel["selected"]:
+            sel["selected"].discard(key)
+        else:
+            sel["selected"].add(key)
+        await _render_friend_list(callback_query, plat, select_mode=True)
+        await callback_query.answer()
+        return
+    if data.startswith("fm_sel_delete:"):
+        plat = data.split(":", 1)[1]
+        sel = _SELECT.get(user_id, {"plat": plat, "selected": set()})
+        keys = list(sel.get("selected") or [])
+        for key in keys:
+            await fm_state.remove_friend(key)
+        sel["selected"] = set()
+        await _render_friend_list(callback_query, plat)
+        await callback_query.answer(f"Deleted {len(keys)} friend(s).")
+        return
+    if data.startswith("fm_delall_ask:"):
+        plat = data.split(":", 1)[1]
+        friends = await fm_state.list_friends()
+        items = _split_friends(friends, plat)
+        title = "🟣 IG Friends" if plat == "ig" else "📋 TG Friends"
+        await callback_query.message.edit_text(
+            f"🗑 **Delete ALL {len(items)} {title}?**\n\nThis removes them from the "
+            "archiver; already-delivered media stays. This cannot be undone.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, delete all",
+                                      callback_data=f"fm_delall_confirm:{plat}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"fm_list_view:{plat}")]]))
+        await callback_query.answer()
+        return
+    if data.startswith("fm_delall_confirm:"):
+        plat = data.split(":", 1)[1]
+        friends = await fm_state.list_friends()
+        items = _split_friends(friends, plat)
+        for key, _f in items:
+            await fm_state.remove_friend(key)
+        _SELECT.pop(user_id, None)
+        await _render_friend_list(callback_query, plat)
+        await callback_query.answer(f"Deleted {len(items)} friend(s).")
         return
     if data == "fm_add":
         USER_STATES[user_id] = "waiting_for_friend_add"
@@ -381,8 +442,18 @@ async def fm_callback_dispatch(client, callback_query):
     if data.startswith("fm_arc:") or data.startswith("fm_backfill:"):
         full = data.startswith("fm_backfill:")
         key = data.split(":", 1)[1]
-        await callback_query.answer("Full backfill starting…" if full else "Checking…")
+        await callback_query.answer("Full backfill starting..." if full else "Checking...")
         await _archive_one(client, callback_query.message, key, full=full)
+        return
+
+    if data.startswith("fm_ig_archive:"):
+        key = data.split(":", 1)[1]
+        friend = await fm_state.get_friend(key)
+        if friend is None or not (friend.get("ig_username")):
+            await callback_query.answer("IG @username not set for this friend.", show_alert=True)
+            return
+        await callback_query.answer("Starting IG archive (zip)…")
+        asyncio.create_task(_run_ig_archive(client, callback_query.message, key, friend))
         return
 
     async def _toggle(field):
@@ -439,7 +510,7 @@ async def fm_callback_dispatch(client, callback_query):
     if data.startswith("fm_del_confirm:"):
         key = data.split(":", 1)[1]
         await fm_state.remove_friend(key)
-        txt, kb = await _list_message()
+        txt, kb = await _list_choose_message()
         await callback_query.message.edit_text(txt, reply_markup=kb)
         await callback_query.answer("Removed.")
         return
@@ -447,21 +518,92 @@ async def fm_callback_dispatch(client, callback_query):
     await callback_query.answer()
 
 
-async def _list_message():
-    friends = await fm_state.list_friends()
-    if not friends:
-        return ("📋 **Friends**\n\nNo friends added yet. Tap **➕ Add Friend**, "
-                "**📇 Contacts**, or **📞 Add by phone**.", _menu_keyboard())
-    lines = [_label(f) for _, f in friends]
-    kb_rows = []
+def _platform_of(friend):
+    """Derive which list a friend belongs to. A friend qualifies as IG if it
+    carries an Instagram username; TG if it carries a Telegram user id. A friend
+    with both appears in both lists (identity is not mutually exclusive here —
+    the record may hold a linked IG handle for a TG contact)."""
+    ig = bool((friend or {}).get("ig_username"))
+    tg = bool((friend or {}).get("telegram_user_id"))
+    return ("ig" if ig else None, "tg" if tg else None)
+
+
+def _split_friends(friends, plat):
+    """Return [(key, friend), ...] for the requested platform list ('tg'|'ig')."""
+    out = []
     for key, f in friends:
-        kb_rows.append([InlineKeyboardButton(
-            (f.get("first_name") or f.get("handle") or key)[:32],
-            callback_data=f"fm_friend:{key}")])
-    kb_rows.append([InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
-                    InlineKeyboardButton("◀️ Back", callback_data="fm_menu")])
-    return ("📋 **Friends** (" + str(len(friends)) + ")\n\n" + "\n".join(lines),
-            InlineKeyboardMarkup(kb_rows))
+        ig, tg = _platform_of(f)
+        if plat == "ig" and ig:
+            out.append((key, f))
+        elif plat == "tg" and tg:
+            out.append((key, f))
+    return out
+
+
+def _list_name(friend, key):
+    if (friend or {}).get("ig_username"):
+        return f"@{friend['ig_username']}"
+    return (friend.get("first_name") or friend.get("handle") or friend.get("username") or key)[:32]
+
+
+# Multi-select delete session state, keyed by creator id → {plat, selected:set()}.
+_SELECT = {}
+
+
+async def _render_friend_list(callback_query, plat, select_mode=False):
+    """Render one platform list ('tg'|'ig') with optional multi-select."""
+    friends = await fm_state.list_friends()
+    items = _split_friends(friends, plat)
+    user_id = callback_query.from_user.id
+    sel = _SELECT.setdefault(user_id, {"plat": plat, "selected": set()})
+    if sel.get("plat") != plat:
+        sel["selected"] = set()
+        sel["plat"] = plat
+
+    title = "🟣 IG Friends" if plat == "ig" else "📋 TG Friends"
+    if not items:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
+             InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")]])
+        header = (f"{title} (0)\n\nNo friends here yet.")
+        if select_mode:
+            await callback_query.answer("Selection mode", show_alert=False)
+        await callback_query.message.edit_text(header, reply_markup=kb)
+        return
+
+    rows = []
+    for key, f in items:
+        name = _list_name(f, key)
+        mark = "✅ " if key in sel["selected"] else ""
+        rows.append([InlineKeyboardButton(
+            f"{mark}{name}", callback_data=f"fm_sel_toggle:{plat}:{key}")])
+
+    ctrl = []
+    if select_mode:
+        ctrl.append([InlineKeyboardButton(
+            f"🗑 Delete selected ({len(sel['selected'])})",
+            callback_data=f"fm_sel_delete:{plat}"),
+            InlineKeyboardButton("✅ Done", callback_data=f"fm_list_view:{plat}")])
+    else:
+        ctrl.append([InlineKeyboardButton("☑️ Select", callback_data=f"fm_list_sel:{plat}"),
+                     InlineKeyboardButton(f"🗑 Delete all ({len(items)})",
+                                          callback_data=f"fm_delall_ask:{plat}")])
+    ctrl.append([InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
+                 InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")])
+    rows.extend(ctrl)
+    header = (f"{title} ({len(items)})\n\n" +
+              ("Tap friends to toggle selection, then confirm." if select_mode
+               else "Tap a friend to open it; use Select / Delete all for bulk actions."))
+    await callback_query.message.edit_text(header, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _list_choose_message():
+    return ("📋 **Friends**\n\nChoose a platform to manage:", InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 TG Friends", callback_data="fm_list_view:tg")],
+        [InlineKeyboardButton("🟣 IG Friends", callback_data="fm_list_view:ig")],
+        [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
+         InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
+    ]))
 
 
 async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
@@ -568,6 +710,39 @@ async def _auto_backfill(client, key):
         pass
 
 
+async def _run_ig_archive(client, status_msg, key, friend):
+    """Run a full IG archive (-> zip) for one friend, streaming progress to a
+    status message and delivering the zip to the safe destination."""
+    ig_user = (friend.get("ig_username") or "").lstrip("@")
+
+    msg = None
+    try:
+        msg = await status_msg.reply_text(f"🗂 Starting full IG archive of @{ig_user}…")
+    except Exception:
+        pass
+
+    status = msg or status_msg
+    try:
+        await status.edit_text(f"🗂 Archiving @{ig_user} … starting")
+
+        async def _cb(step):
+            try:
+                await status.edit_text(f"🗂 Archiving @{ig_user} … {step}")
+            except Exception:
+                pass
+
+        zip_path = await fm_ig.archive_instagram_full(key, friend, bot=client, status_cb=_cb)
+        await status.edit_text(
+            f"✅ IG archive of @{ig_user} delivered.\n"
+            f"Profile pic + posts + reels + highlights are in the zip.")
+    except Exception as e:
+        logger.exception(f"[FriendMedia] IG archive for @{ig_user} failed: {e}")
+        try:
+            await status.edit_text(f"❌ IG archive of @{ig_user} failed: {e}")
+        except Exception:
+            pass
+
+
 async def handle_friend_text(client, message, user_id, state, input_text, prompt_id, app, back_markup):
     from modules.admin.state import USER_STATES
     txt = input_text.strip()
@@ -615,7 +790,12 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         results = []
         if uc is not None:
             try:
-                results = await uc.search_contacts(txt, limit=6) or []
+                # search_contacts returns a FoundContacts object (`.users`), NOT a
+                # plain list — iterating the object directly raised
+                # "'FoundContacts' object is not iterable" and surfaced as a
+                # generic "Something went wrong" to the operator.
+                found = await uc.search_contacts(txt, limit=6)
+                results = list(getattr(found, "users", None) or [])
             except Exception as e:
                 logger.info(f"[FriendMedia] search_contacts failed: {e}")
         if not results:

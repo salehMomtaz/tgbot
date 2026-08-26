@@ -23,7 +23,11 @@ is re-read when the cache expires so admin jar replacements are picked up.
 """
 
 import os
+import io
 import time
+import random
+import shutil
+import zipfile
 import tempfile
 import asyncio
 import logging
@@ -108,6 +112,23 @@ async def _ig_client():
         return cl
 
 
+async def _ig_client_retry():
+    """Return a cached client, but on IGUnavailable invalidate the cache once and
+    rebuild from the freshest jar sessionid — a mid-run session rotation (the
+    "Exceeded 30 redirects" login-wall on ``user_stories``/``user_medias``) must
+    not permanently sink the IG archive for a friend."""
+    try:
+        return await _ig_client()
+    except IGUnavailable:
+        # Force a one-time rebuild from the freshest jar (the cache may hold a
+        # session Instagram just rotated).
+        async with _ig_lock:
+            _ig_client_cache["cl"] = None
+            _ig_client_cache["ts"] = 0.0
+            _ig_client_cache["mtime"] = 0.0
+        return await _ig_client()
+
+
 def _cleanup(path):
     try:
         if path and os.path.exists(path):
@@ -149,7 +170,7 @@ async def archive_instagram_stories(key, friend, bot=None):
     ig_user = friend.get("ig_username")
     if not ig_user:
         return 0
-    cl = await _ig_client()  # raises IGUnavailable with an actionable reason
+    cl = await _ig_client_retry()  # raises IGUnavailable with an actionable reason
     max_stories = int(getattr(config, "FRIEND_MEDIA_MAX_STORIES", 100) or 100)
     seen = {str(x) for x in (friend.get("seen_ig_story_pks") or [])}
     delivered = 0
@@ -161,7 +182,16 @@ async def archive_instagram_stories(key, friend, bot=None):
             stories = cl.user_stories(pk) or []
             return stories[:max_stories]
 
-        stories = await loop.run_in_executor(None, _fetch)
+        try:
+            stories = await loop.run_in_executor(None, _fetch)
+        except Exception as first:
+            # Session rotated mid-run (login-wall redirect loop) — rebuild from
+            # the freshest jar sessionid ONCE and retry, instead of reporting
+            # "IG stories skipped" and dropping live stories.
+            logger.warning(f"[FriendMedia:ig] stories fetch failed ({first}); "
+                           f"rebuilding client and retrying once for @{ig_user}.")
+            cl = await _ig_client_retry()
+            stories = await loop.run_in_executor(None, _fetch)
 
         bot_c = bot or common.bot_client()
         dest = common.resolve_destination()
@@ -209,7 +239,7 @@ async def archive_instagram_posts(key, friend, bot=None):
     ig_user = friend.get("ig_username")
     if not ig_user:
         return 0
-    cl = await _ig_client()  # raises IGUnavailable with an actionable reason
+    cl = await _ig_client_retry()  # raises IGUnavailable with an actionable reason
     max_posts = int(getattr(config, "FRIEND_MEDIA_MAX_POSTS_PER_RUN", 10) or 10)
     watermark = friend.get("last_ig_media_pk")
     delivered = 0
@@ -223,7 +253,13 @@ async def archive_instagram_posts(key, friend, bot=None):
             medias = cl.user_medias_v1(pk, amount=max(30, max_posts * 3)) or []
             return sorted(medias, key=lambda m: int(getattr(m, "pk", 0)))
 
-        medias = await loop.run_in_executor(None, _fetch)
+        try:
+            medias = await loop.run_in_executor(None, _fetch)
+        except Exception as first:
+            logger.warning(f"[FriendMedia:ig] posts fetch failed ({first}); "
+                           f"rebuilding client and retrying once for @{ig_user}.")
+            cl = await _ig_client_retry()
+            medias = await loop.run_in_executor(None, _fetch)
         if not medias:
             return 0
         newest = str(getattr(medias[-1], "pk", ""))
@@ -266,3 +302,173 @@ async def archive_instagram_posts(key, friend, bot=None):
     except Exception as e:
         logger.warning(f"[FriendMedia:ig] posts archive failed for {ig_user}: {e}")
     return delivered
+
+
+def _fetch_bytes(url: str, referer: str = "https://www.instagram.com/"):
+    """Download a URL into memory bytes (sync; run via executor)."""
+    import requests as _requests
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/136.0.0.0 Safari/537.36"),
+        "Referer": referer,
+    }
+    r = _requests.get(url, headers=headers, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+async def _jitter(lo=0.4, hi=1.6):
+    """Random human-ish pause between Instagram steps (anti-robot pacing)."""
+    await asyncio.sleep(random.uniform(lo, hi))
+
+
+def _download_media_urls(cl, media, folder, prefix):
+    """Download every CDN URL of a Media/Story into ``folder`` (sync). Returns paths.
+
+    Handles carousel ``resources`` and single ``video_url``/``thumbnail_url``."""
+    urls = []
+    if getattr(media, "resources", None):
+        for r in media.resources:
+            v = getattr(r, "video_url", None) or getattr(r, "thumbnail_url", None)
+            if v:
+                urls.append(str(v))
+    else:
+        v = getattr(media, "video_url", None) or getattr(media, "thumbnail_url", None)
+        if v:
+            urls.append(str(v))
+    out = []
+    for i, u in enumerate(urls, start=1):
+        try:
+            data = _fetch_bytes(u)
+            if len(data) < 500 or data[:6].lower() in (b"<html", b"<!doct"):
+                continue
+            ext = ".mp4" if getattr(media, "video_url", None) and u.endswith((".mp4", "")) else ".jpg"
+            # Prefer extension from URL.
+            if ".mp4" in u or "video" in str(u).lower():
+                ext = ".mp4"
+            else:
+                ext = ".jpg"
+            name = f"{prefix}{i}{ext}"
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(data)
+            out.append(os.path.join(folder, name))
+        except Exception as e:
+            logger.warning(f"[FriendMedia:ig:archive] url {i} failed: {e}")
+    return out
+
+
+async def archive_instagram_full(key, friend, bot=None, status_cb=None):
+    """Full capture of one IG friend into a .zip delivered to the destination:
+
+    * profile picture (HD)
+    * all highlight reels (each story media inside)
+    * feed posts + carousels + reels
+
+    Every fetch/download step is paced with a human-ish jitter (no zombie
+    cadence) to avoid automation-flagging, per the operator's requirement.
+    The result is ONE zip sent to the safe destination. Returns zip path or None.
+    """
+    ig_user = (friend.get("ig_username") or "").lstrip("@")
+    if not ig_user:
+        raise RuntimeError("no ig_username set for this friend")
+    cl = await _ig_client_retry()
+    loop = asyncio.get_event_loop()
+
+    # Resolve the user + profile pic.
+    def _user():
+        pk = cl.user_id_from_username(ig_user)
+        return cl.user_info_v1(pk)
+    user = await loop.run_in_executor(None, _user)
+    await _jitter()
+
+    workdir = tempfile.mkdtemp(prefix="fmig_archive_")
+    counted = 0
+    try:
+        zip_path = os.path.join(workdir, f"ig_{ig_user}_archive.zip")
+
+        # 1. Profile picture.
+        pp_url = getattr(user, "profile_pic_url_hd", None) or getattr(user, "profile_pic_url", None)
+        if pp_url:
+            try:
+                data = await loop.run_in_executor(None, _fetch_bytes, pp_url)
+                with open(os.path.join(workdir, "profile_pic.jpg"), "wb") as f:
+                    f.write(data)
+                counted += 1
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig:archive] profile pic failed: {e}")
+        await _jitter()
+        if status_cb:
+            await status_cb(f"profile pic ✓")
+
+        # 2. All posts/carousels/reels.
+        def _posts():
+            pk = cl.user_id_from_username(ig_user)
+            return cl.user_medias_v1(pk, amount=0) or []
+        medias = await loop.run_in_executor(None, _posts)
+        await _jitter()
+        posts = sorted(medias or [], key=lambda m: int(getattr(m, "pk", 0) or 0))
+        for idx, m in enumerate(posts, start=1):
+            paths = []
+            try:
+                paths = await loop.run_in_executor(
+                    None, _download_media_urls, cl, m, workdir, f"post_{idx}_")
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig:archive] post {idx} failed: {e}")
+            counted += len(paths)
+            if status_cb and idx % 5 == 0:
+                await status_cb(f"posts {idx}/{len(posts)}")
+            await _jitter()
+
+        # 3. Highlights (each story media inside).
+        def _highlights():
+            pk = cl.user_id_from_username(ig_user)
+            return cl.user_highlights_v1(pk, amount=0) or []
+        highlights = await loop.run_in_executor(None, _highlights)
+        await _jitter()
+        if status_cb:
+            await status_cb(f"highlights: {len(highlights or [])}")
+        for hi, hl in enumerate(highlights or [], start=1):
+            try:
+                full = await loop.run_in_executor(None, cl.highlight_info_v1, str(hl.pk))
+                items = getattr(full, "items", None) or []
+                for si, story in enumerate(items or [], start=1):
+                    paths = await loop.run_in_executor(
+                        None, _download_media_urls, cl, story, workdir, f"hl{hi}_{si}_")
+                    counted += len(paths)
+                    await _jitter()
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig:archive] highlight {hi} failed: {e}")
+            if status_cb:
+                await status_cb(f"highlight {hi}/{len(highlights or [])}")
+
+        if status_cb:
+            await status_cb("zipping…")
+
+        # Zip everything (top-level files only).
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for name in sorted(os.listdir(workdir)):
+                p = os.path.join(workdir, name)
+                if os.path.isfile(p) and not name.endswith(".zip"):
+                    z.write(p, arcname=name)
+
+        if not os.path.exists(zip_path) or counted == 0:
+            raise RuntimeError("nothing downloaded (private account or no media)")
+
+        # Deliver the zip.
+        bot_c = bot or common.bot_client()
+        dest = common.resolve_destination()
+        caption = f"🗂 IG archive · @{ig_user} ({counted} items)"
+        ok = await common._safe_deliver_raw(bot_c, dest, zip_path, "document",
+                                            caption=caption)
+        if not ok:
+            raise RuntimeError("delivery failed")
+        return zip_path
+    except Exception:
+        # Best-effort cleanup of the temp dir on failure (success leaves the zip
+        # for the cache cleaner to sweep).
+        try:
+            shutil.rmtree(workdir, ignore_errors=True)
+        except Exception:
+            pass
+        raise

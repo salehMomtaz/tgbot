@@ -86,45 +86,62 @@ async def _send_once(client, dest, path, kind, caption):
 
 
 async def _deliver_via_logchannel(client, path, kind, caption):
-    """Post the media to the operator-owned LOG_CHANNEL_ID, then forward it to the
-    admin (you) as a DM from the connected account — mirroring the self-DM relays.
+    """Post the media to the operator-owned LOG_CHANNEL_ID via the connected USER
+    account (kurigram), then have the BOT ``copy_message`` it to the admin (you).
 
-    Nothing is sent to the friend. The forward is cheap (no re-upload).
+    ``copy_message`` re-uses the existing file_id (no size limit, no re-download)
+    and — unlike ``forward_messages`` — carries NO "Forwarded from …" header: the
+    sender shows as the BOT itself. This mirrors the >2 GB premium-upload path in
+    ``utils/uploader_handler.py::_stage_and_relay``.
+
+    The staged message stays in the log channel as the archive. Nothing is sent
+    to the friend.
     """
     lc = getattr(config, "LOG_CHANNEL_ID", 0) or 0
     admin = getattr(config, "SYSTEM_CREATOR_ID", 0) or 0
     if not lc:
         logger.warning("[FriendMedia] LOG_CHANNEL_ID not set; cannot deliver via log channel.")
         return False
+    from pyrogram.errors import FloodWait
+
+    user = user_client()   # connected kurigram account: uploads to the archive
+    bot = bot_client()     # bot: copy_message to the admin (no forward header)
+
+    async def _copy_to_admin(staged):
+        """Bot copy_message to the admin — sender = bot, no forwarded header."""
+        if not (admin and admin != lc):
+            return bool(staged)
+        if not bot or not staged:
+            return bool(staged)
+        try:
+            await bot.copy_message(
+                chat_id=admin,
+                from_chat_id=lc,
+                message_id=staged.id,
+                caption=caption,
+            )
+            return True
+        except Exception as ce:
+            logger.warning(f"[FriendMedia] bot copy_message to admin failed: {ce}")
+            return bool(staged)
+
     try:
-        from pyrogram.errors import FloodWait
-        msg = await _send_once(client, lc, path, kind, caption)
-        if msg and admin and admin != lc:
-            try:
-                await client.forward_messages(admin, lc, msg.id)
-            except Exception as fe:
-                logger.warning(f"[FriendMedia] forward to admin failed: {fe}")
-        elif msg and admin == lc:
-            # log channel IS the admin — already there, no forward needed.
-            pass
-        # Pace bulk deliveries (same knob as direct sends) so a 1900-photo
-        # backfill doesn't hammer the Bot API into FloodWaits.
+        uploader = user or client or bot
+        staged = await _send_once(uploader, lc, path, kind, caption)
+        await _copy_to_admin(staged)
         delay = int(getattr(config, "FRIEND_MEDIA_SEND_DELAY", 1) or 1)
         if delay > 0:
             await asyncio.sleep(delay)
-        return bool(msg)
+        return bool(staged)
     except FloodWait as fw:
         wait = int(getattr(fw, "value", 0) or 0)
         logger.warning(f"[FriendMedia] FloodWait {wait}s delivering {path}; backing off.")
         await asyncio.sleep(min(wait, 60) + 1)
         try:
-            msg = await _send_once(client, lc, path, kind, caption)
-            if msg and admin and admin != lc:
-                try:
-                    await client.forward_messages(admin, lc, msg.id)
-                except Exception:
-                    pass
-            return bool(msg)
+            uploader = user or client or bot
+            staged = await _send_once(uploader, lc, path, kind, caption)
+            await _copy_to_admin(staged)
+            return bool(staged)
         except Exception as e:
             logger.warning(f"[FriendMedia] deliver retry failed {path}: {e}")
             return False
