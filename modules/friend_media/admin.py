@@ -329,13 +329,34 @@ async def fm_callback_dispatch(client, callback_query):
         await callback_query.answer(f"Deleted {len(items)} friend(s).")
         return
     if data == "fm_add":
+        await callback_query.message.edit_text(
+            "➕ **Add Friend**\n\nWhich platform?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Telegram friend", callback_data="fm_add_tg")],
+                [InlineKeyboardButton("🟣 Instagram friend", callback_data="fm_add_ig")],
+                [InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
+        await callback_query.answer()
+        return
+    if data == "fm_add_tg":
         USER_STATES[user_id] = "waiting_for_friend_add"
         await callback_query.message.edit_text(
-            "➕ **Add Friend**\n\nSend the friend's **numeric Telegram id**, "
+            "➕ **Add Telegram Friend**\n\nSend the friend's **numeric Telegram id**, "
             "**@username**, or **username** (one per line to add several).\n\n"
             "They will be added to your connected account's contacts (silent — "
             "nothing is sent to them), then a one-time full profile-pic backfill "
             "starts automatically. Only YOU receive their media.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
+        await callback_query.answer()
+        return
+    if data == "fm_add_ig":
+        USER_STATES[user_id] = "waiting_for_friend_add_ig"
+        await callback_query.message.edit_text(
+            "➕ **Add Instagram Friend**\n\nSend the Instagram **username** "
+            "(WITHOUT the @, e.g. `nature_lover`; one per line to add several).\n\n"
+            "They are added as IG friends — NEW stories + posts (posted after "
+            "linking) are delivered. No older IG history is fetched, and nothing "
+            "is ever sent to them.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
@@ -561,9 +582,11 @@ async def _render_friend_list(callback_query, plat, select_mode=False):
         sel["plat"] = plat
 
     title = "🟣 IG Friends" if plat == "ig" else "📋 TG Friends"
+    add_cb = "fm_add_tg" if plat == "tg" else "fm_add_ig"
+    add_label = "➕ Add TG Friend" if plat == "tg" else "➕ Add IG Friend"
     if not items:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
+            [InlineKeyboardButton(add_label, callback_data=add_cb),
              InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")]])
         header = (f"{title} (0)\n\nNo friends here yet.")
         if select_mode:
@@ -574,9 +597,14 @@ async def _render_friend_list(callback_query, plat, select_mode=False):
     rows = []
     for key, f in items:
         name = _list_name(f, key)
-        mark = "✅ " if key in sel["selected"] else ""
-        rows.append([InlineKeyboardButton(
-            f"{mark}{name}", callback_data=f"fm_sel_toggle:{plat}:{key}")])
+        if select_mode:
+            mark = "✅ " if key in sel["selected"] else ""
+            cb = f"fm_sel_toggle:{plat}:{key}"
+        else:
+            # Non-select mode: tapping a friend OPENS its menu (not selection).
+            mark = ""
+            cb = f"fm_friend:{key}"
+        rows.append([InlineKeyboardButton(f"{mark}{name}", callback_data=cb)])
 
     ctrl = []
     if select_mode:
@@ -588,7 +616,7 @@ async def _render_friend_list(callback_query, plat, select_mode=False):
         ctrl.append([InlineKeyboardButton("☑️ Select", callback_data=f"fm_list_sel:{plat}"),
                      InlineKeyboardButton(f"🗑 Delete all ({len(items)})",
                                           callback_data=f"fm_delall_ask:{plat}")])
-    ctrl.append([InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
+    ctrl.append([InlineKeyboardButton(add_label, callback_data=add_cb),
                  InlineKeyboardButton("◀️ Back", callback_data="fm_list_choose")])
     rows.extend(ctrl)
     header = (f"{title} ({len(items)})\n\n" +
@@ -783,6 +811,28 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                 "from ➕ Add Friend.", reply_markup=back_markup)
         return
 
+    if state == "waiting_for_friend_add_ig":
+        lines = [l.strip().lstrip("@") for l in txt.splitlines() if l.strip()]
+        USER_STATES.pop(user_id, None)
+        await _clear_prompt()
+        added, failed = [], []
+        for ig in lines:
+            key, friend = await _add_ig_friend(ig)
+            if key:
+                added.append(f"`@{ig}`")
+            else:
+                failed.append(ig)
+        if added:
+            reply = "✅ Added IG friend(s):\n" + "\n".join(added)
+            reply += ("\n\nFirst run records a watermark — only NEW stories/posts "
+                      "(posted after now) will be delivered. Nothing is sent to them.")
+            if failed:
+                reply += "\n\n❌ Could not add: " + ", ".join(failed)
+        else:
+            reply = "❌ Could not add any IG friend. Check the username and try again."
+        await message.reply_text(reply, reply_markup=back_markup)
+        return
+
     if state == "waiting_for_friend_search":
         uc = fm_common.user_client()
         USER_STATES.pop(user_id, None)
@@ -957,6 +1007,30 @@ async def _resolve_and_add(handle):
 
 def _looks_like_username(h):
     return all(c.isalnum() or c in (".", "_") for c in h) and not h.isdigit()
+
+
+async def _add_ig_friend(ig_username):
+    """Add an Instagram-only friend keyed by ``ig:<username>``. First run primes
+    the posts watermark (via the normal archive path) and delivers nothing older."""
+    ig = (ig_username or "").lstrip("@").strip()
+    if not ig:
+        return None, None
+    key = "ig:" + ig
+    friend = {
+        "platform": "instagram",
+        "handle": ig,
+        "telegram_user_id": None,
+        "username": "",
+        "first_name": ig,
+        "profile_photos": False,
+        "stories": False,
+        "ig_username": ig,
+        "ig_enabled": True,
+        "ig_stories": True,
+        "ig_posts": True,
+    }
+    await fm_state.add_or_update_friend(key, friend)
+    return key, friend
 
 
 def start_friend_media_task(app, premium_app):

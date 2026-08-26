@@ -91,6 +91,33 @@ async def _ig_client():
 
         def _build():
             c = IGClient()
+            c.delay_range = [2, 4]
+            # Anti-detection hardening (same as direct_forward): WITHOUT the
+            # curl_cffi TLS-impersonating transport, the private API rides plain
+            # Python requests TLS — a JA3 "this is a script" fingerprint that
+            # Instagram answers with a login-wall redirect loop. That loop is the
+            # "Exceeded 30 redirects" that sank every story/post/archive fetch.
+            from utils import ig_anti_detect
+            try:
+                ig_anti_detect.install_transport(c, "chrome136")
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig] transport install degraded: {e}")
+            try:
+                ig_anti_detect.pin_geo(
+                    c,
+                    country=getattr(config, "IG_DIRECT_COUNTRY", "US") or "US",
+                    country_code=getattr(config, "IG_DIRECT_COUNTRY_CODE", 1) or 1,
+                    locale=getattr(config, "IG_DIRECT_LOCALE", "en_US") or "en_US",
+                    timezone_offset=getattr(config, "IG_DIRECT_TZ_OFFSET", -14400),
+                    timezone_name=getattr(config, "IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00",
+                )
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig] geo pin degraded: {e}")
+            try:
+                ig_anti_detect.install_token_echo(c)
+            except Exception as e:
+                logger.warning(f"[FriendMedia:ig] token-echo install degraded: {e}")
+
             sid = _ig_sessionid_from_jar()
             if not sid:
                 raise RuntimeError(
