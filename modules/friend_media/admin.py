@@ -639,10 +639,15 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
     parts = []
     async with _ARCHIVE_LOCK:
         try:
-            # NOTE: no telegram_user_id gate here — archive_friend_telegram
-            # self-heals friends stored unresolved by re-resolving their
-            # @username/handle and persisting the id.
-            if friend.get("profile_photos") or friend.get("stories"):
+            # Telegram archiving is gated on ACTUAL Telegram identity: a friend
+            # with a telegram_user_id, or a platform=="telegram" record that
+            # archive_friend_telegram can self-heal by re-resolving. An IG-ONLY
+            # friend (platform=="instagram", no id) must NOT be run through the
+            # Telegram path — that would wrongly report "could not resolve ... to
+            # a Telegram account".
+            is_tg = (friend.get("platform") == "telegram"
+                     or bool(friend.get("telegram_user_id")))
+            if is_tg and (friend.get("profile_photos") or friend.get("stories")):
                 parts.append(await fm_tg.archive_friend_telegram(
                     key, friend, status_msg=status_msg, full=full))
             if (friend.get("ig_enabled") and friend.get("ig_username")
