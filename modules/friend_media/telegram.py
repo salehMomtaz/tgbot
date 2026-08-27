@@ -130,12 +130,20 @@ async def fm_state_safe_update(key, patch):
 
 
 async def _fetch_photos(client, user_id, limit):
-    """Collect up to ``limit`` photos (newest first). limit=0 → all."""
+    """Collect up to ``limit`` photos (newest first). limit=0 → all.
+
+    Re-raises ``PEER_ID_INVALID`` so the caller can surface a clear "this id
+    is not a real Telegram user" hint to the operator instead of silently
+    returning an empty list forever.
+    """
     out = []
     try:
         async for photo in client.get_chat_photos(user_id, limit=limit):
             out.append(photo)
     except Exception as e:
+        from pyrogram.errors import PeerIdInvalid
+        if isinstance(e, PeerIdInvalid):
+            raise
         logger.warning(f"[FriendMedia:tg] get_chat_photos({user_id}) failed: {e}")
     return out
 
@@ -217,19 +225,29 @@ async def archive_telegram_profile_photos(user, key, friend, full=None,
 
 async def archive_telegram_stories(user, key, friend):
     """Deliver the friend's CURRENT stories not already sent (deduped across
-    cycles — stories stay live ~24 h and would otherwise repeat every run)."""
+    cycles — stories stay live ~24 h and would otherwise repeat every run).
+
+    Uses ``get_chat_stories(chat_id)`` — the high-level wrapper around
+    ``stories.GetPeerStories`` — which returns an async generator of every
+    NON-EXPIRED story the target has live. The plain ``get_stories`` only
+    fetches a story BY ID (it raises ``ValueError("Invalid story_ids.")`` when
+    called without one), and is the wrong tool for "what's live right now".
+    """
     max_stories = int(getattr(config, "FRIEND_MEDIA_MAX_STORIES", 100) or 100)
     client = common.user_client()
     seen = {str(x) for x in (friend.get("seen_story_ids") or [])}
     try:
-        stories = await client.get_stories(user.id)
+        # get_chat_stories is an AsyncGenerator; collect eagerly so we can
+        # surface the count up the stack and so exceptions land here.
+        collected = []
+        async for s in client.get_chat_stories(user.id):
+            collected.append(s)
+        stories = collected
     except Exception as e:
-        logger.info(f"[FriendMedia:tg] get_stories for {user.id} failed: {e}")
+        logger.info(f"[FriendMedia:tg] get_chat_stories for {user.id} failed: {e}")
         return 0
     if not stories:
         return 0
-    if not isinstance(stories, list):
-        stories = [stories]
     fresh = []
     for s in stories[:max_stories]:
         sid = str(getattr(s, "id", "") or "")
@@ -327,10 +345,26 @@ async def archive_friend_telegram(key, friend, bot=None, status_msg=None,
                         f"⏳ `{key}`: {done}/{total} profile pics archived…")
                 except Exception:
                     pass
-        n, known = await archive_telegram_profile_photos(
-            user, key, friend, full=full, progress_cb=_prog)
-        mode = "backfilled" if full else "new"
-        parts.append(f"{n} new profile pics ({mode}; {known if full else 'page'} scanned)")
+        try:
+            n, known = await archive_telegram_profile_photos(
+                user, key, friend, full=full, progress_cb=_prog)
+            mode = "backfilled" if full else "new"
+            parts.append(f"{n} new profile pics ({mode}; {known if full else 'page'} scanned)")
+        except Exception as e:
+            from pyrogram.errors import PeerIdInvalid
+            if isinstance(e, PeerIdInvalid):
+                # The stored id is bogus (typically a phone number added via
+                # the "by handle" flow before the >10-digit guard existed).
+                # Tell the operator clearly what to do instead of silently
+                # logging a warning forever.
+                handle = friend.get("handle") or friend.get("username") or str(u_id)
+                looks_like_phone = (str(u_id).isdigit() and len(str(u_id)) > 10)
+                hint = (" — looks like a phone number; re-add via **➕ Add Friend → "
+                        "📞 By phone number** so the real id is recorded."
+                        if looks_like_phone else
+                        " — id is not a real Telegram user; re-add via **➕ Add Friend**.")
+                return f"⚠️ peer invalid (id {u_id} for {handle}){hint}"
+            raise
     if friend.get("stories"):
         n = await archive_telegram_stories(user, key, friend)
         parts.append(f"{n} new stories")

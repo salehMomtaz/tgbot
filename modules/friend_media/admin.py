@@ -712,11 +712,21 @@ def _count_new_in_summary(text):
 
 
 async def _run_archives(client, friends, status_msg, full=False):
+    # Aggregate the cycle's outcome so the final status message is honest about
+    # what actually happened (no more "🏁 Archive run finished." that reads as
+    # "we downloaded all of their stuff").  The per-friend detail still goes
+    # to the DM (if new) or the log channel (if not) — only the summary line
+    # lands in the in-chat status message.
+    total_new = 0
+    checked = 0
+    failed_keys = []
     for key, friend in friends:
         label = friend.get("first_name") or friend.get("handle") or key
         try:
             delivered, summary = await _archive_one_friend(
                 client, key, friend, status_msg=status_msg, full=full)
+            checked += 1
+            total_new += delivered
             if delivered > 0:
                 # Something new arrived — ping the admin in DM with the media
                 # already delivered to the safe destination by the archive_*
@@ -733,12 +743,31 @@ async def _run_archives(client, friends, status_msg, full=False):
                     f"[FriendMedia] `{label}` ({key}): {summary} (no new material)")
         except Exception as e:
             logger.exception(f"[FriendMedia] archive {key} failed: {e}")
+            failed_keys.append(key)
             await client.send_message(
                 config.SYSTEM_CREATOR_ID,
                 f"❌ Archive failed for `{key}`: {e}")
     if status_msg is not None:
         try:
-            await status_msg.edit_text("🏁 Archive run finished.")
+            if checked == 0 and failed_keys:
+                await status_msg.edit_text(
+                    f"❌ Archive run failed for {len(failed_keys)} friend(s).")
+            elif total_new == 0:
+                # The honest "no new content" answer the operator asked for:
+                # we DID scan every friend, we just found nothing new. Listed
+                # by name so the operator can see who was checked.
+                names = ", ".join(
+                    f"`{friend.get('first_name') or friend.get('handle') or k}`"
+                    for k, friend in friends
+                )
+                if len(names) > 200:
+                    names = f"{checked} friend(s)"
+                await status_msg.edit_text(
+                    f"🟰 Checked {checked} friend(s) — no new content. ({names})")
+            else:
+                await status_msg.edit_text(
+                    f"✅ Checked {checked} friend(s) — **{total_new}** new item(s) "
+                    f"delivered to {_dest_label()}.")
         except Exception:
             pass
 
@@ -838,19 +867,30 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 
     if state == "waiting_for_friend_add":
         lines = [l.strip() for l in txt.splitlines() if l.strip()]
-        added, failed = [], []
+        added, failed, phone_like = [], [], []
         keys = []
         for handle in lines:
             key, friend = await _resolve_and_add(handle)
             if key:
                 added.append(f"`{friend.get('first_name') or handle}` (tg:{friend.get('telegram_user_id')})")
                 keys.append(key)
+            elif friend == "phone-like":
+                # _resolve_and_add recognised a phone-number-shaped input that
+                # cannot be a Telegram user id (>10 digits) — never persist it
+                # as a dead record. Tell the user where to retry it.
+                phone_like.append(handle)
             else:
                 failed.append(handle)
         USER_STATES.pop(user_id, None)
         await _clear_prompt()
         if added:
             reply = "✅ Added:\n" + "\n".join(added)
+            if phone_like:
+                reply += ("\n\n📞 Looks like a phone number (not a Telegram id): "
+                          + ", ".join(f"`{h}`" for h in phone_like)
+                          + "\nRe-submit via **➕ Add Friend → 📞 By phone number** — "
+                          "it goes through Telegram's contact-import so the real "
+                          "user id is recorded.")
             if failed:
                 reply += "\n\n❌ Could not resolve: " + ", ".join(failed)
             reply += ("\n\n⬇️ One-time full profile-pic backfill is starting — you'll "
@@ -860,9 +900,14 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             for key in keys:
                 asyncio.create_task(_auto_backfill(app, key))
         else:
-            await message.reply_text(
-                "❌ Could not resolve any of those. Check the id/username and try again "
-                "from ➕ Add Friend.", reply_markup=back_markup)
+            reply = "❌ Could not resolve any of those."
+            if phone_like:
+                reply += ("\n\n📞 " + ", ".join(f"`{h}`" for h in phone_like)
+                          + " looks like a phone number — use **➕ Add Friend → "
+                            "📞 By phone number** instead (Telegram ids are at most "
+                            "10 digits).")
+            reply += " Check the id/username and try again from ➕ Add Friend."
+            await message.reply_text(reply, reply_markup=back_markup)
         return
 
     if state == "waiting_for_friend_add_ig":
@@ -998,7 +1043,14 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 async def _resolve_and_add(handle):
     """Resolve a handle to a Telegram user and persist the friend record.
 
-    Returns (key, friend) or (None, None).
+    Returns ``(key, friend)`` on success, ``(None, None)`` if the handle
+    couldn't be resolved to a Telegram account, or ``(None, "phone-like")``
+    if the input looks like a phone number and should be re-submitted via the
+    "Add by phone" flow (which goes through ``import_contacts`` and returns
+    the real user id). A bare digit string longer than 10 chars is treated as
+    a phone number — Telegram user ids are at most 10 digits — and silently
+    storing it as ``telegram_user_id`` would produce a dead record whose every
+    archive cycle returns ``PEER_ID_INVALID``.
     """
     user = await fm_tg.resolve_telegram_user(handle)
     if user is not None:
@@ -1006,6 +1058,11 @@ async def _resolve_and_add(handle):
     # A bare numeric id that the connected account can't resolve *yet* is still
     # stored — resolve_telegram_user falls back to the contacts scan at run time.
     if handle.isdigit():
+        if len(handle) > 10:
+            # Phone number-shaped input (E.164 numbers are 7-15 digits, well above
+            # the 10-digit Telegram user-id ceiling). Do NOT persist a dead
+            # record; let the dispatcher route the user to "Add by phone".
+            return None, "phone-like"
         key = handle
         friend = {
             "platform": "telegram",
