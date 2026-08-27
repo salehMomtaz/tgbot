@@ -363,12 +363,18 @@ async def fm_callback_dispatch(client, callback_query):
         USER_STATES[user_id] = "waiting_for_friend_add"
         await callback_query.message.edit_text(
             "➕ **Add Telegram Friend**\n\nSend the friend's **numeric Telegram id**, "
-            "**@username**, or **username** (one per line to add several).\n\n"
-            "They will be added to your connected account's contacts (silent — "
-            "nothing is sent to them), then a one-time full profile-pic backfill "
-            "starts automatically. Only YOU receive their media.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
+            "**@username**, **username**, or **phone number** (e.g. `+15551234567` — "
+            "one per line to add several).\n\n"
+            "Resolution ladder (silent, no message is sent to the friend):\n"
+            "  1. Try as a Telegram id (if it's already in your contacts / dialogs)\n"
+            "  2. Try as a public @username\n"
+            "  3. For phone numbers: `contacts.ImportContacts` (returns the real id)\n\n"
+            "A one-time full profile-pic backfill starts automatically. Only YOU "
+            "receive their media.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 By phone number only",
+                                      callback_data="fm_contact_phone")],
+                [InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
         return
     if data == "fm_add_ig":
@@ -867,32 +873,29 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 
     if state == "waiting_for_friend_add":
         lines = [l.strip() for l in txt.splitlines() if l.strip()]
-        added, failed, phone_like = [], [], []
+        added, failed = [], []
         keys = []
         for handle in lines:
             key, friend = await _resolve_and_add(handle)
             if key:
                 added.append(f"`{friend.get('first_name') or handle}` (tg:{friend.get('telegram_user_id')})")
                 keys.append(key)
-            elif friend == "phone-like":
-                # _resolve_and_add recognised a phone-number-shaped input that
-                # cannot be a Telegram user id (>10 digits) — never persist it
-                # as a dead record. Tell the user where to retry it.
-                phone_like.append(handle)
             else:
                 failed.append(handle)
         USER_STATES.pop(user_id, None)
         await _clear_prompt()
         if added:
             reply = "✅ Added:\n" + "\n".join(added)
-            if phone_like:
-                reply += ("\n\n📞 Looks like a phone number (not a Telegram id): "
-                          + ", ".join(f"`{h}`" for h in phone_like)
-                          + "\nRe-submit via **➕ Add Friend → 📞 By phone number** — "
-                          "it goes through Telegram's contact-import so the real "
-                          "user id is recorded.")
             if failed:
-                reply += "\n\n❌ Could not resolve: " + ", ".join(failed)
+                # The ladder tried id → username → phone (when phone-shaped)
+                # and none returned a user. Telegram's API refused the lookup
+                # (PEER_ID_INVALID, USER_ID_INVALID, no public username, or
+                # the target has "find me by phone" set to Nobody). The number
+                # could also just not be on Telegram.
+                reply += ("\n\n❌ Could not resolve: " + ", ".join(failed)
+                          + " — Telegram's API returned no user for those "
+                            "(unknown id, no public username, or the number "
+                            "isn't on Telegram / has 'find me by phone' disabled).")
             reply += ("\n\n⬇️ One-time full profile-pic backfill is starting — you'll "
                       f"receive everything at {_dest_label()}. After that only NEW "
                       "media gets delivered.")
@@ -900,13 +903,11 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             for key in keys:
                 asyncio.create_task(_auto_backfill(app, key))
         else:
-            reply = "❌ Could not resolve any of those."
-            if phone_like:
-                reply += ("\n\n📞 " + ", ".join(f"`{h}`" for h in phone_like)
-                          + " looks like a phone number — use **➕ Add Friend → "
-                            "📞 By phone number** instead (Telegram ids are at most "
-                            "10 digits).")
-            reply += " Check the id/username and try again from ➕ Add Friend."
+            reply = ("❌ Could not resolve any of those. Telegram's API returned "
+                     "no user for any of them (unknown id, no public username, "
+                     "or the number isn't on Telegram / has 'find me by phone' "
+                     "disabled). Check the values and try again from ➕ Add Friend.")
+            await message.reply_text(reply, reply_markup=back_markup)
             await message.reply_text(reply, reply_markup=back_markup)
         return
 
@@ -966,7 +967,6 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             await message.reply_text("❌ Send digits only, e.g. `+15551234567`.",
                                      reply_markup=back_markup)
             return
-        from pyrogram.types import InputPhoneContact
         uc = fm_common.user_client()
         USER_STATES.pop(user_id, None)
         await _clear_prompt()
@@ -974,23 +974,13 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             await message.reply_text("⚠️ Connected user account not started.",
                                      reply_markup=back_markup)
             return
-        try:
-            loop = __import__("asyncio").get_event_loop()
-            first = "FM" + phone[-4:].lstrip("0") or "FM"
-            contact = InputPhoneContact(phone_number=phone, first_name=first,
-                                        last_name="", client_id=0)
-            result = await uc.import_contacts([contact])
-            users = getattr(result, "users", None) or []
-        except Exception as e:
-            logger.info(f"[FriendMedia] import_contacts failed: {e}")
-            users = []
-        if not users:
+        u = await _resolve_phone_to_user(phone)
+        if u is None:
             await message.reply_text(
                 "❌ Telegram could not resolve that number to an account (not "
-                "registered, privacy-limited, or import limit hit).",
+                "registered, has 'find me by phone' disabled, or import limit hit).",
                 reply_markup=back_markup)
             return
-        u = users[0]
         await fm_common.ensure_contact(u)
         key, _ = await _add_friend_from_user(u)
         asyncio.create_task(_auto_backfill(app, key))
@@ -1040,45 +1030,95 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         return
 
 
+async def _resolve_phone_to_user(phone):
+    """Resolve a phone-number string to a Telegram ``User`` via
+    ``contacts.ImportContacts``.
+
+    Returns the User, or None if Telegram could not resolve the number
+    (unregistered, privacy-locked against phone lookup, or daily import limit
+    exhausted — the API returns an empty ``users`` list in all three cases,
+    so we can't distinguish them here; the operator gets a single
+    "could not resolve" message either way).
+    """
+    from pyrogram.types import InputPhoneContact
+    uc = fm_common.user_client()
+    if uc is None:
+        return None
+    # Normalise: strip spaces, dashes, and a leading "+"; store the E.164
+    # form on the InputPhoneContact (Telegram wants the raw +countrycode).
+    norm = phone.replace(" ", "").replace("-", "")
+    if not norm.lstrip("+").isdigit():
+        return None
+    try:
+        loop = __import__("asyncio").get_event_loop()
+        first = "FM" + (norm.lstrip("+")[-4:] or "0000").lstrip("0") or "FM"
+        contact = InputPhoneContact(phone_number=norm, first_name=first,
+                                    last_name="", client_id=0)
+        result = await uc.import_contacts([contact])
+        users = getattr(result, "users", None) or []
+    except Exception as e:
+        logger.info(f"[FriendMedia] import_contacts({norm}) failed: {e}")
+        return None
+    return users[0] if users else None
+
+
+def _looks_like_phone(handle):
+    """Heuristic — input is a phone-number-shaped string.
+
+    NOT used as a hard discriminator: the actual discriminator is whether
+    ``import_contacts`` returns a user. This only decides whether the
+    try-as-phone fallback is worth running on a digit-only input. We accept:
+      * any string with a leading "+" and only digits after
+      * 7-15 raw digits (E.164 ceiling), no leading 0 (country code required)
+    Old short Telegram user ids (e.g. ``100``, ``1000``) are < 7 digits and so
+    skip the phone fallback; long ids (>10 digits) are still attempted as ids
+    first and only fall through to phone on PEER_ID_INVALID.
+    """
+    if not handle:
+        return False
+    s = handle.strip().replace(" ", "").replace("-", "")
+    if not s:
+        return False
+    if s.startswith("+"):
+        return s[1:].isdigit() and 1 <= len(s) - 1 <= 15
+    if s.isdigit() and 7 <= len(s) <= 15 and not s.startswith("0"):
+        return True
+    return False
+
+
 async def _resolve_and_add(handle):
     """Resolve a handle to a Telegram user and persist the friend record.
 
-    Returns ``(key, friend)`` on success, ``(None, None)`` if the handle
-    couldn't be resolved to a Telegram account, or ``(None, "phone-like")``
-    if the input looks like a phone number and should be re-submitted via the
-    "Add by phone" flow (which goes through ``import_contacts`` and returns
-    the real user id). A bare digit string longer than 10 chars is treated as
-    a phone number — Telegram user ids are at most 10 digits — and silently
-    storing it as ``telegram_user_id`` would produce a dead record whose every
-    archive cycle returns ``PEER_ID_INVALID``.
+    Resolution ladder (in order, until one succeeds):
+      1. ``get_users(int(h))`` if ``h`` looks like a numeric id — succeeds
+         when the connected user account already knows the peer (it's a real
+         user id, the user is in the account's contacts, or they share a
+         dialog). PEER_ID_INVALID is the expected miss.
+      2. ``get_users(h)`` for ``@username`` / bare username — succeeds when
+         the user has a public username resolvable by the account.
+      3. ``contacts.ImportContacts`` if the input also looks like a phone
+         number (has a leading ``+`` or is 7-15 raw digits) — succeeds when
+         the phone is registered to a Telegram user who hasn't disabled
+         "find me by phone number". This is the only path that can resolve
+         a phone number; the previous digit-count heuristic (>10 digits →
+         phone) was unreliable (some countries have 7-digit numbers, some
+         old Telegram accounts have very short ids).
+
+    Returns ``(key, friend)`` on success, or ``(None, None)`` if no path
+    matched (Telegram refused the lookup, the user doesn't exist, or the
+    privacy settings blocked it). The caller surfaces an honest
+    "could not resolve" error in that case.
     """
     user = await fm_tg.resolve_telegram_user(handle)
     if user is not None:
         return await _add_friend_from_user(user)
-    # A bare numeric id that the connected account can't resolve *yet* is still
-    # stored — resolve_telegram_user falls back to the contacts scan at run time.
-    if handle.isdigit():
-        if len(handle) > 10:
-            # Phone number-shaped input (E.164 numbers are 7-15 digits, well above
-            # the 10-digit Telegram user-id ceiling). Do NOT persist a dead
-            # record; let the dispatcher route the user to "Add by phone".
-            return None, "phone-like"
-        key = handle
-        friend = {
-            "platform": "telegram",
-            "handle": handle,
-            "telegram_user_id": int(handle),
-            "username": "",
-            "first_name": handle,
-            "profile_photos": True,
-            "stories": True,
-            "ig_username": "",
-            "ig_enabled": False,
-            "ig_stories": True,
-            "ig_posts": False,
-        }
-        await fm_state.add_or_update_friend(key, friend)
-        return key, friend
+    # Last resort: try the input as a phone number. The check is heuristic;
+    # the real discriminator is the API call — if Telegram refuses (empty
+    # users list) we still fail honestly instead of persisting a dead record.
+    if _looks_like_phone(handle):
+        phone_user = await _resolve_phone_to_user(handle)
+        if phone_user is not None:
+            return await _add_friend_from_user(phone_user)
     # Allow storing an unresolved @username (e.g. an IG-only friend).
     if handle.startswith("@") or _looks_like_username(handle):
         key = "tg:" + handle.lstrip("@")
