@@ -642,8 +642,15 @@ async def _list_choose_message():
 
 
 async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
-    """Archive ONE friend under the global lock. Returns summary string."""
+    """Archive ONE friend under the global lock. Returns ``(delivered, summary)``.
+
+    ``delivered`` is the count of NEW media items actually delivered to the
+    destination (the operator-visible signal — anything > 0 means "something
+    new arrived, ping the admin in DM"). ``summary`` is the human-readable
+    per-channel breakdown preserved for ``last_count`` and backfill messages.
+    """
     parts = []
+    delivered_total = 0
     async with _ARCHIVE_LOCK:
         try:
             # Telegram archiving is gated on ACTUAL Telegram identity: a friend
@@ -655,40 +662,75 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
             is_tg = (friend.get("platform") == "telegram"
                      or bool(friend.get("telegram_user_id")))
             if is_tg and (friend.get("profile_photos") or friend.get("stories")):
-                parts.append(await fm_tg.archive_friend_telegram(
-                    key, friend, status_msg=status_msg, full=full))
+                tg_summary = await fm_tg.archive_friend_telegram(
+                    key, friend, status_msg=status_msg, full=full)
+                parts.append(tg_summary)
+                delivered_total += _count_new_in_summary(tg_summary)
             if (friend.get("ig_enabled") and friend.get("ig_username")
                     and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)):
                 if friend.get("ig_stories"):
                     try:
                         n = await fm_ig.archive_instagram_stories(key, friend, bot=client)
                         parts.append(f"{n} new IG stories")
+                        delivered_total += int(n or 0)
                     except fm_ig.IGUnavailable as e:
                         parts.append(f"⚠️ IG stories skipped: {e}")
                 if friend.get("ig_posts"):
                     try:
                         n = await fm_ig.archive_instagram_posts(key, friend, bot=client)
                         parts.append(f"{n} new IG posts")
+                        delivered_total += int(n or 0)
                     except fm_ig.IGUnavailable as e:
                         parts.append(f"⚠️ IG posts skipped: {e}")
             summary = "; ".join(p for p in parts if p) or "nothing new"
             await fm_state.update_friend(key, {"last_run": int(time.time()),
                                                "last_count": summary})
-            return summary
+            return delivered_total, summary
         except Exception as e:
             logger.exception(f"[FriendMedia] archive {key} failed: {e}")
-            return f"failed: {e}"
+            return 0, f"failed: {e}"
+
+
+def _count_new_in_summary(text):
+    """Pull the leading integer from "N new ..." style fragments of a summary.
+
+    The Telegram path returns strings like
+    ``"0 new profile pics (new; page scanned), 2 new stories"``; we sum the
+    ``N new`` counts to know whether anything was actually delivered. Fragments
+    that don't match the pattern (mode hints, warnings) contribute 0.
+    """
+    if not text:
+        return 0
+    import re
+    total = 0
+    for m in re.finditer(r"(\d+)\s+new\b", text):
+        try:
+            total += int(m.group(1))
+        except (TypeError, ValueError):
+            pass
+    return total
 
 
 async def _run_archives(client, friends, status_msg, full=False):
     for key, friend in friends:
         label = friend.get("first_name") or friend.get("handle") or key
         try:
-            summary = await _archive_one_friend(client, key, friend,
-                                                status_msg=status_msg, full=full)
-            await client.send_message(
-                config.SYSTEM_CREATOR_ID,
-                f"✅ `{label}` ({key}): {summary}")
+            delivered, summary = await _archive_one_friend(
+                client, key, friend, status_msg=status_msg, full=full)
+            if delivered > 0:
+                # Something new arrived — ping the admin in DM with the media
+                # already delivered to the safe destination by the archive_*
+                # helpers (profile pics/stories/IG posts/stories).
+                await client.send_message(
+                    config.SYSTEM_CREATOR_ID,
+                    f"✅ `{label}` ({key}): {summary}")
+            else:
+                # Quiet cycle: no new material. Mirror the per-friend summary
+                # to the LOG_CHANNEL_ID (via the root logger / TelegramChannelHandler)
+                # instead of spamming the admin's DM. The full record is still
+                # in last_count for the console.
+                logger.info(
+                    f"[FriendMedia] `{label}` ({key}): {summary} (no new material)")
         except Exception as e:
             logger.exception(f"[FriendMedia] archive {key} failed: {e}")
             await client.send_message(
@@ -741,7 +783,7 @@ async def _auto_backfill(client, key):
     friend = await fm_state.get_friend(key)
     if friend is None or fm_common.user_client() is None:
         return
-    summary = await _archive_one_friend(client, key, friend, full=True)
+    delivered, summary = await _archive_one_friend(client, key, friend, full=True)
     try:
         await client.send_message(
             config.SYSTEM_CREATOR_ID,
