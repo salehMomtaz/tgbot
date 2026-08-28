@@ -165,9 +165,24 @@ def freshness_warnings(warn_after_days: int = 21, jar_paths: list[str] | None = 
 # we need byte-exact overlay semantics, not httplib policy re-hydration)
 # =========================================================================
 
-def _parse_cookie_lines(path: str) -> dict[tuple[str, str, str], str]:
-    """Return ``{(domain, path, name): full_line}`` for every valid cookie line."""
-    entries: dict[tuple[str, str, str], str] = {}
+def _parse_cookie_lines(path: str) -> "list[tuple[tuple[str, str, str], str]]":
+    """Return an ORDERED list of ``(key, raw_line)`` for every valid cookie line.
+
+    Why an ordered list, not a dict: real-world exports (Chrome DevTools
+    "Copy as Netscape" and some mobile-app exports) emit the same cookie
+    twice when the same key exists with different paths or HTTP-only
+    variants. The previous dict-based parser keyed by
+    ``(domain, path, name)`` silently dropped the duplicates on write-back,
+    losing cookies like ``ps_l``/``ps_n`` that Instagram's web auth needs.
+    See the operator's report after uploading a 2 KB jar: only 1 KB survived
+    a headless refresh cycle because the dict overwrote 13 of 26 lines.
+
+    The list preserves the order and the duplicate count of the source. The
+    overlay code walks the list, applies updates per-key, and writes
+    everything back in the same order — so a future headless refresh sees
+    the SAME cookies (in the same order) the operator uploaded.
+    """
+    out: "list[tuple[tuple[str, str, str], str]]" = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
@@ -177,10 +192,13 @@ def _parse_cookie_lines(path: str) -> dict[tuple[str, str, str], str]:
                 parts = line.split("\t")
                 if len(parts) < 7:
                     continue
-                entries[(parts[0], parts[2], parts[5])] = line
+                # (domain, path, name) — same triple as before; duplicates
+                # with the same triple are kept in the list (most recent
+                # wins in the overlay step; the rest stay for completeness).
+                out.append(((parts[0], parts[2], parts[5]), line))
     except Exception:
         pass
-    return entries
+    return out
 
 
 def has_real_cookie_lines(path_or_content: str, *, is_content: bool = False) -> bool:
@@ -327,16 +345,28 @@ def _merge_snapshot_into(original_path: str, snapshot_path: str) -> int:
         if not real_entries and os.path.exists(original_path) and os.path.getsize(original_path) > 0:
             return -1  # real jar unparseable but non-empty: don't guess
 
+        # Build a (domain, path, name) -> latest-line dict from the real
+        # jar so we can apply snapshot overrides. The list form preserves
+        # the source order + duplicates; the dict form is the lookup
+        # table we apply updates against.
+        real_by_key: dict[tuple[str, str, str], str] = {}
+        for key, line in real_entries:
+            real_by_key[key] = line  # last-write wins per key, but the LIST keeps all entries
+
         changed = 0
-        for key, line in snap_entries.items():
-            if real_entries.get(key) != line:
-                real_entries[key] = line
+        for key, line in snap_entries:
+            if real_by_key.get(key) != line:
+                real_by_key[key] = line
                 changed += 1
         if changed == 0:
             return 0
 
+        # Walk the real_entries list in source order. For each entry, use
+        # the (possibly-updated) real_by_key value. This preserves the
+        # source order AND the count of duplicate entries (so a jar that
+        # had NID twice stays NID twice after the overlay).
         prev_mode = get_jar_mode(original_path)
-        lines = [real_entries[k] for k in sorted(real_entries.keys())]
+        lines = [real_by_key.get(key, line) for key, line in real_entries]
         content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
         _atomic_write(original_path, content, mode=prev_mode)
         return changed
@@ -371,27 +401,34 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> in
     entries = _parse_cookie_lines(cookie_path)
     if not entries:
         return -1
+    # Build a lookup of the latest (domain, name) -> line index so we can
+    # update in place while preserving the source order and duplicate count
+    # of the original jar.
+    latest_idx: dict[tuple[str, str], int] = {}
+    for i, (key, line) in enumerate(entries):
+        latest_idx[(key[0], key[2])] = i  # last-write wins per (domain, name)
     changed = 0
+    new_entries: "list[tuple[tuple[str, str, str], str]]" = list(entries)
     for (domain, name), value in updates.items():
-        # Find the existing line for (domain, name) and swap in the new value.
-        # The key is (domain, path, name) in the entries map — locate by domain+name.
-        for key, line in list(entries.items()):
-            if key[0] == domain and key[2] == name:
-                parts = line.split("\t")
-                if len(parts) >= 7 and parts[6] != value:
-                    parts[6] = value
-                    entries[key] = "\t".join(parts)
-                    changed += 1
-                break
+        idx = latest_idx.get((domain, name))
+        if idx is not None:
+            key, line = new_entries[idx]
+            parts = line.split("\t")
+            if len(parts) >= 7 and parts[6] != value:
+                parts[6] = value
+                new_entries[idx] = (key, "\t".join(parts))
+                changed += 1
         else:
             # Cookie absent from the jar: append a new entry (session cookie form).
+            new_key = (domain, "/", name)
             new_line = f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}"
-            entries[(domain, "/", name)] = new_line
+            new_entries.append((new_key, new_line))
+            latest_idx[(domain, name)] = len(new_entries) - 1
             changed += 1
     if changed == 0:
         return 0
     prev_mode = get_jar_mode(cookie_path)
-    lines = [entries[k] for k in sorted(entries.keys())]
+    lines = [line for _, line in new_entries]
     content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
     _atomic_write(cookie_path, content, mode=prev_mode)
     return changed

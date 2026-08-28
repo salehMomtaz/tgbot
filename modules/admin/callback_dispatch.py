@@ -438,7 +438,15 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                 last_up = rec.get("last_upload")
                 if last_ok:
                     age_h = int((_time.time() - last_ok) / 3600)
-                    status_line = f"\n✅ Last authenticated success: {age_h}h ago · rotation merges: {merges}"
+                    # "Last headless refresh" makes it clear this metric is
+                    # about the 24h headless cycle (not the jar's age — a
+                    # fresh operator upload doesn't update this, only a
+                    # successful headless visit does). Without this label
+                    # the operator thinks their fresh upload is "63h old"
+                    # when in fact the upload timestamp is shown on the
+                    # next line. See docs/memory/tgbot-ig-cookie-jar-confusion.md
+                    # for the user-facing report that triggered this rename.
+                    status_line = f"\n✅ Last headless refresh: {age_h}h ago · rotation merges: {merges}"
                 if last_up:
                     age_h = int((_time.time() - last_up) / 3600)
                     status_line += f"\n📤 Last uploaded: {age_h}h ago"
