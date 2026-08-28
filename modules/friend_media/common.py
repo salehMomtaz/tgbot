@@ -58,22 +58,73 @@ def resolve_destination():
 
 
 async def ensure_contact(user):
-    """Add the friend to the connected account's contacts if not already. Sends
-    NOTHING — this is the only call that touches the friend, and it is silent."""
+    """Add the friend to the connected account's contacts UNDER THEIR REAL NAME.
+    Sends NOTHING — this is the only call that touches the friend, and it is silent.
+
+    Why the explicit delete-then-readd:
+    ``contacts.AddContact`` is supposed to overwrite the contact's stored
+    name when called for an existing user_id, but in practice the overwrite
+    only happens reliably when the contact was originally created via the
+    same AddContact path. If the user manually added the contact in their
+    phone app (or via an earlier bot run that used a placeholder), the
+    address-book entry may keep its old name (e.g. the placeholder or a
+    manual alias) even after a successful ``add_contact(real_name)`` call
+    — the operator then sees the wrong name in their contact list and the
+    friend_media log line.
+
+    To guarantee the address book ends up with the account's real
+    ``first_name`` / ``last_name``, we always:
+      1. ``delete_contacts(user_id)`` — removes any existing entry
+         (no-op if the user wasn't a contact). The DELETE operation
+         never sends anything to the friend; it only mutates our own
+         address book.
+      2. ``add_contact(user_id, real_first, real_last)`` — creates a
+         fresh entry with the canonical account name resolved by
+         ``contacts.ResolvePhone`` upstream.
+
+    Both calls are best-effort and silently caught — a rate-limited or
+    network-blip on either step is logged at INFO, not raised.
+    """
     if user is None:
         return
     # Only attempt for users that look like a real contact target.
     u_id = getattr(user, "id", None)
     if not u_id:
         return
+    uc = user_client()
+    if uc is None:
+        return
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    # Step 1: drop any existing contact entry. delete_contacts is a no-op
+    # when the user isn't a contact yet, and never sends anything to
+    # them — it only mutates the connected account's own address book.
     try:
-        first = getattr(user, "first_name", "") or ""
-        last = getattr(user, "last_name", "") or ""
-        await user_client().add_contact(user_id=u_id, first_name=first, last_name=last)
-        logger.info(f"[FriendMedia] Added {u_id} ({first}) to contacts (silent).")
+        await uc.delete_contacts(u_id)
+        logger.info(
+            f"[FriendMedia] Cleared any existing contact entry for {u_id} "
+            f"(so the real name can take its place)."
+        )
     except Exception as e:
-        # add_contact is best-effort: if already a contact or rate-limited, ignore.
-        logger.info(f"[FriendMedia] add_contact skipped for {u_id}: {e}")
+        # Not a contact, rate-limited, or peer not yet known — all benign
+        # for our purpose; the add_contact below still works.
+        logger.info(
+            f"[FriendMedia] delete_contacts({u_id}) skipped: {e}"
+        )
+    # Step 2: add the contact under the account's real name. This is
+    # the entry that now appears in the operator's contact list, and
+    # it's the entry future ``get_users(id)`` calls will see.
+    try:
+        await uc.add_contact(user_id=u_id, first_name=first, last_name=last)
+        logger.info(
+            f"[FriendMedia] Added {u_id} ({first}) to contacts (silent) — "
+            f"contact now mirrors the account's real name."
+        )
+    except Exception as e:
+        # add_contact is best-effort: rate-limited or peer-gone, ignore.
+        logger.info(
+            f"[FriendMedia] add_contact({u_id}) skipped: {e}"
+        )
 
 
 async def _send_once(client, dest, path, kind, caption):
