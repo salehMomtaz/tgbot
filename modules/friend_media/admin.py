@@ -234,7 +234,17 @@ async def _add_friend_from_user(u):
     """Persist a resolved pyrogram User as a friend record."""
     u_id = getattr(u, "id", None)
     uname = getattr(u, "username", None)
-    fname = getattr(u, "first_name", None) or (uname or str(u_id))
+    # Use the real account name when we have one. The previous fallback chain
+    # `(uname or str(u_id))` would persist "1234567890" as the first_name when
+    # the Telegram account has no display name set — the operator saw this as
+    # a placeholder. Prefer @username (a public identifier, not a number), and
+    # only fall back to the user id as a last resort so the friend record
+    # always has a display label.
+    fname = (
+        (getattr(u, "first_name", None) or "").strip()
+        or (uname or "").strip()
+        or (str(u_id) if u_id else "")
+    )
     key = str(u_id) if u_id else ("tg:" + (uname or fname))
     friend = {
         "platform": "telegram",
@@ -1028,7 +1038,7 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 
 async def _resolve_phone_to_user(phone):
     """Resolve a phone-number string to a Telegram ``User`` via
-    ``contacts.ImportContacts``.
+    ``contacts.ImportContacts`` + a follow-up ``get_users(id)`` second pass.
 
     Returns the User, or None if Telegram could not resolve the number
     (unregistered, privacy-locked against phone lookup, or daily import limit
@@ -1040,6 +1050,16 @@ async def _resolve_phone_to_user(phone):
     Operators commonly paste a bare digit string (no ``+``), so we auto-add
     the ``+`` when missing. ``+15551234567`` and ``15551234567`` are now
     equivalent inputs.
+
+    The follow-up ``get_users(id)`` matters: ``import_contacts`` can echo our
+    placeholder name back as the returned User's ``first_name`` (e.g. when
+    the real Telegram account has no display name set, or when the account's
+    privacy settings hide the real name from the import response). After the
+    import, the peer is in the connected account's address book, so
+    ``get_users(id)`` succeeds and returns the canonical User with the real
+    account name (or the empty ``first_name`` if the account truly has none).
+    The caller uses that first_name for the friend record so we never store
+    a placeholder like "EX0001".
     """
     from pyrogram.types import InputPhoneContact
     uc = fm_common.user_client()
@@ -1050,21 +1070,37 @@ async def _resolve_phone_to_user(phone):
         return None
     if not norm.startswith("+"):
         norm = "+" + norm
+    # Use the phone number itself as the placeholder first_name — it's
+    # human-readable in the contact list ("+15551234567" reads better than
+    # "EX0001") and matches the convention of phones that don't yet have a
+    # real contact name. The follow-up get_users pass below replaces this
+    # with the real account name on the next line.
     try:
         loop = __import__("asyncio").get_event_loop()
-        first = "FM" + (norm.lstrip("+")[-4:] or "0000").lstrip("0") or "FM"
-        # kurigram 2.2.24 (drop-in for pyrogram — see requirements.txt) takes
-        # ``phone=`` (not ``phone_number=``). The class __new__ already
-        # prepends ``+`` and strips any leading one from the input, so passing
-        # the normalised form (with or without our own ``+``) works either way.
-        # Verified identical between kurigram 2.2.24 and 2.2.25.
-        contact = InputPhoneContact(phone=norm, first_name=first, last_name="")
+        contact = InputPhoneContact(phone=norm, first_name=norm, last_name="")
         result = await uc.import_contacts([contact])
         users = getattr(result, "users", None) or []
     except Exception as e:
         logger.info(f"[FriendMedia] import_contacts({norm}) failed: {e}")
         return None
-    return users[0] if users else None
+    if not users:
+        return None
+    # Second pass: re-resolve the now-known peer to get the real account
+    # name. The import above is necessary (it's the only way to find a user
+    # by phone), but its first_name may be the placeholder. The follow-up
+    # get_users succeeds because the peer is now in the account's address
+    # book; it returns the canonical User with the real first_name.
+    first = users[0]
+    try:
+        second = await uc.get_users(first.id)
+        if second is not None:
+            return second
+    except Exception as e:
+        logger.info(
+            f"[FriendMedia] get_users({getattr(first, 'id', '?')}) follow-up "
+            f"after import_contacts failed: {e}"
+        )
+    return first
 
 
 def _looks_like_phone(handle):
@@ -1116,6 +1152,12 @@ async def _resolve_and_add(handle):
     """
     user = await fm_tg.resolve_telegram_user(handle)
     if user is not None:
+        # Even when id/username lookup succeeded, make sure the peer is in
+        # the connected account's address book — ensures subsequent
+        # get_chat_photos / get_chat_stories can resolve the peer on every
+        # cycle without depending on the original lookup path. ensure_contact
+        # is best-effort and silent.
+        await fm_common.ensure_contact(user)
         return await _add_friend_from_user(user)
     # Last resort: try the input as a phone number. The check is heuristic;
     # the real discriminator is the API call — if Telegram refuses (empty
@@ -1123,6 +1165,11 @@ async def _resolve_and_add(handle):
     if _looks_like_phone(handle):
         phone_user = await _resolve_phone_to_user(handle)
         if phone_user is not None:
+            # Mirror the id/username path: add to the address book so
+            # archive_telegram_profile_photos / archive_telegram_stories
+            # (which call get_chat_photos / get_chat_stories on the
+            # connected account) can resolve the peer on every cycle.
+            await fm_common.ensure_contact(phone_user)
             return await _add_friend_from_user(phone_user)
     # Allow storing an unresolved @username (e.g. an IG-only friend).
     if handle.startswith("@") or _looks_like_username(handle):
