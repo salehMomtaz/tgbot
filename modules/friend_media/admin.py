@@ -852,6 +852,39 @@ async def _auto_backfill(client, key):
         pass
 
 
+async def _ig_add_archive(client, key):
+    """One-time IG profile-pic + live-stories archive right after a friend is
+    added on the IG side. Mirrors the TG-side ``_auto_backfill`` pattern.
+
+    Per the operator's "current stories + profile picture on add" flow:
+    ``archive_instagram_profile_pic`` (one-time, gated by the
+    ``ig_profile_pic_delivered`` flag in the friend record) and
+    ``archive_instagram_stories`` (the live 24h-window stories — anything
+    older is already expired server-side, so the very first
+    ``cl.user_stories(pk)`` call returns exactly what the operator
+    wanted). The posts watermark is still set so older posts are NOT
+    backfilled.
+    """
+    friend = await fm_state.get_friend(key)
+    if friend is None:
+        return
+    # _archive_one_friend in the IG branch already calls profile-pic
+    # (gated by ig_profile_pic_delivered) + stories. The result
+    # summary is delivered back to the operator's chat.
+    try:
+        delivered, summary = await _archive_one_friend(
+            client, key, friend, full=False)
+        if delivered > 0 or summary not in ("nothing new", "nothing enabled"):
+            try:
+                await client.send_message(
+                    config.SYSTEM_CREATOR_ID,
+                    f"📸 IG first archive for `{key}`: {summary}")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"[FriendMedia] IG add-archive for {key} failed: {e}")
+
+
 async def _run_ig_archive(client, status_msg, key, friend):
     """Run a full IG archive (-> zip) for one friend, streaming progress to a
     status message and delivering the zip to the safe destination."""
@@ -940,21 +973,37 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         USER_STATES.pop(user_id, None)
         await _clear_prompt()
         added, failed = [], []
+        keys = []
         for ig in lines:
             key, friend = await _add_ig_friend(ig)
             if key:
                 added.append(f"`@{ig}`")
+                keys.append(key)
             else:
                 failed.append(ig)
         if added:
             reply = "✅ Added IG friend(s):\n" + "\n".join(added)
-            reply += ("\n\nFirst run records a watermark — only NEW stories/posts "
-                      "(posted after now) will be delivered. Nothing is sent to them.")
+            reply += ("\n\n📸 Profile picture + currently-live stories are being "
+                      "delivered to your destination right now (anything in the "
+                      "24h window). After that, only NEW stories/posts (posted "
+                      "after now) get delivered — older IG history is never "
+                      "backfilled. Highlights (expired stories) live behind the "
+                      "🗂 Archive (zip) button on the friend's card.\n\n"
+                      "⏳ Running the first archive in the background. If the IG "
+                      "session is stale, you'll see a session-expired message — "
+                      "re-upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars "
+                      "and the next cycle will pick it up.")
             if failed:
                 reply += "\n\n❌ Could not add: " + ", ".join(failed)
         else:
             reply = "❌ Could not add any IG friend. Check the username and try again."
         await message.reply_text(reply, reply_markup=back_markup)
+        # Kick off the one-time profile-pic + live-stories archive for each
+        # new IG friend. Same pattern as the TG-side _auto_backfill: this
+        # is best-effort and silent on failure (the operator already saw
+        # the IG cookies warning if the session is stale).
+        for key in keys:
+            asyncio.create_task(_ig_add_archive(app, key))
         return
 
     if state == "waiting_for_friend_search":
