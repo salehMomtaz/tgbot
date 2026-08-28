@@ -1053,10 +1053,11 @@ async def _resolve_phone_to_user(phone):
     try:
         loop = __import__("asyncio").get_event_loop()
         first = "FM" + (norm.lstrip("+")[-4:] or "0000").lstrip("0") or "FM"
-        # pyrogram 2.0.106's InputPhoneContact takes ``phone=`` (not
-        # ``phone_number=``). The class __new__ already prepends ``+`` and
-        # strips any leading one from the input, so passing the normalised
-        # form (with or without our own ``+``) works either way.
+        # kurigram 2.2.24 (drop-in for pyrogram — see requirements.txt) takes
+        # ``phone=`` (not ``phone_number=``). The class __new__ already
+        # prepends ``+`` and strips any leading one from the input, so passing
+        # the normalised form (with or without our own ``+``) works either way.
+        # Verified identical between kurigram 2.2.24 and 2.2.25.
         contact = InputPhoneContact(phone=norm, first_name=first, last_name="")
         result = await uc.import_contacts([contact])
         users = getattr(result, "users", None) or []
