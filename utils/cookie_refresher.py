@@ -182,7 +182,40 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                 # authed XHRs. /api/v1 web endpoints are the same paths
                 # instagrapi hits, so cookies set there are the same ones
                 # the DM worker needs.
+                #
+                # We also dismiss the "Save Your Login Info?" / "Turn on
+                # Notifications?" dialogs that Instagram shows to fresh
+                # devices (a headless Chromium without a saved profile
+                # presents as a new device to IG) — the dialog clicks
+                # trigger the personalization XHRs that issue ps_l/ps_n
+                # (the cookies Chrome's web login uses to recognize the
+                # account). Without them, an operator who downloads
+                # the jar and injects it into Chrome incognito sees
+                # "no account" — the exact regression the operator
+                # reported on 2026-08-28.
                 if is_ig:
+                    # Dismiss the "Save Your Login Info?" / "Not Now" button
+                    # if it appears (typical on first IG visit from a new
+                    # device). The button text varies by locale; we look for
+                    # the most common English variant.
+                    try:
+                        await page.locator(
+                            'button:has-text("Not Now")').first.click(timeout=2000)
+                        await asyncio.sleep(1)
+                    except Exception:
+                        pass
+                    try:
+                        await page.locator(
+                            'button:has-text("Save info")').first.click(timeout=2000)
+                    except Exception:
+                        pass
+                    # Dismiss the "Turn on Notifications?" dialog
+                    try:
+                        await page.locator(
+                            'button:has-text("Not Now")').first.click(timeout=2000)
+                    except Exception:
+                        pass
+                    # Visit authed pages that exercise the personalization XHR.
                     for extra_path in ("/explore/", "/accounts/edit/", "/"):
                         try:
                             await page.goto(
@@ -193,6 +226,15 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                             logger.info(
                                 f"[CookieRefresh] IG extra visit "
                                 f"{extra_path} skipped: {e2}")
+                    # Scroll the home page a bit so the feed XHR fires and
+                    # IG issues ps_l/ps_n (the personalization cookies Chrome
+                    # web needs to recognize the account).
+                    try:
+                        for _ in range(3):
+                            await page.evaluate("window.scrollBy(0, 800)")
+                            await asyncio.sleep(2)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"[CookieRefresh] goto {url} failed: {e} — still trying to extract cookies")
 

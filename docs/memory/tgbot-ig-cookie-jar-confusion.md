@@ -59,6 +59,34 @@ the missing `ps_l`/`ps_n` cookies are the ones that tell IG "this
 browser has been used by this account before" — without them, IG
 treats the session as a brand-new anonymous visit.
 
+### Why headless refresh can't recover `ps_l`/`ps_n`
+
+The 24h headless cycle (or a manual `refresh_all_cookies_sequential`)
+navigates to `/explore/`, `/accounts/edit/`, the home page, and
+scrolls the feed to trigger IG's personalization XHRs. With the
+recent fix it ALSO dismisses the "Save Your Login Info?" /
+"Turn on Notifications?" dialogs that IG shows to fresh devices
+(those clicks themselves trigger the XHRs).
+
+But `ps_l`/`ps_n` are **device-binding** cookies. They are issued
+only to the BROWSER that has a long history of the account
+(specific fingerprint, local storage, IndexedDB, etc.). A fresh
+headless Chromium in a VPS datacenter IP, even with all the
+right cookies imported, is treated by IG as a brand-new device
+and **never gets `ps_l`/`ps_n`** — IG just shows "no account" to
+that device.
+
+This is by IG's design: `ps_l`/`ps_n` are anti-fraud signals
+(distinctive cookies that only the legitimate user's browser has).
+The headless browser cannot reproduce them.
+
+**The only way for Chrome-injectable cookies to work is to
+re-export from the operator's MOBILE app** (not Chrome DevTools).
+The mobile app has the device-binding cookies because the
+operator's phone has been used with that account. Mobile exports
+include `ps_l`/`ps_n` because the mobile app's NetworkSecurityConfig
+is what issued them.
+
 ## The fix (commit history)
 
 1. `utils/cookie_manager._parse_cookie_lines` now returns an
@@ -87,22 +115,29 @@ treats the session as a brand-new anonymous visit.
 
 ## Operator recovery path (after this fix is live)
 
-The current `igcookies.txt` on disk is the 1 KB version that
-already lost its `ps_l`/`ps_n`. The fix above is permanent going
+The current `igcookies.txt` on disk is the 1.5 KB / 17-line version
+that already lost its `ps_l`/`ps_n`. The fix above is permanent going
 forward, but for the **next** headless cycle (within 24h), the
 fresh cookies in the operator's mobile app will land in the jar
 fully. If the operator wants immediate recovery:
 
-1. Re-export cookies from the Instagram mobile app (not Chrome
+1. **Re-export cookies from the Instagram MOBILE app** (not Chrome
    DevTools — mobile export has each cookie once and includes
    `ps_l`/`ps_n`).
-2. Re-upload via Admin → 🍪 Cookie Jars → Replace.
+2. **Re-upload via Admin → 🍪 Cookie Jars → Replace.**
 3. The current bot's `login_by_sessionid` works with the new
-   sessionid (verified at 23:03:07 today) — Chrome's web login
-   still won't recognize the session until the next headless
-   refresh completes (it'll add the missing `__Secure-*` and
-   `ig_psid` tokens via the new `/explore/` and `/accounts/edit/`
-   navigation paths).
+   sessionid (verified at 23:03:07 today and at every
+   supervised refresh since) — Chrome's web login still won't
+   recognize the session because the headless browser cannot
+   reproduce `ps_l`/`ps_n` (they are device-binding — see the
+   "Why headless refresh can't recover ps_l/ps_n" section above).
+   The mobile-app export DOES include them, so Chrome injection
+   from the operator's mobile export works.
+
+The bot itself (DM worker, profile-pic monitor, friend-media IG
+archiver) is **unaffected by ps_l/ps_n** — those are only needed
+for IG's web personalization flow. instagrapi's private API works
+fine with the 11-cookie minimal set.
 
 ## Reference clones (untracked, in `reference/`)
 
