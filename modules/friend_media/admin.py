@@ -362,19 +362,16 @@ async def fm_callback_dispatch(client, callback_query):
     if data == "fm_add_tg":
         USER_STATES[user_id] = "waiting_for_friend_add"
         await callback_query.message.edit_text(
-            "➕ **Add Telegram Friend**\n\nSend the friend's **numeric Telegram id**, "
-            "**@username**, **username**, or **phone number** (e.g. `+15551234567` — "
-            "one per line to add several).\n\n"
-            "Resolution ladder (silent, no message is sent to the friend):\n"
-            "  1. Try as a Telegram id (if it's already in your contacts / dialogs)\n"
-            "  2. Try as a public @username\n"
-            "  3. For phone numbers: `contacts.ImportContacts` (returns the real id)\n\n"
+            "➕ **Add Telegram Friend**\n\nSend the friend's **@username** "
+            "or **phone number** (e.g. `+15551234567` or `15551234567` — "
+            "with or without the leading `+`; one per line to add several).\n\n"
+            "Resolution (silent — no message is sent to the friend):\n"
+            "  • `@username` → looked up by the connected account\n"
+            "  • Phone number → `contacts.ImportContacts` returns the real id\n\n"
             "A one-time full profile-pic backfill starts automatically. Only YOU "
             "receive their media.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📞 By phone number only",
-                                      callback_data="fm_contact_phone")],
-                [InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
         return
     if data == "fm_add_ig":
@@ -908,7 +905,6 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                      "or the number isn't on Telegram / has 'find me by phone' "
                      "disabled). Check the values and try again from ➕ Add Friend.")
             await message.reply_text(reply, reply_markup=back_markup)
-            await message.reply_text(reply, reply_markup=back_markup)
         return
 
     if state == "waiting_for_friend_add_ig":
@@ -1039,16 +1035,21 @@ async def _resolve_phone_to_user(phone):
     exhausted — the API returns an empty ``users`` list in all three cases,
     so we can't distinguish them here; the operator gets a single
     "could not resolve" message either way).
+
+    Normalisation: ``import_contacts`` expects E.164 with a leading ``+``.
+    Operators commonly paste a bare digit string (no ``+``), so we auto-add
+    the ``+`` when missing. ``+15551234567`` and ``15551234567`` are now
+    equivalent inputs.
     """
     from pyrogram.types import InputPhoneContact
     uc = fm_common.user_client()
     if uc is None:
         return None
-    # Normalise: strip spaces, dashes, and a leading "+"; store the E.164
-    # form on the InputPhoneContact (Telegram wants the raw +countrycode).
     norm = phone.replace(" ", "").replace("-", "")
     if not norm.lstrip("+").isdigit():
         return None
+    if not norm.startswith("+"):
+        norm = "+" + norm
     try:
         loop = __import__("asyncio").get_event_loop()
         first = "FM" + (norm.lstrip("+")[-4:] or "0000").lstrip("0") or "FM"
