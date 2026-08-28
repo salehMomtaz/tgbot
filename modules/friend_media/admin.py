@@ -1053,8 +1053,11 @@ async def _resolve_phone_to_user(phone):
     try:
         loop = __import__("asyncio").get_event_loop()
         first = "FM" + (norm.lstrip("+")[-4:] or "0000").lstrip("0") or "FM"
-        contact = InputPhoneContact(phone_number=norm, first_name=first,
-                                    last_name="", client_id=0)
+        # pyrogram 2.0.106's InputPhoneContact takes ``phone=`` (not
+        # ``phone_number=``). The class __new__ already prepends ``+`` and
+        # strips any leading one from the input, so passing the normalised
+        # form (with or without our own ``+``) works either way.
+        contact = InputPhoneContact(phone=norm, first_name=first, last_name="")
         result = await uc.import_contacts([contact])
         users = getattr(result, "users", None) or []
     except Exception as e:
