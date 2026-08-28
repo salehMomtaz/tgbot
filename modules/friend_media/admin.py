@@ -1038,30 +1038,33 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
 
 async def _resolve_phone_to_user(phone):
     """Resolve a phone-number string to a Telegram ``User`` via
-    ``contacts.ImportContacts`` + a follow-up ``get_users(id)`` second pass.
+    ``contacts.ResolvePhone`` (raw MTProto function).
 
     Returns the User, or None if Telegram could not resolve the number
     (unregistered, privacy-locked against phone lookup, or daily import limit
-    exhausted — the API returns an empty ``users`` list in all three cases,
-    so we can't distinguish them here; the operator gets a single
-    "could not resolve" message either way).
+    exhausted). The Operator gets a single "could not resolve" message either
+    way — the API can't distinguish the three failure modes.
 
-    Normalisation: ``import_contacts`` expects E.164 with a leading ``+``.
+    Normalisation: the raw function expects E.164 with a leading ``+``.
     Operators commonly paste a bare digit string (no ``+``), so we auto-add
     the ``+`` when missing. ``+15551234567`` and ``15551234567`` are now
     equivalent inputs.
 
-    The follow-up ``get_users(id)`` matters: ``import_contacts`` can echo our
-    placeholder name back as the returned User's ``first_name`` (e.g. when
-    the real Telegram account has no display name set, or when the account's
-    privacy settings hide the real name from the import response). After the
-    import, the peer is in the connected account's address book, so
-    ``get_users(id)`` succeeds and returns the canonical User with the real
-    account name (or the empty ``first_name`` if the account truly has none).
-    The caller uses that first_name for the friend record so we never store
-    a placeholder like "EX0001".
+    Why ``contacts.ResolvePhone`` and not ``contacts.ImportContacts``:
+    ``ImportContacts`` creates a contact entry under whatever name we send
+    as the placeholder. Telegram echoes that placeholder back as the
+    User's ``first_name`` for the imported contact, and ``get_users`` on
+    the resulting peer also returns the placeholder name (not the
+    account's real display name). A follow-up ``get_users(id)`` second
+    pass does NOT recover the real name — the address book entry
+    shadows the account name. ``ResolvePhone`` is the only API that
+    returns the canonical account info (real ``first_name`` /
+    ``last_name`` / ``username``) without creating a contact entry.
+    Once we have the real User, the caller adds the contact via
+    ``ensure_contact`` under the real name.
     """
-    from pyrogram.types import InputPhoneContact
+    from pyrogram import raw
+    from pyrogram.types import User as UserType
     uc = fm_common.user_client()
     if uc is None:
         return None
@@ -1070,37 +1073,27 @@ async def _resolve_phone_to_user(phone):
         return None
     if not norm.startswith("+"):
         norm = "+" + norm
-    # Use the phone number itself as the placeholder first_name — it's
-    # human-readable in the contact list ("+15551234567" reads better than
-    # "EX0001") and matches the convention of phones that don't yet have a
-    # real contact name. The follow-up get_users pass below replaces this
-    # with the real account name on the next line.
     try:
-        loop = __import__("asyncio").get_event_loop()
-        contact = InputPhoneContact(phone=norm, first_name=norm, last_name="")
-        result = await uc.import_contacts([contact])
-        users = getattr(result, "users", None) or []
+        r = await uc.invoke(raw.functions.contacts.ResolvePhone(phone=norm))
     except Exception as e:
-        logger.info(f"[FriendMedia] import_contacts({norm}) failed: {e}")
+        logger.info(f"[FriendMedia] contacts.ResolvePhone({norm}) failed: {e}")
         return None
-    if not users:
+    raw_users = list(getattr(r, "users", None) or [])
+    if not raw_users:
         return None
-    # Second pass: re-resolve the now-known peer to get the real account
-    # name. The import above is necessary (it's the only way to find a user
-    # by phone), but its first_name may be the placeholder. The follow-up
-    # get_users succeeds because the peer is now in the account's address
-    # book; it returns the canonical User with the real first_name.
-    first = users[0]
+    # Convert the first raw User to the high-level User the rest of the
+    # code expects. User._parse is async but takes no I/O — it just
+    # builds the high-level object from the raw type.
     try:
-        second = await uc.get_users(first.id)
-        if second is not None:
-            return second
+        parsed = await UserType._parse(uc, raw_users[0])
     except Exception as e:
         logger.info(
-            f"[FriendMedia] get_users({getattr(first, 'id', '?')}) follow-up "
-            f"after import_contacts failed: {e}"
+            f"[FriendMedia] User._parse after ResolvePhone failed: {e}"
         )
-    return first
+        return None
+    if parsed is None:
+        return None
+    return parsed
 
 
 def _looks_like_phone(handle):
