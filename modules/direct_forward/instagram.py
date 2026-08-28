@@ -141,11 +141,31 @@ def _ig_resolve_raw(item: dict) -> dict | None:
 
 
 def _ig_pk_from_url(cl, url: str) -> int:
-    """Extract the media pk from any Instagram URL form."""
+    """Extract the media pk from any Instagram URL form.
+
+    Uses the public web client (``cl.media_pk_from_url``) which goes through
+    ``cl.public`` and hits the public web endpoint. When Instagram soft-blocks
+    that endpoint (returns HTML instead of JSON, surfaced as a
+    ``JSONDecodeError``), we count the failure and skip subsequent public
+    calls for a cooldown window — hammering a throttled endpoint only
+    deepens the block.
+    """
     story = re.search(r"instagram\.com/stories/[^/]+/(\d+)", url)
     if story:
         return int(story.group(1))
-    return int(cl.media_pk_from_url(url))
+    if ig_anti_detect.public_soft_block_active():
+        raise RuntimeError(
+            "IG public-web soft-block cooldown active; skipping "
+            "media_pk_from_url for this cycle"
+        )
+    try:
+        pk = int(cl.media_pk_from_url(url))
+    except Exception as e:
+        if "JSONDecode" in type(e).__name__ or "Expecting value" in str(e):
+            ig_anti_detect.record_public_soft_block()
+        raise
+    ig_anti_detect.record_public_success()
+    return pk
 
 
 async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
@@ -529,6 +549,21 @@ async def _ig_pairing_scan(item: dict, thread_users: dict, state: dict,
     return True
 
 
+async def _post_ig_alert(bot_client, chat_id: int, text: str) -> None:
+    """Best-effort async alert to the operator's Telegram chat.
+
+    Used by the IG anti-detect module (email-change handler) to surface
+    in-app security nudges (Instagram forced email change) that the
+    operator must resolve in the official app. Wrapped in try/except
+    because the worker is a daemon — never let an alert sink crash the
+    poll loop.
+    """
+    try:
+        await bot_client.send_message(chat_id=chat_id, text=text)
+    except Exception as e:
+        logger.warning(f"[IG direct-forward] failed to post IG alert to chat: {e}")
+
+
 async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> None:
     try:
         from instagrapi import Client as IGClient
@@ -575,7 +610,18 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         try:
             ig_anti_detect.install_token_echo(c)
         except Exception as e:
-            logger.warning(f"[DirectForward/IG] token-echo install degraded: {e}")
+            logger.warning(f"[IG direct-forward] token-echo install degraded: {e}")
+        # Email-change alert: when Instagram forces the operator to change
+        # the account email, instagrapi's change_password_handler is
+        # invoked. We do NOT attempt to bypass (a programmatic password
+        # change deepens the flag); the handler freezes the worker per the
+        # existing challenge policy and tells the operator what to do in
+        # the official app.
+        try:
+            ig_anti_detect.install_email_change_alert(
+                c, alert_sink=lambda msg: _post_ig_alert(bot_client, chat_id, msg))
+        except Exception as e:
+            logger.warning(f"[IG direct-forward] email-change handler install degraded: {e}")
         return c
 
     # The cookie jar (and hence the sessionid) can change after startup: the
@@ -603,6 +649,16 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
+            # Cold-start jitter: extend the post-login window with a
+            # longer paced "user opens app, reads inbox" sequence so
+            # the first paired-thread poll isn't the very first observable
+            # activity on the new session. The bot can run a few minutes
+            # later than usual on cold start — the user pays that once
+            # per boot in exchange for not flagging the account.
+            try:
+                await ig_anti_detect.cold_start_jitter(cl)
+            except Exception as e:
+                logger.warning(f"[DirectForward/IG] cold-start jitter skipped: {e}")
             break
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
             # User requested to break freeze and start immediately (VPN already matches VPS).
@@ -893,6 +949,18 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     consumed = False
                     success = False
                     try:
+                        # Burst pacing: a multi-item backfill (the gap-fetch
+                        # case) is exactly the pattern that triggers
+                        # "we suspect automated behavior" — 33 items at a
+                        # near-uniform 4-6 s cadence looks scripted. Apply
+                        # a per-item sleep that scales with the burst size.
+                        # For a 1-item cycle (the normal live case) this
+                        # adds ~0-2 s and is barely noticeable; for a 30+
+                        # item backfill it spaces the relay over several
+                        # minutes so the cumulative activity looks human.
+                        if len(new_msgs) > 1:
+                            wait = ig_anti_detect.burst_pace(len(new_msgs))
+                            await asyncio.sleep(wait)
                         if pairing_active:
                             consumed = await _ig_pairing_scan(m, thread_users, state,
                                                               bot_client, chat_id)

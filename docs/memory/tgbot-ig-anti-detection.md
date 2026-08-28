@@ -93,6 +93,10 @@ the worker keeps running on the previous behaviour.
 | 4 | **geo/locale/device explicit sync** via `set_country/set_country_code/set_locale/set_timezone_offset` (`pin_geo`), driven by `IG_DIRECT_COUNTRY`/`IG_DIRECT_COUNTRY_CODE`/`IG_DIRECT_LOCALE`/`IG_DIRECT_TZ_OFFSET`/`IG_DIRECT_TZ_NAME` (defaults US / 1 / en_US / -14400 / GMT-04:00) | **done** |
 | 5 | Keep the 3–5 h freeze on native checkpoints, **and alert the relay chat directly** (not just the log channel) with instructions to pass the verification in the official app | **done** |
 | 6 | **Cold-start warmup** — `warmup()` runs a few paced benign reads (`account_info`, `direct_threads(5)` ×3) right after login so the first real poll isn't the session's first activity on a fresh IP | **done** |
+| 7 | **Burst pacing on backfill** — `burst_pace(n)` returns a per-item sleep that scales with the backfill size (`base = 6 + log2(n+1) * 2` seconds, capped at 30s). Applied in the gap-fetch loop. For a 30+ item backfill (the pattern that previously triggered "we suspect automated behavior") the cumulative activity now spaces over 5-7 minutes instead of 2.5 — the live 1-item case adds <2 s | **done** |
+| 8 | **Cold-start jitter** — `cold_start_jitter(cl)` runs AFTER warmup, before the first real poll: `account_info` → 60-90 s → `direct_threads(20)` → 45-90 s → `direct_threads(20)`. The first paired-thread poll is no longer the very first observable activity on a new session | **done** |
+| 9 | **Public-GraphQL soft-block counter** — `record_public_soft_block()` / `public_soft_block_active()`. Counts consecutive `JSONDecodeError`s on `cl.media_pk_from_url` (the public web endpoint). After 3 strikes, skip the public path for a 10 min cooldown — hammering a throttled endpoint only deepens the block | **done** |
+| 10 | **Email-change alert handler** — `install_email_change_alert(cl, alert_sink=...)` registers a `change_password_handler` that, when invoked, alerts the operator (via the direct-forward chat) and re-raises. We do NOT attempt to bypass the password reset programmatically (that deepens the flag) — we freeze the worker per the existing challenge policy and tell the operator what to do in the official app | **done** |
 
 ### Deployment facts (2026-08-05, test VPS)
 
@@ -125,3 +129,26 @@ the worker keeps running on the previous behaviour.
 
 All four are gitignored via `.gitignore` → `reference/`; they're local research
 material, not vendored dependencies.
+
+### Third recurrence (2026-08-28) — burst-pacing + cold-start + soft-block + email-handler
+
+Operator reported the **second** recurrence of "we suspect automated behavior
+on your account" + forced email change. All 6 levers above were live
+(verified via log lines: `private transport now impersonates chrome136`,
+`geo pinned to US / en_US / GMT-04:00`, `warmup: account_info ok` × 3, etc.),
+and the fresh cookie upload + cursor-gap recovery worked correctly. The
+auto-check log showed: `gap fetch: thread 34028... had 51 items, 33 new
+after cursor 32977...` followed by 33 items delivered at a near-uniform
+4-6 s cadence over ~150 s.
+
+**Root cause:** even with `cl.delay_range = [2, 4]`, the bot's own
+`await loop.run_in_executor(None, cl.private_request, ...)` calls in
+the gap-fetch loop are NOT subject to `delay_range` (delay_range only
+applies to instagrapi's *internal* calls, not to the bot's direct
+private_request calls). So all 33 calls fired in a tight burst, looking
+exactly like scripted scraping to Instagram's behavior model.
+
+**The four new levers (7-10) close the burst + first-activity + email
+bypass paths.** Each is independently failing-safe (degrades to a
+no-op on a missing dep / library change) and wired into
+`_instagram_worker` in `modules/direct_forward/instagram.py`.
