@@ -1,4 +1,12 @@
-kurigram
+# kurigram is an actively-maintained drop-in replacement for the archived
+# upstream pyrogram (kurigram ships its code under the 'pyrogram' namespace
+# at install time — verified via the wheel RECORD and the project README;
+# 'import pyrogram' loads kurigram). POLICY (AGENTS.md): always upgrade to
+# the newest stable kurigram release. Currently tracking >= 2.2.25 (released
+# 2026-08-21). On every fresh install / `pip install -U -r requirements.txt`
+# the newest compatible kurigram is pulled in automatically; the policy's
+# job is to KEEP that flow — never re-pin to an exact older version.
+kurigram>=2.2.25
 tgcrypto
 fastapi
 uvicorn

@@ -152,7 +152,21 @@ async def _deliver_photo(client, photo, key, idx, total):
     path = os.path.join(_tmp_dir(), "media.jpg")
     out = None
     try:
-        out = await client.download_media(photo, file_name=path)
+        # kurigram 2.2.25 changed get_chat_photos to yield ``ChatPhoto``
+        # objects (small_file_id/big_file_id); the prior 2.2.24 yielded
+        # ``Photo`` objects (file_id). ``download_media`` only auto-detects
+        # objects with a ``file_id`` attribute, so a bare ``ChatPhoto`` falls
+        # through to ``ValueError("This message doesn't contain any
+        # downloadable media")``. Pass the big_file_id string instead —
+        # ``download_media``'s ``isinstance(media, str)`` branch handles it.
+        # For 2.2.24 Photo objects, prefer the file_id attribute (works on
+        # both shapes) and fall back to the whole object for back-compat.
+        media_arg = (
+            getattr(photo, "big_file_id", None)
+            or getattr(photo, "file_id", None)
+            or photo
+        )
+        out = await client.download_media(media_arg, file_name=path)
         if not out or not os.path.exists(out):
             return False
         ok = await common._safe_deliver(
@@ -195,7 +209,18 @@ async def archive_telegram_profile_photos(user, key, friend, full=None,
     delivered = 0
     scanned = len(order)
     for idx, photo in enumerate(order, start=1):
-        pid = str(getattr(photo, "id", "") or getattr(photo, "file_unique_id", ""))
+        # kurigram 2.2.25 ChatPhoto exposes small_photo_unique_id /
+        # big_photo_unique_id; kurigram 2.2.24 Photo had id / file_unique_id.
+        # Walk the field list in priority order so the seen-set dedupes across
+        # the upgrade boundary (an id from 2.2.24 won't match a 2.2.25 id,
+        # but a stable unique_id does — both Photo.file_unique_id and
+        # ChatPhoto.big_photo_unique_id are stable per Telegram).
+        pid = str(
+            getattr(photo, "file_unique_id", "")
+            or getattr(photo, "big_photo_unique_id", "")
+            or getattr(photo, "small_photo_unique_id", "")
+            or getattr(photo, "id", "")
+        )
         if pid and pid in seen:
             continue
         label_idx = idx if full else f"+{delivered + 1}"

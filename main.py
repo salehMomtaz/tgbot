@@ -591,13 +591,15 @@ async def main_engine():
     config_uvicorn = uvicorn.Config(**uvicorn_args)
     server = uvicorn.Server(config_uvicorn)
 
-    from utils.updater import auto_update_ytdlp
+    from utils.updater import auto_update_ytdlp, auto_update_kurigram
 
-    # Run the FastAPI web server, the 6-hour updater, and the 1-hour cache cleaner
-    # concurrently (plus the PO-token health supervisor when enabled).
+    # Run the FastAPI web server, the 6-hour yt-dlp updater, the 24-hour
+    # kurigram updater, and the 1-hour cache cleaner concurrently (plus
+    # the PO-token health supervisor when enabled).
     tasks = [
         server.serve(),
         auto_update_ytdlp(),
+        auto_update_kurigram(),
         auto_clean_cache_directory(),
     ]
     if pot_manager:

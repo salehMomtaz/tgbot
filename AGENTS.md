@@ -158,6 +158,37 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    curl_cffi>=0.14). If TikTok hardens chrome131, re-test newer targets before
    bumping the pin. The `--pre` channel is what keeps it on nightly.
 
+5a. **ALWAYS track the newest stable kurigram release.** Upstream pyrogram
+   is archived; **kurigram** is the actively-maintained drop-in fork
+   (https://github.com/KurimuzonAkuma/kurigram). It is verified to ship
+   under the `pyrogram/` namespace — `pip install kurigram` puts 8,037+
+   files at `pyrogram/*.py` on disk (verified by inspecting
+   `kurigram-X.Y.Z.dist-info/RECORD`), with NO `kurigram/` directory
+   alongside. `import pyrogram` loads the kurigram code; the project's own
+   README confirms: *"Kurigram is an actively maintained pyrogram fork
+   … designed as a drop-in replacement for Pyrogram"* and its install
+   example uses `from pyrogram import Client, filters`. The
+   `Pyrogram-2.0.106.dist-info` left on disk is leftover metadata from the
+   pre-migration install (commit `31f4dfd chore(deps): migrate from
+   pyrogram to kurigram 2.2.24`); `pip show` reports BOTH
+   `Pyrogram 2.0.106` and `Kurigram 2.2.25` as installed, but the runtime
+   identity is kurigram (`pyrogram.__version__` returns the kurigram
+   version string). POLICY: when a new stable kurigram ships
+   (https://github.com/KurimuzonAkuma/kurigram/releases), upgrade on this
+   box immediately: `pip install -U kurigram`, then verify `import
+   pyrogram; pyrogram.__version__` shows the new number and the bot
+   starts cleanly. `requirements.txt` pins `kurigram>=X.Y.Z` to the
+   newest known good floor; do **not** re-pin to an exact older version
+   — the floor's job is to keep the policy visible, not to block future
+   upgrades. `utils/updater.py::auto_update_kurigram` is the auto-upgrade
+   loop that runs alongside the yt-dlp nightly refresh. Verification on
+   every upgrade: spot-check `pyrogram.types.InputPhoneContact.__new__`
+   signature (must remain `(phone, first_name, last_name)`), the
+   `pyrogram.errors.PeerIdInvalid` import (must still resolve), and the
+   four filters the bot registers on (`private`, `text`, `command`,
+   `regex`). If any of those break, pin to the previous good release
+   and open an issue.
+
 6. **`.env` parsing in `run.sh` must stay dotenv-style**, never `source .env`.
    Values like `YTDLP_USER_AGENT` contain characters bash treats as code. The
    line-by-line reader in `run.sh` is intentional. systemd has **no**
