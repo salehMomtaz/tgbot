@@ -173,6 +173,43 @@ def _cleanup(path):
         pass
 
 
+def _ig_caption(idx, total, key, friend, kind):
+    """Build the standard caption for an IG media delivery.
+
+    Mirrors the TG side (``_photo_caption`` in telegram.py) so the
+    operator sees the same format regardless of platform:
+
+        ``{kind} hash {idx}/{total} · @{handle} nid: {ig_pk}``
+
+    For IG the numeric id is the Instagram user pk (not a Telegram
+    nid). The handle is the IG ``@username`` when known, otherwise the
+    first_name, otherwise the raw key. The "hash" prefix is the literal
+    label the operator asked for (the position counter that survives
+    backfills + incremental cycles).
+    """
+    handle = ""
+    ig_pk = ""
+    if friend:
+        handle = (friend.get("ig_username") or "").strip() or \
+                 (friend.get("first_name") or "").strip() or \
+                 (friend.get("handle") or "").strip()
+        # friend["ig_user_pk"] is populated lazily by archive_instagram_stories
+        # / archive_instagram_posts (they cache the pk for caption use).
+        ig_pk = str(friend.get("ig_user_pk") or "")
+    if not handle:
+        handle = key or ""
+    if handle and all(c.isalnum() or c in "_." for c in handle):
+        handle_disp = "@" + handle
+    else:
+        handle_disp = handle
+    parts = [f"{kind} hash {idx}/{total}"]
+    if handle_disp:
+        parts.append(handle_disp)
+    if ig_pk:
+        parts.append(f"nid: {ig_pk}")
+    return " · ".join(parts)
+
+
 async def _download_media(cl, media_obj, prefix):
     """Download one instagrapi Media into a temp dir; returns path or None."""
     d = tempfile.mkdtemp(prefix=prefix)
@@ -238,9 +275,9 @@ async def archive_instagram_stories(key, friend, bot=None):
                 if not path:
                     continue
                 kind = "video" if str(path).lower().endswith((".mp4", ".mov", ".webm")) else "photo"
+                caption = _ig_caption(idx, total, key, friend, kind="📷 IG story")
                 ok = await common._safe_deliver_raw(
-                    bot_c, dest, path, kind,
-                    caption=f"📷 IG story {idx}/{total} · {key}"
+                    bot_c, dest, path, kind, caption=caption
                 )
                 if ok:
                     delivered += 1
@@ -258,6 +295,93 @@ async def archive_instagram_stories(key, friend, bot=None):
         from . import state as fm_state
         await fm_state.update_friend(key, {"seen_ig_story_pks": friend.get("seen_ig_story_pks") or []})
     return delivered
+
+
+async def archive_instagram_profile_pic(key, friend, bot=None):
+    """One-time delivery of the friend's CURRENT Instagram profile picture.
+
+    Triggered the first time the friend is added (the existing IG archive
+    loop only delivers stories + posts after a watermark; the profile
+    picture is fetched and delivered once and never re-fetched unless the
+    operator explicitly re-runs the backfill). The friend's IG user pk
+    is cached on the friend record (friend["ig_user_pk"]) so the
+    standard caption can include ``nid: <pk>`` going forward.
+
+    Returns True when the profile picture was delivered, False on any
+    error (private account, network glitch, account disabled, etc.).
+    """
+    if not getattr(config, "FRIEND_MEDIA_IG_ENABLED", False):
+        return False
+    ig_user = friend.get("ig_username")
+    if not ig_user:
+        return False
+    cl = await _ig_client_retry()
+    loop = asyncio.get_event_loop()
+    delivered = False
+    try:
+        def _info():
+            pk = cl.user_id_from_username(ig_user.lstrip("@"))
+            info = cl.user_info_v1(pk)
+            return pk, info
+
+        try:
+            ig_pk, info = await loop.run_in_executor(None, _info)
+        except Exception as first:
+            logger.warning(f"[FriendMedia:ig] profile_pic info fetch failed ({first}); "
+                           f"rebuilding client and retrying once for @{ig_user}.")
+            cl = await _ig_client_retry()
+            ig_pk, info = await loop.run_in_executor(None, _info)
+
+        # Cache the IG user pk on the friend record so the standard
+        # caption can use it going forward (and to avoid re-resolving
+        # the username on every cycle).
+        if ig_pk and not friend.get("ig_user_pk"):
+            from . import state as fm_state
+            await fm_state.update_friend(key, {"ig_user_pk": str(ig_pk)})
+            friend["ig_user_pk"] = str(ig_pk)
+
+        # Pick the highest-resolution URL the user object exposes. CDN
+        # occasionally 200s an empty body — guard against that.
+        url = (getattr(info, "profile_pic_url_hd", None)
+               or getattr(info, "profile_pic_url", None))
+        if not url:
+            return False
+
+        bot_c = bot or common.bot_client()
+        dest = common.resolve_destination()
+        data = await loop.run_in_executor(None, _fetch_bytes, url,
+                                          "https://www.instagram.com/")
+        if not data or len(data) < 500:
+            logger.info(f"[FriendMedia:ig] profile_pic for @{ig_user} came back empty "
+                        f"({len(data) if data else 0}B); skipping.")
+            return False
+        # Caches the profile-pic URL in a temp file; if it's a video
+        # (animated profile pic) we detect by sniffing the first 12 bytes
+        # for the MP4 / ftyp signature.
+        head = data[:12].lower()
+        is_video = head.startswith(b"\x00\x00\x00") and b"ftyp" in data[:32]
+        if is_video:
+            path = os.path.join(tempfile.gettempdir(), f"fmig_pic_{ig_pk}.mp4")
+            kind = "video"
+        else:
+            path = os.path.join(tempfile.gettempdir(), f"fmig_pic_{ig_pk}.jpg")
+            kind = "photo"
+        with open(path, "wb") as f:
+            f.write(data)
+        caption = _ig_caption(1, 1, key, friend, kind="🖼 IG profile picture")
+        ok = await common._safe_deliver_raw(bot_c, dest, path, kind, caption=caption)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        delivered = bool(ok)
+        if delivered:
+            logger.info(f"[FriendMedia:ig] delivered profile picture for @{ig_user} "
+                        f"(pk={ig_pk}, {len(data)}B, {kind}).")
+        return delivered
+    except Exception as e:
+        logger.warning(f"[FriendMedia:ig] profile_pic archive failed for {ig_user}: {e}")
+        return False
 
 
 async def archive_instagram_posts(key, friend, bot=None):
@@ -318,7 +442,7 @@ async def archive_instagram_posts(key, friend, bot=None):
                 kind = "video" if str(path).lower().endswith((".mp4", ".mov", ".webm")) else "photo"
                 cap = getattr(media, "caption_text", "") or ""
                 cap = (cap[:180] + "…") if len(cap) > 180 else cap
-                caption = f"🖼 IG post {idx}/{len(new_items)} · {key}"
+                caption = _ig_caption(idx, len(new_items), key, friend, kind="🖼 IG post")
                 if cap:
                     caption += f"\n\n{cap}"
                 ok = await common._safe_deliver_raw(bot_c, dest, path, kind, caption=caption)

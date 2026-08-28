@@ -148,10 +148,50 @@ async def _fetch_photos(client, user_id, limit):
     return out
 
 
-async def _deliver_photo(client, photo, key, idx, total):
-    path = os.path.join(_tmp_dir(), "media.jpg")
+async def _deliver_photo(client, photo, key, idx, total, friend=None):
+    """Download + deliver one ChatPhoto, picking the right kind for animated
+    profile pictures.
+
+    Animated (video) profile pics expose a separate MP4 file via
+    ``photo.animation.animation.file_id`` (an ``AnimatedChatPhoto`` /
+    ``Animation`` chain). Telegram stores the animated variant next to a
+    static JPEG frame, and the static frame is what
+    ``photo.big_file_id`` decodes to. So if we only ever download
+    ``big_file_id`` and send as ``photo``, the operator sees a still
+    image for the latest profile pic (the regression the user hit on
+    ``@Ksrakbri``). When ``photo.animation`` is present we download
+    the MP4 and deliver as a video; otherwise we fall through to the
+    JPEG.
+
+    The caption is built by ``_photo_caption`` so the same format is
+    used for both photo and video deliveries.
+    """
     out = None
     try:
+        # Detect animated (video) profile pic. ChatPhoto in 2.2.25 exposes
+        # ``animation`` as a populated AnimatedChatPhoto (with an
+        # ``animation.animation`` of type Animation) when the profile pic
+        # is a video. Older Photo objects don't have this field; missing
+        # attribute is treated as "no animation" rather than erroring.
+        anim = getattr(photo, "animation", None)
+        anim_file_id = (
+            getattr(getattr(anim, "animation", None), "file_id", None)
+            if anim is not None else None
+        )
+
+        if anim_file_id:
+            # Animated profile pic — deliver the MP4 video.
+            out = await client.download_media(
+                anim_file_id, file_name=os.path.join(_tmp_dir(), "media.mp4"))
+            if not out or not os.path.exists(out):
+                return False
+            caption = _photo_caption(idx, total, friend, photo=photo,
+                                     kind="🎞 Profile video")
+            ok = await common._safe_deliver(
+                common.bot_client(), out, "video", caption=caption)
+            return ok
+
+        # Static (JPEG) profile pic — the existing path.
         # kurigram 2.2.25 changed get_chat_photos to yield ``ChatPhoto``
         # objects (small_file_id/big_file_id); the prior 2.2.24 yielded
         # ``Photo`` objects (file_id). ``download_media`` only auto-detects
@@ -166,16 +206,57 @@ async def _deliver_photo(client, photo, key, idx, total):
             or getattr(photo, "file_id", None)
             or photo
         )
-        out = await client.download_media(media_arg, file_name=path)
+        out = await client.download_media(
+            media_arg, file_name=os.path.join(_tmp_dir(), "media.jpg"))
         if not out or not os.path.exists(out):
             return False
+        caption = _photo_caption(idx, total, friend, photo=photo,
+                                 kind="📸 Profile picture")
         ok = await common._safe_deliver(
-            common.bot_client(), out, "photo",
-            caption=f"📸 Profile picture {idx}/{total} · {key}"
-        )
+            common.bot_client(), out, "photo", caption=caption)
         return ok
     finally:
         _cleanup(out)
+
+
+def _photo_caption(idx, total, friend, photo=None, kind="📸 Profile picture"):
+    """Build the standard caption for a TG profile photo/video delivery.
+
+    Format: ``{kind} hash {idx}/{total} · @{handle} nid: {user_id}``
+
+    Where:
+      * ``kind`` is the leading emoji/label — "📸 Profile picture" for
+        still images, "🎞 Profile video" for animated (MP4) profile pics.
+      * ``handle`` is the friend's @username when known, otherwise the
+        first_name, otherwise the numeric id as a last resort.
+      * ``user_id`` is the Telegram numeric user id (``nid:`` is the
+        user-facing label the operator asked for).
+      * ``idx``/``total`` is the per-cycle position counter; the operator
+        asked for the literal label "hash" in front of it.
+    """
+    nid = ""
+    handle = ""
+    if friend:
+        nid = friend.get("telegram_user_id") or ""
+        handle = (friend.get("username") or "").strip() or \
+                 (friend.get("first_name") or "").strip() or \
+                 (friend.get("handle") or "").strip()
+    # Prefix the handle with @ when it looks like a username (no spaces,
+    # ASCII), otherwise use the bare name. Empty handle = show the nid
+    # in place of the handle.
+    if handle and all(c.isalnum() or c in "_." for c in handle):
+        handle_disp = "@" + handle
+    else:
+        handle_disp = handle
+    # The "·" separator between the position counter and the @handle is
+    # kept so the existing visual layout is preserved; only the new
+    # "hash …" + "nid:" labels are added.
+    parts = [f"{kind} hash {idx}/{total}"]
+    if handle_disp:
+        parts.append(handle_disp)
+    if nid:
+        parts.append(f"nid: {nid}")
+    return " · ".join(parts)
 
 
 async def archive_telegram_profile_photos(user, key, friend, full=None,
@@ -227,7 +308,8 @@ async def archive_telegram_profile_photos(user, key, friend, full=None,
         cap_total = scanned if full else "new"
         ok = False
         try:
-            ok = await _deliver_photo(client, photo, key, label_idx, cap_total)
+            ok = await _deliver_photo(client, photo, key, label_idx, cap_total,
+                                       friend=friend)
         except Exception as e:
             logger.warning(f"[FriendMedia:tg] photo {label_idx} for {key} failed: {e}")
         if pid:
@@ -296,9 +378,9 @@ async def archive_telegram_stories(user, key, friend):
             out = await client.download_media(media, file_name=path)
             if not out or not os.path.exists(out):
                 continue
+            caption = _photo_caption(idx, total, friend, kind="📖 Story")
             ok = await common._safe_deliver(
-                common.bot_client(), out, kind,
-                caption=f"📖 Story {idx}/{total} · {key}"
+                common.bot_client(), out, kind, caption=caption
             )
             if ok:
                 delivered += 1

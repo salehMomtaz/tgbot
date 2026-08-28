@@ -388,10 +388,12 @@ async def fm_callback_dispatch(client, callback_query):
         USER_STATES[user_id] = "waiting_for_friend_add_ig"
         await callback_query.message.edit_text(
             "➕ **Add Instagram Friend**\n\nSend the Instagram **username** "
-            "(WITHOUT the @, e.g. `nature_lover`; one per line to add several).\n\n"
+            "(e.g. `nature_lover` or `@nature_lover` — both work, the leading "
+            "`@` is optional; one per line to add several).\n\n"
             "They are added as IG friends — NEW stories + posts (posted after "
-            "linking) are delivered. No older IG history is fetched, and nothing "
-            "is ever sent to them.",
+            "linking) are delivered. The current profile picture is also "
+            "delivered once on the first cycle. No older IG history is fetched, "
+            "and nothing is ever sent to them.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
@@ -681,6 +683,22 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
                 delivered_total += _count_new_in_summary(tg_summary)
             if (friend.get("ig_enabled") and friend.get("ig_username")
                     and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)):
+                # One-time profile picture on the first cycle (per
+                # operator's "current stories + profile picture on add"
+                # request). After the first successful delivery we set
+                # ``ig_profile_pic_delivered`` so subsequent hourly
+                # cycles only deliver new stories + posts.
+                if not friend.get("ig_profile_pic_delivered"):
+                    try:
+                        ok = await fm_ig.archive_instagram_profile_pic(
+                            key, friend, bot=client)
+                        if ok:
+                            parts.append("1 IG profile picture")
+                            delivered_total += 1
+                            await fm_state.update_friend(
+                                key, {"ig_profile_pic_delivered": True})
+                    except fm_ig.IGUnavailable as e:
+                        parts.append(f"⚠️ IG profile picture skipped: {e}")
                 if friend.get("ig_stories"):
                     try:
                         n = await fm_ig.archive_instagram_stories(key, friend, bot=client)
