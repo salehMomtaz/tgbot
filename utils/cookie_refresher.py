@@ -103,14 +103,22 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
     if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
         logger.info(f"[CookieRefresh] skip {cookie_path} — missing/empty")
         return False
-    # Quick check: if jar was freshly written via yt-dlp or admin (<24h), skip headless to save RAM
-    try:
-        mtime = os.path.getmtime(cookie_path)
-        if time.time() - mtime < 20*3600:  # 20h, in case 24h loop drifts
-            logger.info(f"[CookieRefresh] skip {os.path.basename(cookie_path)} — mtime {int((time.time()-mtime)/3600)}h ago (<20h)")
-            return False
-    except:
-        pass
+    # Quick check: if the jar was freshly written via yt-dlp or admin
+    # (<24h), skip the OTHER sites to save RAM — but NEVER skip IG here.
+    # Instagram's auth is tightly bound to mid/rur/csrftoken rotation, and
+    # the only way to capture a fresh rotation is to actually visit the
+    # site. The 17:32 cycle (Aug 28) skipped IG with "mtime 6h ago (<20h)"
+    # while the session was already stale — that skip is exactly what
+    # caused the 30-redirects regression.
+    is_ig = cookie_path.endswith("igcookies.txt")
+    if not is_ig:
+        try:
+            mtime = os.path.getmtime(cookie_path)
+            if time.time() - mtime < 20*3600:  # 20h, in case 24h loop drifts
+                logger.info(f"[CookieRefresh] skip {os.path.basename(cookie_path)} — mtime {int((time.time()-mtime)/3600)}h ago (<20h)")
+                return False
+        except:
+            pass
 
     playwright_cookies = _parse_netscape_to_playwright(cookie_path)
     if not playwright_cookies:
@@ -168,6 +176,23 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                     await asyncio.sleep(2)
                 except:
                     pass
+                # Instagram-specific: visit a few authenticated paths so
+                # the server issues fresh mid/rur/csrftoken. Just loading
+                # the home page often isn't enough — IG only rotates on
+                # authed XHRs. /api/v1 web endpoints are the same paths
+                # instagrapi hits, so cookies set there are the same ones
+                # the DM worker needs.
+                if is_ig:
+                    for extra_path in ("/explore/", "/accounts/edit/", "/"):
+                        try:
+                            await page.goto(
+                                f"https://www.instagram.com{extra_path}",
+                                wait_until="domcontentloaded", timeout=20000)
+                            await asyncio.sleep(2)
+                        except Exception as e2:
+                            logger.info(
+                                f"[CookieRefresh] IG extra visit "
+                                f"{extra_path} skipped: {e2}")
             except Exception as e:
                 logger.warning(f"[CookieRefresh] goto {url} failed: {e} — still trying to extract cookies")
 
