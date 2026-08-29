@@ -16,6 +16,7 @@ from typing import Any
 import config
 from utils import cookie_manager
 from utils import ig_anti_detect
+from utils.shared import _should_stop
 
 from .state import (
     _load_state, _merge_state_save, _state_save_owned,
@@ -1033,4 +1034,12 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             logger.error(f"[DirectForward/IG] poll error: {e}")
             await asyncio.sleep(min(600, _poll_interval()))
 
+        # Honor the global "Abort Operations" flag set by the admin console.
+        # Cooperative cancel: we don't kill the in-flight `cl.*` HTTP call —
+        # we let the current poll finish naturally, then break out of the
+        # main loop. The systemd-supervised process keeps running; the
+        # flag is reset by the next admin_restart or bot startup.
+        if _should_stop():
+            logger.info("[DirectForward/IG] stop flag set — exiting worker loop")
+            return
         await asyncio.sleep(_poll_interval())

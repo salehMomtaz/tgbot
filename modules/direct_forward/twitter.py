@@ -15,7 +15,7 @@ import uuid
 from typing import Any
 
 import config
-from utils.shared import DOWNLOAD_CACHE, queue as shared_queue
+from utils.shared import DOWNLOAD_CACHE, _should_stop, queue as shared_queue
 
 from .state import (
     _load_state, _merge_state_save, _state_save_owned,
@@ -828,4 +828,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
             logger.error(f"[DirectForward/X] poll error: {e}")
             await asyncio.sleep(min(600, _poll_interval()))
 
+        if _should_stop():
+            logger.info("[DirectForward/X] stop flag set — exiting worker loop")
+            return
         await asyncio.sleep(_poll_interval())

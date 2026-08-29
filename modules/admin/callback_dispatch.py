@@ -16,7 +16,7 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 from dotenv import set_key
-from main import log_event, schedule_self_restart
+from main import SCHEDULED_RESTART, log_event, schedule_self_restart
 from utils.gate import (
     load_database,
     add_user,
@@ -30,7 +30,7 @@ from utils.gate import (
     toggle_document_mode,
 )
 from utils.id_validator import is_valid_telegram_id
-from utils.shared import queue
+from utils.shared import queue, signal_all_stop, reset_stop_flag
 
 from .state import USER_STATES, ACTIVE_PROMPTS, PREMIUM_GEN
 from .keyboards import (
@@ -91,6 +91,12 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         queue._pending.clear()
         queue._active = False
 
+        # Stop every long-running background loop. Each worker (IG/X/TikTok
+        # direct-forward, friend-media archiver, cookie-refresher) checks
+        # _should_stop() at the top of its iteration and breaks out cleanly.
+        # The flag is reset by the next admin_restart or bot startup.
+        signal_all_stop()
+        # Wipe any in-flight download cache so the next bot run starts clean.
         if os.path.exists("cache"):
             try:
                 shutil.rmtree("cache")
@@ -98,8 +104,10 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             except Exception:
                 pass
 
-        await callback_query.answer("💥 System Reset: All queue jobs aborted and cache purged!", show_alert=True)
-        await log_event(f"💥 **Admin Action:** Queue reset executed. {queue_len} pending jobs aborted.")
+        await callback_query.answer("💥 All operations aborted: queue cleared, cache purged, "
+                                    "background workers exiting.", show_alert=True)
+        await log_event(f"💥 **Admin Action:** Abort Operations — {queue_len} pending jobs "
+                         f"cleared, cache purged, stop flag set for all workers.")
 
     elif data == "admin_toggle_doc":
         state = toggle_document_mode(user_id)
@@ -381,8 +389,17 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer()
 
     elif data == "admin_restart_confirm":
+        # Set the one-shot flag so the startup path in main.py sends a
+        # "Bot is online" message after systemd brings us back. Also clear
+        # the Abort-Operations flag so the freshly-launched workers can
+        # start cleanly (the previous restart cycle may have left it set
+        # if Abort Operations was used before restart).
+        global SCHEDULED_RESTART
+        SCHEDULED_RESTART = True
+        reset_stop_flag()
         await callback_query.message.edit_text(
-            "🔄 **Restarting the bot…**\n\nBack in a few seconds."
+            "🔄 **Restarting the bot…**\n\nBack in a few seconds. The bot will send "
+            "you a confirmation message when it's back online and fully functional."
         )
         await log_event(f"🔄 **Admin Action:** Bot restart requested by creator (`{user_id}`).")
         await callback_query.answer()
@@ -730,7 +747,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
             ch = s.get("channel_username") or (str(s.get("channel_id")) if s.get("channel_id") else "— (none)")
         tier_lines = " · ".join(f"{TIERS[t]['label']}:{TIERS[t]['price_stars']}⭐" for t in TIER_ORDER)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{'🔴 Disable' if s.get('enabled') else '🟢 Enable'} subscription mode", callback_data="admin_sub_toggle")],
             [InlineKeyboardButton(f"Free tier: {free}", callback_data="admin_sub_toggle_free")],
             [InlineKeyboardButton("➕ Add channel", callback_data="admin_sub_add_channel"), InlineKeyboardButton("➖ Remove channel", callback_data="admin_sub_remove_channel")],
             [InlineKeyboardButton("➕ Grant sub", callback_data="admin_sub_grant"), InlineKeyboardButton("➖ Revoke sub", callback_data="admin_sub_revoke")],
@@ -750,19 +766,6 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         from modules.friend_media.admin import render_menu
         await render_menu(client, callback_query)
         await callback_query.answer()
-
-    elif data == "admin_sub_toggle":
-        if not _sub_rate_ok(user_id):
-            await callback_query.answer("Too fast — wait a moment.", show_alert=False)
-            return
-        from utils.subscription.store import get_settings, set_settings
-        s = get_settings()
-        ns = set_settings(enabled=not s.get("enabled"))
-        await log_event(f"💳 **Admin:** Subscription mode toggled to {ns.get('enabled')}")
-        # re-render by delegating
-        callback_query.data = "admin_sub_menu"
-        await _admin_callback_dispatch(client, callback_query)
-        return
 
     elif data == "admin_sub_toggle_free":
         if not _sub_rate_ok(user_id):

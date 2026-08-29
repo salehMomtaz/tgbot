@@ -46,6 +46,13 @@ app = Client(
 )
 
 premium_app = None
+
+# One-shot flag: True after the admin pressed "🔄 Restart Bot" in the
+# in-telegram console and confirmed. The startup path (after systemd
+# brings us back) sees this flag, sends a "Bot is online" message to
+# the admin, and clears it. Fresh starts (cold boot, no prior restart
+# request) leave the flag False and skip the message.
+SCHEDULED_RESTART = False
 if config.PREMIUM_STRING_SESSION:
     premium_app = Client(
         "premium_session",
@@ -683,6 +690,34 @@ async def main_engine():
             logging.info("[SysMon] System monitor launched as a detached process.")
     except Exception as e:
         logging.warning(f"[SysMon] Could not launch system monitor: {e}")
+
+    # When the bot was restarted via the in-telegram admin "Restart Bot"
+    # button, the last message the admin saw was "🔄 Restarting the bot…
+    # Back in a few seconds." A long-running operator can't tell from that
+    # alone whether the restart succeeded (the bot process could have
+    # crashed on exit, or systemd could have failed to bring it back). The
+    # admin_restart_confirm path set a one-shot flag in main.SCHEDULED_RESTART;
+    # if it's set, we now confirm success by sending a single "bot is
+    # online" message. systemd Restart=always means we get here on a
+    # normal restart, on a fresh start, AND on a self-restart.
+    if SCHEDULED_RESTART:
+        try:
+            await app.send_message(
+                int(config.SYSTEM_CREATOR_ID),
+                "✅ **Bot is online** — restart completed, all background "
+                "workers re-attached and the auto-check loop is running.\n\n"
+                "Use Admin Console → 📸 Friend Media / 📨 Direct-Forward / "
+                "💳 Subscriptions to check status. The previous restart "
+                "message is now superseded — if you don't see the new "
+                "features (cookie meta update, Abort Operations button, "
+                "fixed-IG-friend-add flow) work, the restart was NOT "
+                "successful and you can re-trigger via the Restart Bot "
+                "button.",
+            )
+        except Exception as e:
+            logging.warning(f"[Startup] could not send 'bot is online' "
+                            f"to admin {config.SYSTEM_CREATOR_ID}: {e}")
+        SCHEDULED_RESTART = False
 
     try:
         await asyncio.gather(*tasks)

@@ -21,7 +21,7 @@ def get_bale_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➖ Remove User", callback_data="bale_admin_remove"), InlineKeyboardButton(text="🚫 Blacklist", callback_data="bale_admin_blacklist")],
         [InlineKeyboardButton(text=f"📄 Doc Mode: {doc}", callback_data="bale_admin_toggle_doc")],
         [InlineKeyboardButton(text=f"⚙️ Size Limits: {limit}", callback_data="bale_admin_setlimit")],
-        [InlineKeyboardButton(text="💥 Abort Transfer", callback_data="bale_admin_abort")],
+        [InlineKeyboardButton(text="💥 Abort Operations", callback_data="bale_admin_abort")],
         [InlineKeyboardButton(text="❌ Close", callback_data="bale_admin_close")],
     ])
 

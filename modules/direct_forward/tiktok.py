@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 import config
+from utils.shared import _should_stop
 
 from .state import (
     _load_state, _merge_state_save, _state_save_owned,
@@ -409,6 +410,9 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
     logger.info(f"[DirectForward/TT] listening for TikTok self-DM pushes "
                 f"(reconnect jittered ±{config.TIKTOK_DIRECT_POLL_JITTER_PCT}%).")
     while True:
+        if _should_stop():
+            logger.info("[DirectForward/TT] stop flag set — exiting worker loop")
+            return
         try:
             await _tt_run_ws(bot_client, premium_client, chat_id, queue, seen)
         except Exception as e:

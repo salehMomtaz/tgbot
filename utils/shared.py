@@ -1,10 +1,46 @@
 # utils/shared.py
+import asyncio
 from utils.queue_manager import DownloadQueue
 
 # Globally shared thread-safe task queue and in-memory caches
 queue = DownloadQueue()
 DOWNLOAD_CACHE = {}
 LAST_UPDATE_TIME = {}
+
+
+# --- System-wide operations stop (set by the admin "Abort Operations"
+# button, reset by `reset_stop_flag` after a successful abort). Long-running
+# background loops (direct_forward.instagram, direct_forward.twitter,
+# direct_forward.tiktok, friend_media archiver, friend_media archiver
+# sub-loops) check `_should_stop()` at the top of each iteration and break
+# out cleanly. The flag is asyncio.Event so the workers can `.wait()` on it
+# for sub-second wake-ups, and is reset at the start of every admin_restart.
+_OPERATIONS_ABORTED = asyncio.Event()
+
+
+def signal_all_stop() -> None:
+    """Set the global stop flag. Called by the admin "Abort Operations"
+    button. Workers see the flag and break out of their loops."""
+    _OPERATIONS_ABORTED.set()
+
+
+def reset_stop_flag() -> None:
+    """Clear the stop flag. Called by the admin restart flow before
+    re-launching the background tasks, and by the bot's own startup path."""
+    _OPERATIONS_ABORTED.clear()
+
+
+def _should_stop() -> bool:
+    """Cheap check used at the top of every long-running loop. Returning
+    True here tells the loop to break out cleanly at the next safe point."""
+    return _OPERATIONS_ABORTED.is_set()
+
+
+async def wait_for_stop() -> None:
+    """Block until `_OPERATIONS_ABORTED` is set. Loops that have nothing to
+    do for a while can `.wait()` on this and return early when the operator
+    hits "Abort Operations" — see direct_forward.instagram for the usage."""
+    await _OPERATIONS_ABORTED.wait()
 
 
 # --- Runtime-configurable settings (mutable at runtime via admin console) ---

@@ -33,7 +33,7 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"💳 Subscriptions: {sub_badge}", callback_data="admin_sub_menu"),
          InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
         [InlineKeyboardButton("📸 Friend Media", callback_data="admin_friend_media_menu")],
-        [InlineKeyboardButton("💥 Abort Transfer", callback_data="admin_abort_queue"),
+        [InlineKeyboardButton("💥 Abort Operations", callback_data="admin_abort_queue"),
          InlineKeyboardButton("🔄 Restart Bot", callback_data="admin_restart")],
         [InlineKeyboardButton("❌ Close Console", callback_data="admin_close")]
     ])
