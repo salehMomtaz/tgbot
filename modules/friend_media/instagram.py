@@ -212,10 +212,46 @@ def _ig_caption(idx, total, key, friend, kind):
 
 
 async def _download_media(cl, media_obj, prefix):
-    """Download one instagrapi Media into a temp dir; returns path or None."""
+    """Download one instagrapi Media/Story into a temp dir; returns path or None.
+
+    For feed posts/reels ``cl.photo_download`` / ``cl.video_download`` works,
+    but for stories those helpers 404 (stories use a different pk namespace
+    and product_type='story'). Stories already carry direct CDN URLs
+    (``thumbnail_url`` / ``video_url``) so we fetch those directly.
+    """
     d = tempfile.mkdtemp(prefix=prefix)
     try:
         loop = asyncio.get_event_loop()
+
+        # Stories (and any media with direct CDN URLs) — fetch the URL
+        # directly instead of going through the media_pk indirection that
+        # 404s for story pks.
+        cdn_url = None
+        if getattr(media_obj, "video_url", None):
+            cdn_url = str(media_obj.video_url)
+        elif getattr(media_obj, "thumbnail_url", None):
+            cdn_url = str(media_obj.thumbnail_url)
+        if cdn_url:
+            def _fetch_cdn():
+                data = _fetch_bytes(cdn_url, referer="https://www.instagram.com/")
+                if not data or len(data) < 500:
+                    return None
+                # Detect extension from URL / media_type
+                is_video = bool(getattr(media_obj, "video_url", None))
+                ext = ".mp4" if is_video else ".jpg"
+                # Prefer extension from URL
+                if ".mp4" in cdn_url:
+                    ext = ".mp4"
+                path = os.path.join(d, f"media{ext}")
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+
+            path = await loop.run_in_executor(None, _fetch_cdn)
+            if path and os.path.exists(path):
+                return path
+            # fall through to instagrapi path if CDN fetch failed
+            logger.info(f"[FriendMedia:ig] CDN fetch failed for story pk={getattr(media_obj,'pk','?')}, trying instagrapi fallback")
 
         def _dl():
             if getattr(media_obj, "media_type", 0) == 2:
@@ -250,11 +286,21 @@ async def archive_instagram_stories(key, friend, bot=None):
 
         def _fetch():
             pk = cl.user_id_from_username(ig_user.lstrip("@"))
+            # cache pk for caption nid use
+            try:
+                if not friend.get("ig_user_pk"):
+                    friend["ig_user_pk"] = str(pk)
+            except Exception:
+                pass
             stories = cl.user_stories(pk) or []
-            return stories[:max_stories]
+            return pk, stories[:max_stories]
 
         try:
-            stories = await loop.run_in_executor(None, _fetch)
+            _pk, stories = await loop.run_in_executor(None, _fetch)
+            if _pk and not friend.get("ig_user_pk"):
+                from . import state as fm_state
+                await fm_state.update_friend(key, {"ig_user_pk": str(_pk)})
+                friend["ig_user_pk"] = str(_pk)
         except Exception as first:
             # Session rotated mid-run (login-wall redirect loop) — rebuild from
             # the freshest jar sessionid ONCE and retry, instead of reporting
@@ -262,7 +308,11 @@ async def archive_instagram_stories(key, friend, bot=None):
             logger.warning(f"[FriendMedia:ig] stories fetch failed ({first}); "
                            f"rebuilding client and retrying once for @{ig_user}.")
             cl = await _ig_client_retry()
-            stories = await loop.run_in_executor(None, _fetch)
+            _pk, stories = await loop.run_in_executor(None, _fetch)
+            if _pk and not friend.get("ig_user_pk"):
+                from . import state as fm_state
+                await fm_state.update_friend(key, {"ig_user_pk": str(_pk)})
+                friend["ig_user_pk"] = str(_pk)
 
         bot_c = bot or common.bot_client()
         dest = common.resolve_destination()

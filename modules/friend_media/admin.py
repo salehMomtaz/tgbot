@@ -71,12 +71,7 @@ def _blurb():
     sched_label = f"every {sched}m" if sched > 0 else "manual only"
     return (
         "📸 **Friend Media Archiver**\n\n"
-        "Archives your friends' Telegram profile pictures + stories (and, "
-        "best-effort, their Instagram stories + NEW posts only — never older "
-        "IG content) into a place **only you** see. It **never messages your "
-        "friends** — the only thing that touches them is a silent "
-        "`add_contact`.\n\n"
-        f"Destination: `{_dest_label()}`\n"
+        "Two separate services for archiving media.\n\n"
         f"Instagram: {ig}\n"
         f"Auto-check: **{sched_label}**\n"
         f"Max photos/run: `{config.FRIEND_MEDIA_MAX_PHOTOS}` · "
@@ -87,7 +82,7 @@ def _blurb():
 def _menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 List Friends", callback_data="fm_list_choose")],
-        [InlineKeyboardButton("📇 Contacts", callback_data="fm_contacts"),
+        [InlineKeyboardButton("📇 Telegram Contacts", callback_data="fm_contacts"),
          InlineKeyboardButton("🚀 Check All", callback_data="fm_archive_all")],
         [InlineKeyboardButton("⏱ Set check interval (min)", callback_data="fm_sched")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="fm_menu"),
@@ -220,7 +215,7 @@ async def _render_contacts(callback_query, page=0):
     for r in rows:
         pass
     kb = InlineKeyboardMarkup(rows + _contacts_keyboard(page, total_pages).inline_keyboard)
-    header = (f"📇 **Contacts** ({len(contacts)})\n\nTap a contact to ADD them as an "
+    header = (f"📇 **Telegram Contacts** ({len(contacts)})\n\nTap a contact to ADD them as an "
               "archived friend (silent add_contact — nothing is sent to them).")
     await callback_query.message.edit_text(header, reply_markup=kb)
 
