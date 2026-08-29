@@ -50,7 +50,7 @@ def _greeting_text(user_id: int = 0) -> str:
         "• `/search <q>` · `/user <u>` · `/trend` — GitHub\n"
         "• `/yt <q>` `/ytrecent @ch` `/ytch @ch <q>` `/transcript <url>` — YouTube\n"
         "• `/tr src:dst text` — translate · `/web <url>` — page → Markdown\n"
-        "• `/start` — this guide.",
+        "• `/start` — this guide."
     )
 
 
