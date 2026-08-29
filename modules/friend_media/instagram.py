@@ -24,6 +24,7 @@ is re-read when the cache expires so admin jar replacements are picked up.
 
 import os
 import io
+import math
 import time
 import random
 import shutil
@@ -269,6 +270,16 @@ async def archive_instagram_stories(key, friend, bot=None):
         fresh = [s for s in stories if str(getattr(s, "pk", "")) not in seen]
         total = len(fresh)
         for idx, story in enumerate(fresh, start=1):
+            # Inter-story jitter (anti-rate-limit). The cl.delay_range inside
+            # instagrapi paces the per-call jitter, but the back-to-back
+            # call pattern across N items still looks like scraping to IG's
+            # behavior model. A small per-item pause (0.6 - 2.4s, scaled
+            # with the burst size so big backfills space out further) makes
+            # the cumulative cadence look human.
+            if idx > 1:
+                burst_n = max(len(fresh), 1)
+                base = 0.6 + (math.log2(burst_n + 1) * 0.5)
+                await asyncio.sleep(base + random.uniform(-0.3, 0.9))
             path = None
             try:
                 path = await _download_media(cl, story, "fmig_s_")
@@ -434,6 +445,14 @@ async def archive_instagram_posts(key, friend, bot=None):
 
         new_items = [m for m in medias if int(getattr(m, "pk", 0)) > int(watermark)][-max_posts:]
         for idx, media in enumerate(new_items, start=1):
+            # Inter-post jitter (anti-rate-limit). Same idea as the story
+            # loop above: scale with the burst so big backfills space out
+            # further, but stay under 30s so a 10-item cycle doesn't take
+            # forever.
+            if idx > 1:
+                burst_n = max(len(new_items), 1)
+                base = 0.8 + (math.log2(burst_n + 1) * 0.6)
+                await asyncio.sleep(base + random.uniform(-0.3, 1.0))
             path = None
             try:
                 path = await _download_media(cl, media, "fmig_p_")

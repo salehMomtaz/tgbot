@@ -864,25 +864,55 @@ async def _ig_add_archive(client, key):
     ``cl.user_stories(pk)`` call returns exactly what the operator
     wanted). The posts watermark is still set so older posts are NOT
     backfilled.
+
+    If the IG session is stale (LoginRequired mid-flow), the inner
+    archive will silently return "nothing new" because both
+    profile-pic and stories are best-effort and raise IGUnavailable
+    on failure. We surface that explicitly: a session-expired alert
+    is sent to the operator's chat so the operator knows to re-upload
+    a fresh igcookies.txt (not "the bot is broken" — the cookies
+    were rotated by IG's anti-automation layer).
     """
+    from modules.friend_media.instagram import IGUnavailable
     friend = await fm_state.get_friend(key)
     if friend is None:
         return
-    # _archive_one_friend in the IG branch already calls profile-pic
-    # (gated by ig_profile_pic_delivered) + stories. The result
-    # summary is delivered back to the operator's chat.
+    delivered = 0
+    summary = ""
+    session_dead = False
     try:
         delivered, summary = await _archive_one_friend(
             client, key, friend, full=False)
-        if delivered > 0 or summary not in ("nothing new", "nothing enabled"):
-            try:
-                await client.send_message(
-                    config.SYSTEM_CREATOR_ID,
-                    f"📸 IG first archive for `{key}`: {summary}")
-            except Exception:
-                pass
+    except IGUnavailable as e:
+        # IG session went bad between the user-uploaded cookies and the
+        # add-archive task. Surface this explicitly so the operator knows
+        # to re-upload fresh cookies, instead of seeing "nothing new" and
+        # wondering if the friend has no stories.
+        session_dead = True
+        logger.warning(f"[FriendMedia] IG add-archive for {key} session expired: {e}")
     except Exception as e:
         logger.warning(f"[FriendMedia] IG add-archive for {key} failed: {e}")
+    if delivered > 0 or (summary and summary not in ("nothing new", "nothing enabled")):
+        try:
+            await client.send_message(
+                config.SYSTEM_CREATOR_ID,
+                f"📸 IG first archive for `{key}`: {summary}")
+        except Exception:
+            pass
+    if session_dead:
+        try:
+            await client.send_message(
+                config.SYSTEM_CREATOR_ID,
+                f"⚠️ **IG session expired before the `{key}` first archive could run.**\n\n"
+                f"`{e}`\n\n"
+                f"The friend was added, but the profile pic + live stories weren't "
+                f"delivered. Re-upload a fresh `igcookies.txt` via Admin → 🍪 Cookie Jars "
+                f"(the mobile-app export has the device-binding cookies that survive "
+                f"IG's anti-automation layer), and the next auto-check cycle will pick "
+                f"up the pending archive for `{key}` automatically.",
+            )
+        except Exception:
+            pass
 
 
 async def _run_ig_archive(client, status_msg, key, friend):
@@ -987,8 +1017,13 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                       "delivered to your destination right now (anything in the "
                       "24h window). After that, only NEW stories/posts (posted "
                       "after now) get delivered — older IG history is never "
-                      "backfilled. Highlights (expired stories) live behind the "
-                      "🗂 Archive (zip) button on the friend's card.\n\n"
+                      "backfilled.\n\n"
+                      "Anything that exists on the friend's profile (profile pic, "
+                      "current stories, current feed posts, reels, highlights, "
+                      "past posts) can be downloaded on demand via the "
+                      "🗂 Archive (zip) button on the friend's card. The auto-monitor "
+                      "itself only delivers NEW material going forward — the on-demand "
+                      "zip is the one-shot way to grab a full snapshot.\n\n"
                       "⏳ Running the first archive in the background. If the IG "
                       "session is stale, you'll see a session-expired message — "
                       "re-upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars "
