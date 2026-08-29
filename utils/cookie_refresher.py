@@ -292,6 +292,15 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                 # Use existing admin helper (validates, backs up, purges snapshots, touches meta)
                 # It expects content with Netscape header, which we have
                 _write_cookie_jar(key, cookie_path, content)
+            # Mark the rotation in cookies/meta.json. Without this, the
+            # "Last headless refresh" line on the admin menu keeps showing
+            # the timestamp of the LAST no-rotation branch (which does call
+            # touch_cookie_success) and the operator sees "70h ago" even
+            # though the most recent cycle just rotated 4 cookies. mark_merge
+            # + touch_cookie_success brings the meta record up to date so the
+            # admin menu's "Last headless refresh" line tracks reality.
+            cookie_manager.mark_merge(cookie_path, changed)
+            cookie_manager.touch_cookie_success(cookie_path)
 
             logger.info(f"[CookieRefresh] {os.path.basename(cookie_path)} refreshed via headless ({changed} cookies rotated, {len(new_cookies)} total)")
             # Also clear direct_ig_session.json if IG was refreshed, so next DM login uses fresh sessionid

@@ -85,14 +85,11 @@ def _blurb():
 
 
 def _menu_keyboard():
-    feat = ("🔴 Disable feature" if _enabled() else "🟢 Enable feature")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
-         InlineKeyboardButton("📋 List Friends", callback_data="fm_list_choose")],
+        [InlineKeyboardButton("📋 List Friends", callback_data="fm_list_choose")],
         [InlineKeyboardButton("📇 Contacts", callback_data="fm_contacts"),
-         InlineKeyboardButton("🚀 Check All (new)", callback_data="fm_archive_all")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="fm_settings"),
-         InlineKeyboardButton(feat, callback_data="fm_toggle_enabled")],
+         InlineKeyboardButton("🚀 Check All", callback_data="fm_archive_all")],
+        [InlineKeyboardButton("⏱ Set check interval (min)", callback_data="fm_sched")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="fm_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
     ])
@@ -103,15 +100,13 @@ async def render_menu(client, callback_query):
 
 
 def _settings_keyboard():
-    ig = getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)
+    """Settings submenu (kept for back-compat with the dead-handler path
+    fm_settings below; not currently reachable from the main menu — the
+    operator uses the top-level 'Set check interval' button on the main
+    Friend Media menu and the .env file for everything else)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📥 Destination: {_dest_label()}", callback_data="fm_dest")],
-        [InlineKeyboardButton(
-            f"{'🔴 Disable' if ig else '🟢 Enable'} Instagram",
-            callback_data="fm_toggle_ig_global")],
         [InlineKeyboardButton("⏱ Set check interval (min)", callback_data="fm_sched")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="fm_settings"),
-         InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
+        [InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
     ])
 
 
@@ -135,7 +130,7 @@ def _friend_keyboard(key, friend):
         igs = "✅" if friend.get("ig_stories") else "❌"
         igp = "✅" if friend.get("ig_posts") else "❌"
         rows = [
-            [InlineKeyboardButton("🔍 Check now (new)", callback_data=f"fm_arc:{key}")],
+            [InlineKeyboardButton("🔍 Check now", callback_data=f"fm_arc:{key}")],
             [InlineKeyboardButton(f"📷 IG stories: {igs}", callback_data=f"fm_ig_s:{key}"),
              InlineKeyboardButton(f"🖼 IG posts: {igp}", callback_data=f"fm_ig_p:{key}")],
             [InlineKeyboardButton("🗂 Archive (zip)", callback_data=f"fm_ig_archive:{key}")],
@@ -147,7 +142,7 @@ def _friend_keyboard(key, friend):
     pp = "✅" if friend.get("profile_photos") else "❌"
     st = "✅" if friend.get("stories") else "❌"
     rows = [
-        [InlineKeyboardButton("🔍 Check now (new)", callback_data=f"fm_arc:{key}"),
+        [InlineKeyboardButton("🔍 Check now", callback_data=f"fm_arc:{key}"),
          InlineKeyboardButton("⬇️ Full backfill", callback_data=f"fm_backfill:{key}")],
         [InlineKeyboardButton(f"📸 Pics: {pp}", callback_data=f"fm_tg_pp:{key}"),
          InlineKeyboardButton(f"📖 Stories: {st}", callback_data=f"fm_tg_st:{key}")],
@@ -288,13 +283,6 @@ async def fm_callback_dispatch(client, callback_query):
             reply_markup=_settings_keyboard())
         await callback_query.answer()
         return
-    if data == "fm_toggle_enabled":
-        new = not _enabled()
-        _persist_env("FRIEND_MEDIA_ENABLED", "true" if new else "false")
-        # The background loop re-reads this flag each cycle — no restart needed.
-        await render_menu(client, callback_query)
-        await callback_query.answer("Enabled." if new else "Disabled.")
-        return
     if data == "fm_list_choose":
         txt, kb = await _list_choose_message()
         await callback_query.message.edit_text(txt, reply_markup=kb)
@@ -398,31 +386,13 @@ async def fm_callback_dispatch(client, callback_query):
                 InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
         return
-    if data == "fm_dest":
-        USER_STATES[user_id] = "waiting_for_friend_dest"
-        await callback_query.message.edit_text(
-            "📥 **Set destination**\n\n"
-            "• `logchannel` — post to your Log Channel, then DM you (default)\n"
-            "• `saved` — your connected account's Saved Messages\n"
-            "• `<chat_id>` — a numeric chat id you own",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Cancel", callback_data="fm_settings")]]))
-        await callback_query.answer()
-        return
     if data == "fm_sched":
         USER_STATES[user_id] = "waiting_for_friend_schedule"
         await callback_query.message.edit_text(
             "⏱ **Set auto-check interval**\n\nSend minutes between runs "
             "(0 = manual only). Applies live — no restart needed.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Cancel", callback_data="fm_settings")]]))
-        await callback_query.answer()
-        return
-    if data == "fm_toggle_ig_global":
-        _persist_env("FRIEND_MEDIA_IG_ENABLED",
-                     "false" if getattr(config, "FRIEND_MEDIA_IG_ENABLED", False) else "true")
-        await callback_query.message.edit_text(
-            "⚙️ **Settings**", reply_markup=_settings_keyboard())
+                InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
         return
 
@@ -651,8 +621,7 @@ async def _list_choose_message():
     return ("📋 **Friends**\n\nChoose a platform to manage:", InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 TG Friends", callback_data="fm_list_view:tg")],
         [InlineKeyboardButton("🟣 IG Friends", callback_data="fm_list_view:ig")],
-        [InlineKeyboardButton("➕ Add Friend", callback_data="fm_add"),
-         InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
+        [InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
     ]))
 
 
