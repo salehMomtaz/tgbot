@@ -671,6 +671,13 @@ def register_admin_handlers(app: Client):
                 if s.get("enabled"):
                     ok, reason = await check_access(client, user_id)
                     if not ok:
+                        # Deduplicate: the same user message can be checked by both
+                        # admin's greeting gate and downloader's gate_and_quota_check.
+                        # If we already sent a prompt for this event window, suppress the second.
+                        from utils.subscription.access import should_send_subscription_prompt
+                        if not should_send_subscription_prompt(user_id):
+                            stop(message)
+                            return
                         if reason == "need_channel":
                             text = _greeting_text(user_id)
                             lines, _ = _channel_rows()

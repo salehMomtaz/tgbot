@@ -90,7 +90,92 @@ async def _verify_joined(client, user_id: int):
         return False, f"error:{e}"
 
 
+def _is_member_status(status) -> bool:
+    """True if chat-member status counts as 'is still in channel'."""
+    s = (getattr(status, "value", None) or str(status)) if status else ""
+    return s.lower() in ("member", "administrator", "creator", "owner", "restricted")
+
+
 def register_join_handlers(app: Client):
+    # Notify free-tier users when they leave a required channel: Telegram
+    # emits a ChatMemberUpdated whenever someone's status in a channel
+    # changes (join/leave/kick). The bot must be an admin in the channel
+    # to receive these updates (otherwise they are silently dropped).
+    # This is the user-requested "their leave of the channel also should
+    # be known and notified that they left and no longer qualify for free
+    # usage" feature.
+    try:
+        @app.on_chat_member_updated(group=0)
+        async def _channel_leave_watcher(client: Client, update):
+            # update: pyrogram.types.ChatMemberUpdated (new_chat_member, old_chat_member, chat, from_user)
+            try:
+                chat = getattr(update, "chat", None)
+                if chat is None:
+                    return
+                chat_id = int(getattr(chat, "id", 0) or 0)
+                # Only care about force-join channels
+                chans = get_channels()
+                if not chans:
+                    return
+                force_ids = {int(c.get("id", 0) or 0) for c in chans if c.get("id")}
+                # For @username-only channels we resolve lazily, but for the
+                # ChatMemberUpdated we already have chat_id from the event.
+                # If none of our force-join IDs match this chat, ignore.
+                # Also handle username-only: check if chat.username matches.
+                chat_username = (getattr(chat, "username", "") or "").lstrip("@")
+                matched = chat_id in force_ids
+                if not matched:
+                    # username-only fallback: compare username case-insensitively
+                    for c in chans:
+                        if (c.get("username", "").lstrip("@").lower() == chat_username.lower()
+                                and chat_username):
+                            matched = True
+                            break
+                if not matched:
+                    return
+
+                old = getattr(update, "old_chat_member", None)
+                new = getattr(update, "new_chat_member", None)
+                if old is None or new is None:
+                    return
+                old_status = getattr(old, "status", None)
+                new_status = getattr(new, "status", None)
+                # left / kicked / banned -> not a member anymore; member/admin/creator -> is member
+                was_member = _is_member_status(old_status)
+                is_member = _is_member_status(new_status)
+                if was_member and not is_member:
+                    # User left / was kicked from a required channel.
+                    # Only notify users who were relying on the free path
+                    # (subscribed users don't care; they have paid access).
+                    from utils.subscription.store import is_subscription_active
+                    # ChatMemberUpdated.user is the affected user; from_user is actor (may be same)
+                    # For channel leaves the admin does the remove, but the subject is in new_chat_member.user
+                    subject = getattr(new, "user", None)
+                    if subject is None:
+                        subject = getattr(update, "from_user", None)
+                    uid = int(getattr(subject, "id", 0) or 0) if subject else 0
+                    if not uid or uid == getattr(client.me, "id", 0):
+                        return
+                    active, _ = is_subscription_active(uid)
+                    if active:
+                        return  # paid users keep access even without channel
+                    # Free-path user who just lost a required channel
+                    ch_label = f"@{chat_username}" if chat_username else f"`{chat_id}`"
+                    try:
+                        await client.send_message(
+                            uid,
+                            f"⚠️ You left {ch_label} — you no longer qualify for **free** downloads.\n\n"
+                            f"Re-join {ch_label} and tap **✅ I joined — verify** on /start, or use "
+                            f"/subscription to unlock without joining.",
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        # pyrogram < 2 or stripped dispatcher — chat_member updates not available; ignore
+        pass
+
     @app.on_callback_query(filters.regex(r"^chkjoin:"), group=2)
     async def chkjoin_cb(client: Client, cb: CallbackQuery):
         user_id = cb.from_user.id

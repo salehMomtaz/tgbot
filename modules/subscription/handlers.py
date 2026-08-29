@@ -259,6 +259,9 @@ async def gate_and_quota_check(client, message: Message) -> bool:
             await message.reply_text("🚫 You are blacklisted.")
             return False
         if reason == "need_channel":
+            from utils.subscription.access import should_send_subscription_prompt
+            if not should_send_subscription_prompt(user_id):
+                return False
             from utils.subscription.store import get_channels
             from utils.subscription.access import check_all_channels
             chans = get_channels()
@@ -283,6 +286,9 @@ async def gate_and_quota_check(client, message: Message) -> bool:
             )
             return False
         # need_subscription
+        from utils.subscription.access import should_send_subscription_prompt
+        if not should_send_subscription_prompt(user_id):
+            return False
         await message.reply_text(
             f"🔒 **Subscription required.**\n\n{_sub_status_text(user_id)}\n\nUse /subscription to choose a tier.",
             reply_markup=_tiers_keyboard()

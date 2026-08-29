@@ -73,6 +73,33 @@ async def check_all_channels(client, user_id: int) -> tuple[bool, list[dict]]:
     return (len(missing) == 0), missing
 
 
+# Deduplicate subscription prompts: a single user message must never trigger
+# two back-to-back "join channel / subscribe" prompts (the handler in
+# admin/register.py and the gate in subscription/handlers.py both check
+# the same condition). If we already sent a prompt within the cooldown,
+# suppress the second.
+import time as _time
+
+_last_prompt: dict[int, float] = {}
+_PROMPT_COOLDOWN_S = 8.0
+
+
+def should_send_subscription_prompt(user_id: int, cooldown: float | None = None) -> bool:
+    """Return True iff we should send a subscription/force-join prompt now.
+
+    Debounce: at most one prompt per user per `cooldown` seconds.
+    Callers must call this BEFORE sending the message; it updates the
+    timestamp on success.
+    """
+    now = _time.monotonic()
+    cd = cooldown if cooldown is not None else _PROMPT_COOLDOWN_S
+    last = _last_prompt.get(user_id, 0.0)
+    if now - last < cd:
+        return False
+    _last_prompt[user_id] = now
+    return True
+
+
 async def check_access(client, user_id: int) -> tuple[bool, str]:
     """
     Returns (allowed, reason_code).
