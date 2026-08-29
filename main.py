@@ -427,6 +427,9 @@ patch_pyrogram_send_methods()
 # =========================================================================
 
 async def main_engine():
+    # SCHEDULED_RESTART is read + written below; declare it global at the
+    # top so the read at the restart-ping point is module-level (not local).
+    global SCHEDULED_RESTART
     print("Initializing services...")
 
     # 0. The log channel is MANDATORY: the bot pipes all logs there and the
