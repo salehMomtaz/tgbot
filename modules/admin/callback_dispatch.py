@@ -16,7 +16,8 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 from dotenv import set_key
-from main import SCHEDULED_RESTART, log_event, schedule_self_restart
+from main import log_event, schedule_self_restart, _mark_restart_pending
+from utils.shared import queue, signal_all_stop, reset_stop_flag
 from utils.gate import (
     load_database,
     add_user,
@@ -389,13 +390,15 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer()
 
     elif data == "admin_restart_confirm":
-        # Set the one-shot flag so the startup path in main.py sends a
-        # "Bot is online" message after systemd brings us back. Also clear
-        # the Abort-Operations flag so the freshly-launched workers can
-        # start cleanly (the previous restart cycle may have left it set
-        # if Abort Operations was used before restart).
-        global SCHEDULED_RESTART
-        SCHEDULED_RESTART = True
+        # Drop a sentinel at data/.restart_pending so the startup path in
+        # main.py can detect the request after the SIGTERM/restart cycle.
+        # (A module-level global wouldn't survive the cycle — the next
+        # Python interpreter starts from scratch and the in-memory flag
+        # is back to False.) Also clear the Abort-Operations flag so the
+        # freshly-launched workers can start cleanly (the previous restart
+        # cycle may have left it set if Abort Operations was used before
+        # restart).
+        _mark_restart_pending()
         reset_stop_flag()
         await callback_query.message.edit_text(
             "🔄 **Restarting the bot…**\n\nBack in a few seconds. The bot will send "
@@ -738,7 +741,10 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         import time as _t2
         now = int(_t2.time())
         active_count = sum(1 for v in subs.values() if int(v.get("until", 0)) > now)
-        en = "🟢 ON" if s.get("enabled") else "🔴 OFF"
+        # Subscription mode is always on now (the operator removed the
+        # "Disable subscription mode" feature in commit c5c3917). The text
+        # no longer needs the Mode/ON/OFF line — that was a leftover of
+        # the previous era when the master toggle was admin-controllable.
         free = "✅" if s.get("free_enabled") else "❌"
         chans = get_channels()
         if chans:
@@ -755,7 +761,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         ])
         await callback_query.message.edit_text(
             f"💳 **Subscriptions**\n\n"
-            f"Mode: **{en}**\nFree tier: **{free}** (5/day, force-join)\nChannel(s): `{ch}`\n"
+            f"Free tier: **{free}** (5/day, force-join)\nChannel(s): `{ch}`\n"
             f"Active subs: **{active_count}**\nTiers: {tier_lines}\n\n"
             f"Free users go last in the download queue (priority 0 vs 1-3).",
             reply_markup=kb

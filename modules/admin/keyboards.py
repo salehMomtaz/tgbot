@@ -15,12 +15,9 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
     doc_status = "✅" if is_document_mode(user_id) else "❌"
     pot_status = "🟢" if _pot_running() else "🔴"
     premium_status = "🟢" if config.PREMIUM_STRING_SESSION else "⚪"
-    try:
-        from utils.subscription.store import get_settings as _gs
-        s = _gs()
-        sub_badge = "🟢 ON" if s.get("enabled") else "⚪ OFF"
-    except Exception:
-        sub_badge = "⚪"
+    # Subscription mode is always on now (the operator removed the
+    # "Disable subscription mode" feature in commit c5c3917). No on/off
+    # indicator — the button just says "💳 Subscriptions".
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 List Users", callback_data="admin_list"),
          InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
@@ -30,7 +27,7 @@ def build_console_keyboard(user_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🍪 Cookie Jars", callback_data="admin_cookies_menu")],
         [InlineKeyboardButton(f"👑 Premium Uploads: {premium_status}", callback_data="admin_premium_menu"),
          InlineKeyboardButton(f"🔐 PO Token: {pot_status}", callback_data="admin_pot_menu")],
-        [InlineKeyboardButton(f"💳 Subscriptions: {sub_badge}", callback_data="admin_sub_menu"),
+        [InlineKeyboardButton("💳 Subscriptions", callback_data="admin_sub_menu"),
          InlineKeyboardButton("📨 Direct-Forward", callback_data="admin_direct_menu")],
         [InlineKeyboardButton("📸 Friend Media", callback_data="admin_friend_media_menu")],
         [InlineKeyboardButton("💥 Abort Operations", callback_data="admin_abort_queue"),

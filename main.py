@@ -47,12 +47,47 @@ app = Client(
 
 premium_app = None
 
-# One-shot flag: True after the admin pressed "🔄 Restart Bot" in the
-# in-telegram console and confirmed. The startup path (after systemd
-# brings us back) sees this flag, sends a "Bot is online" message to
-# the admin, and clears it. Fresh starts (cold boot, no prior restart
-# request) leave the flag False and skip the message.
-SCHEDULED_RESTART = False
+# One-shot restart-pending flag. Persisted to a small sentinel file so
+# it survives the SIGTERM/restart cycle (a module-level variable
+# wouldn't — the next Python interpreter starts from scratch and the
+# global would be False again). The flow is:
+#   1. Operator presses "🔄 Restart Bot" → admin_restart_confirm
+#      writes a sentinel file at data/.restart_pending.
+#   2. schedule_self_restart sends SIGTERM, systemd brings up the
+#      fresh process.
+#   3. The startup path in main.main_engine sees the sentinel, sends
+#      a "Bot is online" message to the admin, and removes the file.
+# A fresh boot (no prior restart request) finds no sentinel and
+# skips the message — exactly the same as SCHEDULED_RESTART=False.
+import os as _os_restart
+_RESTART_SENTINEL = "data/.restart_pending"
+
+
+def _restart_pending() -> bool:
+    """True when the admin just requested a restart via the in-telegram
+    console. Survives the SIGTERM/restart cycle because the sentinel is
+    on disk, not in module memory."""
+    return _os_restart.path.exists(_RESTART_SENTINEL)
+
+
+def _mark_restart_pending() -> None:
+    """Drop a sentinel file so the next startup can detect the request."""
+    try:
+        _os_restart.makedirs("data", exist_ok=True)
+        with open(_RESTART_SENTINEL, "w") as f:
+            f.write("")
+    except Exception:
+        pass
+
+
+def _clear_restart_pending() -> None:
+    """Remove the sentinel after the bot-online message fires."""
+    try:
+        _os_restart.remove(_RESTART_SENTINEL)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 if config.PREMIUM_STRING_SESSION:
     premium_app = Client(
         "premium_session",
@@ -427,9 +462,6 @@ patch_pyrogram_send_methods()
 # =========================================================================
 
 async def main_engine():
-    # SCHEDULED_RESTART is read + written below; declare it global at the
-    # top so the read at the restart-ping point is module-level (not local).
-    global SCHEDULED_RESTART
     print("Initializing services...")
 
     # 0. The log channel is MANDATORY: the bot pipes all logs there and the
@@ -699,11 +731,13 @@ async def main_engine():
     # Back in a few seconds." A long-running operator can't tell from that
     # alone whether the restart succeeded (the bot process could have
     # crashed on exit, or systemd could have failed to bring it back). The
-    # admin_restart_confirm path set a one-shot flag in main.SCHEDULED_RESTART;
-    # if it's set, we now confirm success by sending a single "bot is
-    # online" message. systemd Restart=always means we get here on a
-    # normal restart, on a fresh start, AND on a self-restart.
-    if SCHEDULED_RESTART:
+    # admin_restart_confirm path dropped a sentinel at data/.restart_pending
+    # before SIGTERM; if it's present at startup, we now confirm success by
+    # sending a single "bot is online" message. systemd Restart=always means
+    # we get here on a normal restart, on a fresh start, AND on a self-restart.
+    # A module-level variable wouldn't survive the restart cycle — the next
+    # Python interpreter starts from scratch. The sentinel on disk does.
+    if _restart_pending():
         try:
             await app.send_message(
                 int(config.SYSTEM_CREATOR_ID),
@@ -720,7 +754,7 @@ async def main_engine():
         except Exception as e:
             logging.warning(f"[Startup] could not send 'bot is online' "
                             f"to admin {config.SYSTEM_CREATOR_ID}: {e}")
-        SCHEDULED_RESTART = False
+        _clear_restart_pending()
 
     try:
         await asyncio.gather(*tasks)
