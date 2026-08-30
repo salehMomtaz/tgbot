@@ -5,7 +5,7 @@ primary bot and the reference implementation**. Its sibling **balebot**
 (aiogram v3, Bale.ai) was an experiment to try Bale.ai messenger bots; it shares
 the same download core (it was derived from tgbot's design), but tgbot is the
 source of truth. A future optional Bale frontend inside this repo is designed in
-`docs/memory/tgbot-balebot-integration.md`. This file captures the **non-obvious
+`docs/memory/BALEBOT.md`. This file captures the **non-obvious
 invariants** so you don't have to rediscover them.
 
 ## Orientation
@@ -42,9 +42,9 @@ invariants** so you don't have to rediscover them.
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
-| Change GitHub explorer / YouTube search / Translate / Web Markdown (balebot extras) | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers; see `docs/memory/tgbot-balebot-merge-2026-08-13.md`) |
-| Change Bale.ai frontend (government messenger, optional) | `modules/bale/` (`runner.py` aiogram poller `tapi.bale.ai` + `uploader.py` 20MB split + `admin.py` LIMITED console) + `config.py` (`BALE_TOKEN`, `BALE_SYSTEM_CREATOR_ID`, `BALE_HARD_LIMIT_MB`) — see `docs/memory/tgbot-balebot-hardening-2026-08-13.md` |
-| Change Friend Media Archiver (profile pics/stories/IG archive of friends) | `modules/friend_media/` (`admin.py` console + state persistence, `telegram.py` photos/stories via premium account, `instagram.py` cached instagrapi client, `state.py`, `common.py`) + `.env` (`FRIEND_MEDIA_*`) — see `docs/memory/tgbot-friend-media.md` |
+| Change GitHub explorer / YouTube search / Translate / Web Markdown (balebot extras) | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers; see `docs/memory/BALEBOT.md`) |
+| Change Bale.ai frontend (government messenger, optional) | `modules/bale/` (`runner.py` aiogram poller `tapi.bale.ai` + `uploader.py` 20MB split + `admin.py` LIMITED console) + `config.py` (`BALE_TOKEN`, `BALE_SYSTEM_CREATOR_ID`, `BALE_HARD_LIMIT_MB`) — see `docs/memory/BALEBOT.md` |
+| Change Friend Media Archiver (profile pics/stories/IG archive of friends) | `modules/friend_media/` (`admin.py` console + state persistence, `telegram.py` photos/stories via premium account, `instagram.py` cached instagrapi client, `state.py`, `common.py`) + `.env` (`FRIEND_MEDIA_*`) — see `docs/INFRA.md` |
 
 ### `utils/downloader/` package (replaces `utils/downloader.py`)
 
@@ -260,7 +260,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     estimator itself is untouched. Relatedly, HLS formats are excluded from CDN
     probing (`_is_hls_format`): an `.m3u8` probe measures the manifest, not the
     file. Don't "fix" the estimator; keep the guard upstream.
-    See `docs/memory/tgbot-ytdlnis-size-approach.md`.
+    See `docs/DOWNLOADER.md`.
 
 12. **Cookies live under `cookies/<platform>/`, never at the project root.**
     Layout (`config.COOKIE_DIR`, `config.YTDLP_COOKIES_DIR`):
@@ -427,7 +427,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     knob is `_tt_poll_interval()` (TIKTOK_DIRECT_POLL_SECONDS/JITTER), NOT the
     shared `_poll_interval()` (DIRECT_FORWARD_*) used by IG/X — keep them
     separate.
-    Full protocol + decode details: `docs/memory/tgbot-tiktok-direct-dm.md`.
+    Full protocol + decode details: `docs/TIKTOK.md`.
     Bridge cursor semantics: its `last_seq` (in `cache/xchat_bridge_state.json`)
     lives in the SAME id space as the legacy DM ids, so the shared `x.last_id`
     cursor dedupes; first boot primes and skips backlog. **The worker live-
@@ -454,7 +454,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     tweet_detail response also contains thread replies/quote tweets, and a global
     walk over-collects photos that don't belong to the shared tweet. If even that
     finds nothing, `_x_deliver_tweet` sends a text-only note instead of failing
-    the queue task. See `docs/memory/tgbot-2026-08-11-x-photo-paste-fix.md`.
+    the queue task. See `docs/memory/DIRECT_FORWARD_HISTORY.md`.
 
     **State file = shared across the three direct-forward workers; save
     merge-only (2026-08-11).** `direct_forward_state.json` is written by
@@ -465,7 +465,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     once held its boot-time copy for the whole process and reverted X's
     cursor on every save, so the entire X self-DM backlog re-relayed in waves
     after each IG poll (the "X posts received 2× then 4×" incident; see
-    `docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md`).
+    `docs/memory/DIRECT_FORWARD_HISTORY.md`).
     Therefore: **never call `_save_state(state)` from a worker.** Always
     persist through `_state_save_owned(state, {own_platform})` (async workers)
     or `_merge_state_save(state, {own_platform})` (sync admin pairing helpers)
@@ -522,8 +522,8 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
      all). Both the report and the warning carry the VPS local date-time. The
      log channel is MANDATORY for both the bot and the monitor
      (`LOG_CHANNEL_ID`, `main.py` refuses to start without it). Go port
-     rationale: `docs/go-feasibility.md`; full design:
-     `docs/memory/tgbot-system-monitor.md`. Tests:
+     rationale: `docs/INFRA.md`; full design:
+     `docs/INFRA.md`. Tests:
      `cd cmd/tgbot-monitor && go test ./...`.
 
 16. **User-facing "analyzing" status messages stream via `sendRichMessageDraft`.**
@@ -581,7 +581,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     originals first, then default, then dubs, bitrate only within a class.
     Do NOT collapse back to a pure-bitrate sort: on dubbed videos the original
     is usually the LOWEST-bitrate track, so a bitrate-only sort merges a Hindi
-    AI dub into the video (see `docs/memory/tgbot-2026-08-07-original-audio.md`).
+    AI dub into the video (see `docs/DOWNLOADER.md`).
     The `+bestaudio` fallback selectors and `PLAYLIST_TIERS` are already
     language-aware via yt-dlp's sort — leave them alone.
 
@@ -764,7 +764,7 @@ Don't port it to Go.
   commit the mode change — don't just chmod the VPS copy (it won't survive the
   next pull).
 - **TikTok shortlinks are pre-resolved by us, not yt-dlp.** `vt./vm./vn.tiktok.com/<code>` expands to the canonical `tiktok.com/@user/video/<id>` inside `normalize_url` (browser UA + 1 h TTL cache) because yt-dlp's own short-link extractor uses a bare `facebookexternalhit/1.1` HEAD and hits TikTok's stochastic anti-bot interstitial — surfacing as "The site changed its layout or the URL is malformed". `curl-cffi` must stay installed for yt-dlp's proof-of-work webpage solver; TikTok extractions/downloads also get one extra no-auth retry. Don't feed shortlinks straight to yt-dlp again.
-- **TikTok video URLs are rewritten to the `/embed/<id>` page (yt-dlp#17403).** Since the anti-bot challenge started intercepting the main `www.tiktok.com/@user/video/<id>` webpage fetch ("Unexpected response from webpage request"), `normalize_url` additionally converts canonical TikTok video URLs to `https://www.tiktok.com/embed/<id>` via `_to_tiktok_embed_url`, which serves challenge-free JSON. `_apply_pot_options` sets a Chrome 140 `User-Agent` via `http_headers` for embed URLs (never `user_agent`, the Python API ignores it), and `download_media` skips cookies for embed URLs (`not is_tiktok_embed`). This mirrors the direct-forward fix already shipped in commit `e48b060`. Do NOT add further workaround layers — if TikTok hardens the embed page too, wait for the upstream yt-dlp fix; the embed rewrite is a hedge, not a guarantee. Full writeup: `docs/memory/tgbot-2026-08-11-startup-crash-loop-and-tiktok-embed.md`.
+- **TikTok video URLs are rewritten to the `/embed/<id>` page (yt-dlp#17403).** Since the anti-bot challenge started intercepting the main `www.tiktok.com/@user/video/<id>` webpage fetch ("Unexpected response from webpage request"), `normalize_url` additionally converts canonical TikTok video URLs to `https://www.tiktok.com/embed/<id>` via `_to_tiktok_embed_url`, which serves challenge-free JSON. `_apply_pot_options` sets a Chrome 140 `User-Agent` via `http_headers` for embed URLs (never `user_agent`, the Python API ignores it), and `download_media` skips cookies for embed URLs (`not is_tiktok_embed`). This mirrors the direct-forward fix already shipped in commit `e48b060`. Do NOT add further workaround layers — if TikTok hardens the embed page too, wait for the upstream yt-dlp fix; the embed rewrite is a hedge, not a guarantee. Full writeup: `docs/TIKTOK.md`.
 - **pyrogram `Peer id invalid`** is monkey-patched in `main.py`
   (`get_peer_type_patched`) and the log channel peer is resolved at startup
   (`app.get_chat`). Don't remove either.

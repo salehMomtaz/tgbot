@@ -3,8 +3,8 @@
 Spawner for the standalone Go system monitor (cmd/tgbot-monitor).
 
 The actual monitor is a static Go binary (built by install.sh into
-``build/tgbot-monitor``) — see docs/go-feasibility.md and
-docs/memory/tgbot-system-monitor.md for why. This module exists ONLY to give
+``build/tgbot-monitor``) — see docs/INFRA.md and
+docs/INFRA.md for why. This module exists ONLY to give
 main.py a hook to launch it: it finds the binary, checks whether an instance is
 already alive (pidfile written by the Go process + a /proc cmdline scan), and
 forks it detached so it survives the bot's crash/restart.

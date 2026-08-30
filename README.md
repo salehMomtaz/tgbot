@@ -9,7 +9,7 @@ to it — piped straight from Telegram's servers with zero local buffering.
 Built on **kurigram** (active pyrogram fork, `import pyrogram` stays). Provisioned with a one-shot `./install.sh` (no Docker
 required). Runs as a `systemd` service that survives reboots.
 
-> **Last verified:** 2026-08-21 — **kurigram 2.2.24** (active pyrogram fork; `import pyrogram` stays), **TikTok chrome131 pin** (`curl_cffi<0.14` + `curl-adapter==1.1.0` — `0.14`/chrome142 blocked, `yt-dlp#17403`), **IG decode shim** (`urllib3>=2.3` `max_length`), **admin WebApp themes** (system/light/dark + `no-store` + Clear Cache), **Bale.ai frontend now live** (optional `tapi.bale.ai` mirror, same `INFO` level logging to the `bale_log` Telegram channel), **GitHub/YouTube/Translate/Web on both Telegram & Bale**, **free-tier Instagram fix**, **IG gap recovery (200) + optional MQTToT push**, **sequential headless cookie refresher (1 tab at a time, 24h, 4GB-safe)**, **dispatch-propagation hardening** (logger package split `utils/logger/`, Rich `32768` limit, strict Telegram/Bale log split, `utils/propagation.py` `stop()`/`continue_()`), **channel-join verification** (`modules/subscription/join.py` "✅ I joined" button), **full admin Mini App** (`/admin`, `docs/memory/tgbot-2026-08-16-admin-webapp-and-join-fix.md`). See `docs/kurigram-open-issues.md`, `docs/architecture-ptb-vs-pyrogram.md`, `docs/memory/tgbot-2026-08-21-tiktok-pin-and-webapp.md`.
+> **Last verified:** 2026-08-21 — **kurigram 2.2.24** (active pyrogram fork; `import pyrogram` stays), **TikTok chrome131 pin** (`curl_cffi<0.14` + `curl-adapter==1.1.0` — `0.14`/chrome142 blocked, `yt-dlp#17403`), **IG decode shim** (`urllib3>=2.3` `max_length`), **admin WebApp themes** (system/light/dark + `no-store` + Clear Cache), **Bale.ai frontend now live** (optional `tapi.bale.ai` mirror, same `INFO` level logging to the `bale_log` Telegram channel), **GitHub/YouTube/Translate/Web on both Telegram & Bale**, **free-tier Instagram fix**, **IG gap recovery (200) + optional MQTToT push**, **sequential headless cookie refresher (1 tab at a time, 24h, 4GB-safe)**, **dispatch-propagation hardening** (logger package split `utils/logger/`, Rich `32768` limit, strict Telegram/Bale log split, `utils/propagation.py` `stop()`/`continue_()`), **channel-join verification** (`modules/subscription/join.py` "✅ I joined" button), **full admin Mini App** (`/admin`, `docs/INFRA.md`). See `docs/INFRA.md` (covers kurigram, ptb-architecture & tiktok-pin).
 > Built on **kurigram** (`pyrogram` API). Full yt-dlp site support (1,786 patterns, generic excluded) + dual Telegram/Bale logging at same level.
 
 > **New to this?** The complete, beginner-friendly walkthrough — from "I just
@@ -369,7 +369,7 @@ The bot protects your jars:
   → send the `.txt` document. The downloader picks it up by URL domain
   automatically. Special cases (multi-domain sites, adult age gates, Chinese
   sites, DRM) are documented in
-  [`docs/cookie_site_special_cases.md`](docs/cookie_site_special_cases.md).
+  [`docs/COOKIES.md`](docs/COOKIES.md).
 
 > **Direct-forward note:** The IG/X/TikTok DM workers consume the shared primary
 > jars (`igcookies.txt`, `xcookies.txt`, `ttcookies.txt`) but **do not trigger
@@ -405,14 +405,14 @@ You can DM media to the bot's **own Instagram, X, and TikTok accounts** and have
 - All three relay workers (IG/X/TikTok) share one `direct_forward_state.json`
   and write it **merge-only per platform** — a worker can never clobber another
   platform's cursor, so each DM is delivered exactly once (see the
-  [state-race postmortem](docs/memory/tgbot-2026-08-11-x-duplicate-delivery-state-race.md)).
+  [state-race postmortem](docs/memory/DIRECT_FORWARD_HISTORY.md)).
 - A 2026-08-11 audit of the three self-DM mechanisms hardened edge cases: the
   XChat bridge cursor + inbox are protected from the hourly cache cleaner, the
   X worker live-reloads its cookie jar (no restart on re-upload), photo-only
   pasted tweets are delivered natively instead of silently failing, and the
   TikTok worker's network calls no longer block the event loop (see the
-  [self-DM audit](docs/memory/tgbot-2026-08-11-selfdm-audit.md) and the
-  [X photo-paste fix](docs/memory/tgbot-2026-08-11-x-photo-paste-fix.md)).
+  [self-DM audit](docs/memory/DIRECT_FORWARD_HISTORY.md) and the
+  [X photo-paste fix](docs/memory/DIRECT_FORWARD_HISTORY.md)).
 
 ---
 
@@ -482,6 +482,6 @@ reachable from the internet.
 - **Architecture deep-dive:** [`blueprint.md`](blueprint.md)
 - **Contributor / agent notes:** [`AGENTS.md`](AGENTS.md)
 - **Direct-forward (DM relay) setup:** [`docs/DIRECT_FORWARD_SETUP.md`](docs/DIRECT_FORWARD_SETUP.md)
-- **Cookie strategy:** [`docs/cookie-strategy.md`](docs/cookie-strategy.md)
-- **Go feasibility (why the monitor is Go):** [`docs/go-feasibility.md`](docs/go-feasibility.md)
+- **Cookie strategy:** [`docs/COOKIES.md`](docs/COOKIES.md)
+- **Go feasibility (why the monitor is Go):** [`docs/INFRA.md`](docs/INFRA.md)
 - **Agent memory notes:** [`docs/memory/`](docs/memory/)
