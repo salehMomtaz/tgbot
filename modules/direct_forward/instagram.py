@@ -5,29 +5,25 @@ Mirrors the original modules/direct_forward.py Instagram worker exactly.
 """
 
 import asyncio
-import json
 import logging
 import os
 import random
 import re
 import time
-from typing import Any
 
 import config
-from utils import cookie_manager
 from utils import ig_anti_detect
 from utils.shared import _should_stop
 
 from .state import (
-    _load_state, _merge_state_save, _state_save_owned,
-    _get_pair, _set_pair, _pending_pairs, request_pair_code,
-    _activity_stamp, _cursor, _bump_cursor,
+    _load_state, _state_save_owned, _get_pair,
+    _set_pair, _pending_pairs, _activity_stamp, _cursor,
+    _bump_cursor,
 )
 from .common import (
-    URL_RE, IG_POST_RE, TELEGRAM_CAPTION_LIMIT, TELEGRAM_TEXT_LIMIT,
-    _poll_interval, _chunk_text, _compose_caption, _send_followups,
-    _download_and_deliver, _enqueue_relay, _fetch_bytes, _video_upload_kwargs,
-    _x_media_payload_ok, _header_lines,
+    URL_RE, IG_POST_RE, _poll_interval, _compose_caption,
+    _send_followups, _download_and_deliver, _enqueue_relay, _fetch_bytes,
+    _video_upload_kwargs, _header_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -662,11 +658,14 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 logger.warning(f"[DirectForward/IG] cold-start jitter skipped: {e}")
             break
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
-            # User requested to break freeze and start immediately (VPN already matches VPS).
             # For testing, shorten freeze to 60s instead of 4h; the gap recovery (200 items) will
             # still deliver the stalled batch once login succeeds. If you see repeated PleaseWait,
             # the durable fix is still to pass the challenge in the official app.
-            if getattr(config, "IG_DIRECT_MQTT_ENABLED", False):
+            # NOTE: gated on IG_DIRECT_CHALLENGE_FREEZE_TEST, NOT on
+            # IG_DIRECT_MQTT_ENABLED — that flag only enables the experimental
+            # MQTToT push listener and must not silently disable the freeze
+            # that protects the account from a checkpoint retry storm.
+            if getattr(config, "IG_DIRECT_CHALLENGE_FREEZE_TEST", False):
                 freeze = random.uniform(60, 120)
             else:
                 freeze = random.uniform(3 * 3600, 5 * 3600)
@@ -862,184 +861,202 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         mqtt_task = asyncio.create_task(_ig_mqtt_listener())
         logger.info("[DirectForward/IG-MQTT] hybrid enabled — polling + push (TikTok-like)")
 
-    while True:
-        state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
-        state_dirty = False
-        try:
-            threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
-            pair = _get_pair(state, "ig")
-            pairing_active = "ig" in _pending_pairs
+    try:
+        while True:
+            state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
+            state_dirty = False
+            try:
+                threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
+                pair = _get_pair(state, "ig")
+                pairing_active = "ig" in _pending_pairs
 
-            for th in threads:
-                if th.is_group:
-                    continue
-                thread_users = {str(u.pk): u.username for u in (th.users or [])}
-                pair_uid = pair["user_id"] if pair else None
-                # We only ever read threads that contain the paired partner,
-                # EXCEPT while a pairing handshake is pending (scan everything).
-                if not pairing_active and (not pair_uid or pair_uid not in thread_users):
-                    continue
-
-                # Activity watermark: the inbox listing already carries each
-                # thread's last_activity_at, so an unchanged thread costs ZERO
-                # private-API calls. This is the biggest request-volume cut for
-                # an idle poller (20 thread fetches/cycle → ~0), and API volume
-                # is what Instagram's automation model watches.
-                activity = state.setdefault("ig", {}).setdefault("thread_activity", {})
-                act_key = str(th.id)
-                act_now = _activity_stamp(th)
-                if act_now and activity.get(act_key) == act_now and not pairing_active:
-                    continue
-                activity[act_key] = act_now
-                state_dirty = True
-
-                # --- gap-aware fetch: paginate until we have all items after last_seen ---
-                # Previously we fetched only 25 items; a week-long outage could leave dozens
-                # of missed DMs beyond that window. Now we walk the thread backwards (older)
-                # until the gap is closed or we hit a safety cap, so after a stale-cookie
-                # recovery (like the recent risky_contactpoint) every missed item is relayed.
-                last_seen = _cursor(state, "ig")
-                all_items: list[dict] = []
-                cursor = None
-                # Safety: cap at 200 items per thread per poll (covers ~1-2 weeks of DM)
-                # and at most 8 pages (25*8=200). Next poll will catch any remainder.
-                for _page in range(8):
-                    params = {"limit": 25, "direction": "older"}
-                    if cursor:
-                        params["cursor"] = cursor
-                    raw_page = await loop.run_in_executor(
-                        None, lambda tid=th.id, p=params: cl.private_request(f"direct_v2/threads/{tid}/", params=p))
-                    thread_page = (raw_page or {}).get("thread", {}) or {}
-                    page_items = thread_page.get("items") or []
-                    if not page_items:
-                        break
-                    all_items.extend(page_items)
-                    # If the oldest item in this page is already <= last_seen, gap is closed
-                    try:
-                        oldest_id = int(page_items[-1].get("item_id", 0) or 0)
-                        if oldest_id and oldest_id <= last_seen:
-                            break
-                    except Exception:
-                        pass
-                    cursor = thread_page.get("oldest_cursor")
-                    if not cursor:
-                        break
-                    if len(all_items) >= 200:
-                        break
-
-                # Filter to only new, non-viewer items after cursor
-                new_msgs = []
-                for m in all_items:
-                    if m.get("is_sent_by_viewer"):
+                for th in threads:
+                    if th.is_group:
                         continue
-                    try:
-                        if int(m["item_id"]) > last_seen:
-                            new_msgs.append(m)
-                    except Exception:
-                        logger.warning(f"[DirectForward/IG] weird item id {m.get('item_id', '!')!r} skip")
-                # Process oldest first so Telegram order matches IG order
-                new_msgs.sort(key=lambda m: int(m["item_id"]))
-                if new_msgs:
-                    logger.info(f"[DirectForward/IG] gap fetch: thread {th.id} had {len(all_items)} items, {len(new_msgs)} new after cursor {last_seen}")
+                    thread_users = {str(u.pk): u.username for u in (th.users or [])}
+                    pair_uid = pair["user_id"] if pair else None
+                    # We only ever read threads that contain the paired partner,
+                    # EXCEPT while a pairing handshake is pending (scan everything).
+                    if not pairing_active and (not pair_uid or pair_uid not in thread_users):
+                        continue
 
-                pair_username = ""
-                if pair:
-                    pair_username = pair.get("username", "")
+                    # Activity watermark: the inbox listing already carries each
+                    # thread's last_activity_at, so an unchanged thread costs ZERO
+                    # private-API calls. This is the biggest request-volume cut for
+                    # an idle poller (20 thread fetches/cycle → ~0), and API volume
+                    # is what Instagram's automation model watches.
+                    activity = state.setdefault("ig", {}).setdefault("thread_activity", {})
+                    act_key = str(th.id)
+                    act_now = _activity_stamp(th)
+                    if act_now and activity.get(act_key) == act_now and not pairing_active:
+                        continue
+                    activity[act_key] = act_now
+                    state_dirty = True
 
-                for m in new_msgs:
-                    consumed = False
-                    success = False
-                    try:
-                        # Burst pacing: a multi-item backfill (the gap-fetch
-                        # case) is exactly the pattern that triggers
-                        # "we suspect automated behavior" — 33 items at a
-                        # near-uniform 4-6 s cadence looks scripted. Apply
-                        # a per-item sleep that scales with the burst size.
-                        # For a 1-item cycle (the normal live case) this
-                        # adds ~0-2 s and is barely noticeable; for a 30+
-                        # item backfill it spaces the relay over several
-                        # minutes so the cumulative activity looks human.
-                        if len(new_msgs) > 1:
-                            wait = ig_anti_detect.burst_pace(len(new_msgs))
-                            await asyncio.sleep(wait)
-                        if pairing_active:
-                            consumed = await _ig_pairing_scan(m, thread_users, state,
-                                                              bot_client, chat_id)
-                            pair = _get_pair(state, "ig")
-                            pairing_active = "ig" in _pending_pairs
-                        if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
-                            await _ig_process_message(m, cl, loop, queue, chat_id,
-                                                      bot_client, premium_client, pair.get("username", ""))
-                            success = True
-                        elif consumed:
-                            success = True
-                        elif not pair or str(m.get("user_id", "")) != pair["user_id"]:
-                            # Non-paired user in same thread (group) — still advance cursor
-                            success = True
-                    except Exception as e:
-                        logger.error(f"[DirectForward/IG] item {m.get('item_id', '?')} failed: {e}")
-                        success = False
-                    # Precise cursor: only advance on success. A failed item stays
-                    # behind the cursor so the next poll retries it (at-least-once).
-                    # The missed batch from the recent stale-cookie stall will thus be
-                    # retried until delivered, instead of being skipped.
-                    if success:
+                    # --- gap-aware fetch: paginate until we have all items after last_seen ---
+                    # Previously we fetched only 25 items; a week-long outage could leave dozens
+                    # of missed DMs beyond that window. Now we walk the thread backwards (older)
+                    # until the gap is closed or we hit a safety cap, so after a stale-cookie
+                    # recovery (like the recent risky_contactpoint) every missed item is relayed.
+                    last_seen = _cursor(state, "ig")
+                    all_items: list[dict] = []
+                    cursor = None
+                    # Safety: cap at 200 items per thread per poll (covers ~1-2 weeks of DM)
+                    # and at most 8 pages (25*8=200). Next poll will catch any remainder.
+                    for _page in range(8):
+                        params = {"limit": 25, "direction": "older"}
+                        if cursor:
+                            params["cursor"] = cursor
+                        raw_page = await loop.run_in_executor(
+                            None, lambda tid=th.id, p=params: cl.private_request(f"direct_v2/threads/{tid}/", params=p))
+                        thread_page = (raw_page or {}).get("thread", {}) or {}
+                        page_items = thread_page.get("items") or []
+                        if not page_items:
+                            break
+                        all_items.extend(page_items)
+                        # If the oldest item in this page is already <= last_seen, gap is closed
                         try:
-                            _bump_cursor(state, "ig", int(m["item_id"]))
-                            await _state_save_owned(state, {"ig"})
+                            oldest_id = int(page_items[-1].get("item_id", 0) or 0)
+                            if oldest_id and oldest_id <= last_seen:
+                                break
                         except Exception:
                             pass
-                    else:
-                        # Don't bump — leave cursor at previous value so this item is retried
-                        logger.warning(f"[DirectForward/IG] cursor NOT advanced for failed item {m.get('item_id')} — will retry")
+                        cursor = thread_page.get("oldest_cursor")
+                        if not cursor:
+                            break
+                        if len(all_items) >= 200:
+                            break
 
-            if state_dirty:
-                await _state_save_owned(state, {"ig"})
-            cl.dump_settings("direct_ig_session.json")
-        except (ChallengeRequired, PleaseWaitFewMinutes) as e:
-            # Do NOT hammer a challenged session: re-trying hourly only deepens
-            # the flag. Freeze for hours; the durable fix is a human passing
-            # the checkpoint in the official app, then restarting the bot.
-            freeze = random.uniform(3 * 3600, 5 * 3600)
-            logger.error(f"[DirectForward/IG] Instagram challenged the session: {e}. "
-                         f"Pausing this worker for ~{freeze / 3600:.1f}h. "
-                         f"Open the official Instagram app on the bot account and pass the "
-                         f"checkpoint there, then restart the bot for a clean resume.")
-            try:
-                await bot_client.send_message(
-                    chat_id=chat_id,
-                    text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
-                          f"The IG direct-forward worker hit a manual-verification "
-                          f"checkpoint while polling and is pausing ~{freeze / 3600:.1f}h "
-                          f"to avoid making it worse.\n\n"
-                          f"Open the official Instagram app on the bot account and pass the "
-                          f"verification there, then restart the bot. Instagram: `{e}`"),
-                )
-            except Exception as alert_err:
-                logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
-            await asyncio.sleep(freeze)
-        except LoginRequired:
-            logger.warning(f"[DirectForward/IG] session expired — attempting re-login.")
-            try:
-                await loop.run_in_executor(None, lambda: _ig_login(cl))
+                    # Filter to only new, non-viewer items after cursor
+                    new_msgs = []
+                    for m in all_items:
+                        if m.get("is_sent_by_viewer"):
+                            continue
+                        try:
+                            if int(m["item_id"]) > last_seen:
+                                new_msgs.append(m)
+                        except Exception:
+                            logger.warning(f"[DirectForward/IG] weird item id {m.get('item_id', '!')!r} skip")
+                    # Process oldest first so Telegram order matches IG order
+                    new_msgs.sort(key=lambda m: int(m["item_id"]))
+                    if new_msgs:
+                        logger.info(f"[DirectForward/IG] gap fetch: thread {th.id} had {len(all_items)} items, {len(new_msgs)} new after cursor {last_seen}")
+
+                    pair_username = ""
+                    if pair:
+                        pair_username = pair.get("username", "")
+
+                    for m in new_msgs:
+                        consumed = False
+                        success = False
+                        try:
+                            # Burst pacing: a multi-item backfill (the gap-fetch
+                            # case) is exactly the pattern that triggers
+                            # "we suspect automated behavior" — 33 items at a
+                            # near-uniform 4-6 s cadence looks scripted. Apply
+                            # a per-item sleep that scales with the burst size.
+                            # For a 1-item cycle (the normal live case) this
+                            # adds ~0-2 s and is barely noticeable; for a 30+
+                            # item backfill it spaces the relay over several
+                            # minutes so the cumulative activity looks human.
+                            if len(new_msgs) > 1:
+                                wait = ig_anti_detect.burst_pace(len(new_msgs))
+                                await asyncio.sleep(wait)
+                            if pairing_active:
+                                consumed = await _ig_pairing_scan(m, thread_users, state,
+                                                                  bot_client, chat_id)
+                                pair = _get_pair(state, "ig")
+                                pairing_active = "ig" in _pending_pairs
+                            if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
+                                await _ig_process_message(m, cl, loop, queue, chat_id,
+                                                          bot_client, premium_client, pair.get("username", ""))
+                                success = True
+                            elif consumed:
+                                success = True
+                            elif not pair or str(m.get("user_id", "")) != pair["user_id"]:
+                                # Non-paired user in same thread (group) — still advance cursor
+                                success = True
+                        except Exception as e:
+                            logger.error(f"[DirectForward/IG] item {m.get('item_id', '?')} failed: {e}")
+                            success = False
+                        # Precise cursor: only advance on success. A failed item stays
+                        # behind the cursor so the next poll retries it (at-least-once).
+                        # The missed batch from the recent stale-cookie stall will thus be
+                        # retried until delivered, instead of being skipped.
+                        if success:
+                            try:
+                                _bump_cursor(state, "ig", int(m["item_id"]))
+                                await _state_save_owned(state, {"ig"})
+                            except Exception:
+                                pass
+                        else:
+                            # Don't bump — leave cursor at previous value so this item is retried
+                            logger.warning(f"[DirectForward/IG] cursor NOT advanced for failed item {m.get('item_id')} — will retry")
+
+                if state_dirty:
+                    await _state_save_owned(state, {"ig"})
                 cl.dump_settings("direct_ig_session.json")
+            except (ChallengeRequired, PleaseWaitFewMinutes) as e:
+                # Do NOT hammer a challenged session: re-trying hourly only deepens
+                # the flag. Freeze for hours; the durable fix is a human passing
+                # the checkpoint in the official app, then restarting the bot.
+                # Same test escape hatch as the login-time checkpoint branch, so the
+                # two sites behave consistently.
+                if getattr(config, "IG_DIRECT_CHALLENGE_FREEZE_TEST", False):
+                    freeze = random.uniform(60, 120)
+                else:
+                    freeze = random.uniform(3 * 3600, 5 * 3600)
+                logger.error(f"[DirectForward/IG] Instagram challenged the session: {e}. "
+                             f"Pausing this worker for ~{freeze / 3600:.1f}h. "
+                             f"Open the official Instagram app on the bot account and pass the "
+                             f"checkpoint there, then restart the bot for a clean resume.")
                 try:
-                    await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
+                    await bot_client.send_message(
+                        chat_id=chat_id,
+                        text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
+                              f"The IG direct-forward worker hit a manual-verification "
+                              f"checkpoint while polling and is pausing ~{freeze / 3600:.1f}h "
+                              f"to avoid making it worse.\n\n"
+                              f"Open the official Instagram app on the bot account and pass the "
+                              f"verification there, then restart the bot. Instagram: `{e}`"),
+                    )
+                except Exception as alert_err:
+                    logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
+                await asyncio.sleep(freeze)
+            except LoginRequired:
+                logger.warning("[DirectForward/IG] session expired — attempting re-login.")
+                try:
+                    await loop.run_in_executor(None, lambda: _ig_login(cl))
+                    cl.dump_settings("direct_ig_session.json")
+                    try:
+                        await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
                 except Exception as e:
-                    logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
+                    logger.error(f"[DirectForward/IG] re-login failed: {e}. Sleeping 1h.")
+                    await asyncio.sleep(3600)
             except Exception as e:
-                logger.error(f"[DirectForward/IG] re-login failed: {e}. Sleeping 1h.")
-                await asyncio.sleep(3600)
-        except Exception as e:
-            logger.error(f"[DirectForward/IG] poll error: {e}")
-            await asyncio.sleep(min(600, _poll_interval()))
+                logger.error(f"[DirectForward/IG] poll error: {e}")
+                await asyncio.sleep(min(600, _poll_interval()))
 
-        # Honor the global "Abort Operations" flag set by the admin console.
-        # Cooperative cancel: we don't kill the in-flight `cl.*` HTTP call —
-        # we let the current poll finish naturally, then break out of the
-        # main loop. The systemd-supervised process keeps running; the
-        # flag is reset by the next admin_restart or bot startup.
-        if _should_stop():
-            logger.info("[DirectForward/IG] stop flag set — exiting worker loop")
-            return
-        await asyncio.sleep(_poll_interval())
+            # Honor the global "Abort Operations" flag set by the admin console.
+            # Cooperative cancel: we don't kill the in-flight `cl.*` HTTP call —
+            # we let the current poll finish naturally, then break out of the
+            # main loop. The systemd-supervised process keeps running; the
+            # flag is reset by the next admin_restart or bot startup.
+            if _should_stop():
+                logger.info("[DirectForward/IG] stop flag set — exiting worker loop")
+                return
+            await asyncio.sleep(_poll_interval())
+    finally:
+        # Cancel the hybrid MQTT listener on ANY exit (stop flag, cancel,
+        # or an escaping exception). Without this the task kept running a
+        # second IG client + MQTToT socket after the worker returned.
+        if mqtt_task is not None and not mqtt_task.done():
+            mqtt_task.cancel()
+            try:
+                await mqtt_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
