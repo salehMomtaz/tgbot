@@ -74,7 +74,8 @@ telethon_session.txt
 
 # Locally-cloned Instagram anti-detection reference repos (research only,
 # intentionally NOT tracked — clone them with `git clone` into reference/)
-reference/
+# NOTE: anchored to repo root so docs/reference/ (tracked knowledge base) is not ignored
+/reference/
 certs/
 
 # Mimocode scheduler runtime (ephemeral lock + cron state)

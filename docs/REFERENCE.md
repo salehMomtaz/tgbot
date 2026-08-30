@@ -31,3 +31,13 @@ git clone https://github.com/NiceDayZc/okgram.git reference/okgram
 To reclaim disk: `rm -rf reference/` (gitignored, no git history impact). To restore: clone as above. Do not commit `reference/` — `.gitignore:74` already covers it.
 
 Full upstream docs remain in each clone under `reference/<name>/docs/` and `README.md` if a deep dive is needed.
+
+## Detailed per-clone notes (tracked)
+
+- [`docs/reference/instagrapi.md`](reference/instagrapi.md) — live private API, direct threads, challenge, MQTToT (59 lines)
+- [`docs/reference/instaharvest_v2.md`](reference/instaharvest_v2.md) — 14-layer fallback, Chrome 142 TLS, Pydantic models (46 lines)
+- [`docs/reference/insta-wizard.md`](reference/insta-wizard.md) — mobile/web dual API, transport abstraction (41 lines)
+- [`docs/reference/okgram.md`](reference/okgram.md) — OkHttp HTTP/2, IG-U-RUR echo, phone-grade sessions (54 lines)
+- [`docs/reference/README.md`](reference/README.md) — index + strip report (42 lines)
+
+Stripped: `__pycache__`/`*.pyc` removed (977 files, 13 MB); `.git/logs` emails (`saleh.momtaz68@gmail.com`) not included in tracked docs.
