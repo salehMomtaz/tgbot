@@ -259,9 +259,19 @@ async def _download_media(cl, media_obj, prefix):
             # reach media_pk()'s `media_pk, _ = media_id.split("_")`, which
             # raises "too many values to unpack (expected 2)". That silently
             # broke this CDN-fallback path on every single run.
+            #
+            # Dispatch on media_type: 1=photo, 2=video, 8=carousel/album.
+            # Routing a carousel to photo_download trips instagrapi's
+            # `assert media.media_type == 1, "Must been photo"`. album_download
+            # returns a LIST of paths; the caller wants a single file (the
+            # full-archive path uses _download_media_urls for all items), so
+            # the list is collapsed to its first entry just below.
             pk = getattr(media_obj, "pk", None) or getattr(media_obj, "id", None)
-            if getattr(media_obj, "media_type", 0) == 2:
+            mtype = getattr(media_obj, "media_type", 0)
+            if mtype == 2:
                 return cl.video_download(pk, folder=d)
+            if mtype == 8:
+                return cl.album_download(pk, folder=d)
             return cl.photo_download(pk, folder=d)
 
         path = await loop.run_in_executor(None, _dl)
