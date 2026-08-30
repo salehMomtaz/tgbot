@@ -11,9 +11,23 @@ invariants** so you don't have to rediscover them.
 ## Orientation
 
 - **Framework:** pyrogram (NOT aiogram). Handlers are registered on a `Client`
-  with ordered groups (`group=-2` log interceptors, `-1` security gate, `0` state
-  machine, `1` text router, `2` callback dispatcher). `message.stop_propagation()`
-  / `continue_propagation()` / `raise ContinuePropagation` control flow.
+  with ordered groups. Groups iterate **numerically** (`dispatcher.py` sorts
+  them), so the live layering is:
+
+  | group | what lives there |
+  |---|---|
+  | `-2` | log interceptors (`main.py`: every private message + every callback query), each ending in `continue_propagation()` |
+  | `-1` | security gate (`modules/admin/register.py:49`, matches **all** private messages) |
+  | `0` | **default** — admin message handlers + admin state machine, the ported extras (github / youtube / translate / web), subscription commands, the stream interceptor, the `on_raw_update` Stars pre-checkout handler, **and most callback dispatchers** (`^admin_`, `^fm_`, `^dl:`, `^pl:`, `^pln:`, `^plx:`, `^sub:`) |
+  | `1` | text router — admin `admin_start_text_handler` **and** the downloader's `text_link_handler` |
+  | `2` | *secondary* callback group — only `^chkjoin:` and `^gh:` |
+
+  Note the two non-obvious consequences: (a) **most callbacks are group 0, not
+  group 2** — "group 2 = callback dispatcher" is only true for the two handlers
+  above; and (b) the downloader's link handler is **group 1**, which is why a
+  group-0 extra that calls `stop(message)` (e.g. a `github.com` link) reliably
+  preempts the direct-file fallback. `message.stop_propagation()` /
+  `continue_propagation()` / `raise ContinuePropagation` control flow.
 - **Config:** `config.py` reads everything from `.env` via `python-dotenv` at
   import time (`load_dotenv()` is called at the top of `config.py` so it's
   self-contained regardless of which module imports first). Never hardcode

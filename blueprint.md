@@ -232,7 +232,6 @@ tgbot/
 ├── .env.example              # Copy to .env and fill in tokens (Telegram + optional Bale)
 ├── requirements.txt          # pyrogram + aiogram (Bale) + yt-dlp[default,curl-cffi] + bgutil PO plugin
 ├── config.py                 # Reads .env via python-dotenv; all settings live here (BALE_*, GITHUB_TOKEN, etc.)
-├── generate_session.py       # Local utility: generate a Premium userbot session string
 ├── main.py                   # Bootloader: logger (dual Telegram+Bale), cookie init+lock, PO provider, FastAPI, SIGTERM
 ├── database.json             # Whitelisted / blacklisted / settings registries (runtime)
 ├── cookies/                  # Live jars (read-only at rest, write-back via snapshots)
@@ -423,7 +422,8 @@ loads them with `python-dotenv` at import time. Key groups:
 
 - **Required:** `API_ID`, `API_HASH`, `BOT_TOKEN`, `SYSTEM_CREATOR_ID`.
 - **Logging:** `LOG_CHANNEL_ID` (private channel, bot as admin).
-- **4 GB uploads:** `PREMIUM_STRING_SESSION` (from `generate_session.py`).
+- **4 GB uploads:** `PREMIUM_STRING_SESSION` (generated in-chat via
+  Admin → 👑 Premium Uploads → 🔑 Generate Session, not by a terminal script).
 - **Streaming:** `DOMAIN`, `SSL_CERT_PATH`/`SSL_KEY_PATH`.
 - **Proxy (only on blocked networks):** `SOCKS5_PROXY` / `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY`.
 - **PO provider (leave defaults):** `YTDLP_POT_ENABLED`, `YTDLP_POT_PORT=4416`, `YTDLP_POT_PROVIDER_REF`.

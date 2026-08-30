@@ -239,22 +239,24 @@ By default the bot uploads up to **2 GB** per file (Telegram's Bot API limit). I
 you have a **Telegram Premium** account, you can also provide a *userbot session*
 so the bot can upload **4 GB** files.
 
-1. Still in the `tgbot` folder, run:
-   ```
-   ./run.sh >/dev/null 2>&1 & sleep 2 ; kill %1 2>/dev/null   # just to warm the venv, then stop
-   ```
-   *(Skip that — simpler:)* just run the generator with the venv active:
-   ```
-   source venv/bin/activate
-   python generate_session.py
-   ```
-2. It will ask for your `API_ID`, `API_HASH`, phone number, and the login code
-   Telegram sends you. Finish the login.
-3. It prints a long **string session**. Copy the whole thing.
-4. Put it in `.env`:
-   ```
-   PREMIUM_STRING_SESSION=your_long_string_here
-   ```
+The session is generated **from inside the bot** — there is no terminal script,
+by design. Telegram invalidates a login code the moment it is typed as a chat
+message (anti-account-sharing detection), so the console presents a **dial pad**
+for the code instead.
+
+1. Start the bot (`./run.sh`, or `sudo systemctl start tgbot`) and open a chat
+   with it.
+2. Go to **Admin → 👑 Premium Uploads → 🔑 Generate Session**.
+3. Enter your **phone number** (international format, e.g. `+15551234567`).
+4. Enter the **login code** using the on-screen **dial pad** — do *not* type it
+   as a message. If you have 2FA enabled, enter the **cloud password** as text
+   when prompted.
+5. Tap **💾 Save to .env**. The bot writes `PREMIUM_STRING_SESSION` for you
+   (dotenv-style quoting, safe for `run.sh`'s parser) and restarts itself to
+   pick it up — no SSH or `systemctl` needed.
+
+You can abort at any point with **❌ Abort Session Generation**; the temporary
+login client is always torn down.
 
 If you don't have Premium or don't care about 4 GB files, **leave
 `PREMIUM_STRING_SESSION` empty** and skip this section entirely.

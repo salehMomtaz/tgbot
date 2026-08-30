@@ -4,8 +4,8 @@
 Telegram Bots are hard-capped at 2 GB per upload (tdlib/telegram-bot-api#583);
 the only way to reach 4 GB is a Premium *user* account over MTProto using a
 ``PREMIUM_STRING_SESSION``. This module performs the interactive login steps
-(phone -> code -> optional 2FA password) that ``generate_session.py`` used to
-do on the terminal, so the admin can do it entirely from the Admin Console.
+(phone -> code -> optional 2FA password) that used to be done by a standalone
+terminal script, so the admin can do it entirely from the Admin Console.
 
 Login flow (all on a temporary in-memory client):
     client = Client(":memory:", api_id=config.API_ID, api_hash=config.API_HASH)
