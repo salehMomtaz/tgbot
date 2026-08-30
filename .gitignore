@@ -59,6 +59,9 @@ session-ses_*.md
 
 # OpenCode runtime state (session memory transcripts may contain secrets)
 .opencode/memory/
+.opencode/node_modules/
+.opencode/package-lock.json
+.opencode/package.json
 
 # XChat bridge (emusks npm package + runtime state; the PIN lives in .env)
 node_modules/
@@ -73,3 +76,9 @@ telethon_session.txt
 # intentionally NOT tracked — clone them with `git clone` into reference/)
 reference/
 certs/
+
+# Mimocode scheduler runtime (ephemeral lock + cron state)
+.mimocode/
+
+# Removed Admin WebApp (2026-08-26) — do not re-add without explicit ask
+modules/admin_webapp/
