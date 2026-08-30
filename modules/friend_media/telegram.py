@@ -24,7 +24,6 @@ oldest-first delivery so the archive reads chronologically.
 
 import os
 import tempfile
-import asyncio
 import logging
 import config
 

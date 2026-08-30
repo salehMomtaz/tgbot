@@ -10,11 +10,8 @@ import os
 import random
 import re
 import shutil
-import time
-from typing import Any
 
 import config
-from utils import cookie_manager
 
 logger = logging.getLogger(__name__)
 

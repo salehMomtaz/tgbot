@@ -1,12 +1,9 @@
-import uuid
-import mimetypes
 import time
 import urllib.parse
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pyrogram import Client
 from pyrogram.types import Message
-import config
 
 # In-memory session mapper
 # Structure: { "token": { "chat_id": 123, "message_id": 456, "file_name": "x.mp4", "file_size": 1000000, "mime_type": "video/mp4", "created_at": 1609459200 } }

@@ -4,7 +4,6 @@ import uuid
 import glob
 import shutil
 import asyncio
-import urllib.parse
 
 import yt_dlp
 from pyrogram import Client, filters
@@ -145,7 +144,7 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
                 if getattr(config, 'YTDLP_USER_AGENT', ''):
                     ydl_opts['user_agent'] = config.YTDLP_USER_AGENT
                 try:
-                    from utils.downloader.cookies import _apply_pot_options as _apply
+                    pass
                     # use url_normalize's patch if available
                     from utils.downloader.url_normalize import _apply_pot_options as _pot
                     ydl_opts = _pot(ydl_opts, url)

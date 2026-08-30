@@ -20,7 +20,6 @@ Security:
 from __future__ import annotations
 
 import logging
-import time
 import json
 import urllib.request
 import urllib.parse

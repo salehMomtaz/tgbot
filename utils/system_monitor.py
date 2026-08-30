@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PIDFILE = os.path.join(_PROJECT_ROOT, "system_monitor.pid")

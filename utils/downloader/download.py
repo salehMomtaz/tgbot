@@ -7,7 +7,7 @@ Mirrors the original utils/downloader.py download_media function exactly.
 import os
 import yt_dlp
 import config
-from .cookies import _resolve_jar_path, get_cookies_for_url
+from .cookies import _resolve_jar_path
 from .url_normalize import normalize_url, _apply_pot_options
 from .sizing import required_merge_headroom, _ensure_disk_space
 from .errors import _classify_ytdl_error

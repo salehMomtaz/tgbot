@@ -85,7 +85,6 @@ async def send_single_media_bale(bot, chat_id: int, file_path: str, action: str,
 async def process_split_and_upload_bale(bot, chat_id: int, file_path: str, action: str, title: str, uploader: str, duration: int, thumb_path: str, progress_msg):
     """Bale 20 MB sequential uploader: one chunk at a time, ffmpeg -c copy for media."""
     from utils.downloader import split_file_generator, split_video_by_size_generator
-    from main import progress_bar_handler  # not used for Bale progress, kept for parity
 
     size = os.path.getsize(file_path)
     # Bale real limit is 20 MB; keep 19 MB target / 20 MB hard.

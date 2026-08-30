@@ -8,23 +8,21 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
 import time
 import uuid
 from typing import Any
 
 import config
-from utils.shared import DOWNLOAD_CACHE, _should_stop, queue as shared_queue
+from utils.shared import DOWNLOAD_CACHE, _should_stop
 
 from .state import (
-    _load_state, _merge_state_save, _state_save_owned,
-    _get_pair, _cursor, _bump_cursor,
+    _load_state, _state_save_owned, _cursor,
+    _bump_cursor,
 )
 from .common import (
-    URL_RE, _poll_interval, _chunk_text, _compose_caption, _send_followups,
-    _download_and_deliver, _enqueue_relay, _fetch_bytes, _video_upload_kwargs,
-    _x_media_payload_ok, _header_lines,
+    URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
+    _enqueue_relay, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
 )
 
 logger = logging.getLogger(__name__)

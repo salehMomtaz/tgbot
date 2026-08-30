@@ -9,7 +9,8 @@ what is available and suggests next step.
 Usage:
   venv/bin/python tools/test_ig_mqtt.py  # reads direct_ig_session.json + config
 """
-import os, sys, pathlib
+import os
+import pathlib
 print("=== IG MQTT probe ===")
 try:
     import instagrapi

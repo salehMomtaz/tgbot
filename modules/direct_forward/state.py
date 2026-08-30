@@ -8,11 +8,9 @@ import asyncio
 import json
 import logging
 import os
-import random
 import time
 from typing import Any
 
-import config
 
 STATE_FILE = "direct_forward_state.json"
 IG_SESSION_FILE = "direct_ig_session.json"

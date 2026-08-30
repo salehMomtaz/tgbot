@@ -8,8 +8,6 @@ import os
 import tempfile
 import subprocess
 import ffmpeg
-import config
-from .sizing import _ensure_disk_space
 
 
 def embed_metadata_ffmpeg(file_path: str, title: str, artist: str, thumb_path: str | None, media_type: str) -> str:
@@ -38,7 +36,7 @@ def embed_metadata_ffmpeg(file_path: str, title: str, artist: str, thumb_path: s
         '-i', file_path,
         '-metadata', f'title={title}',
         '-metadata', f'artist={artist}',
-        '-metadata', f'comment=Downloaded via Downloader Bot',
+        '-metadata', 'comment=Downloaded via Downloader Bot',
     ]
 
     if media_type == 'a' and thumb_path and os.path.isfile(thumb_path):

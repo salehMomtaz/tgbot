@@ -7,7 +7,7 @@ from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineK
 from utils.propagation import stop
 
 from utils.subscription.tiers import TIERS, TIER_ORDER
-from utils.subscription.store import get_settings, is_subscription_active, get_subscription
+from utils.subscription.store import get_settings, is_subscription_active
 from utils.subscription.quota import remaining_quota, check_quota
 from utils.subscription.access import check_access
 from utils.subscription.payments_stars import create_stars_invoice
@@ -28,7 +28,7 @@ def _sub_status_text(user_id: int) -> str:
     tier = sub.get("tier", "?")
     t = TIERS.get(tier, {})
     until = sub.get("until", 0)
-    import time, datetime
+    import datetime
     try:
         dt = datetime.datetime.fromtimestamp(until).strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
@@ -194,37 +194,34 @@ def register_subscription_payments(app: Client):
 
     @app.on_raw_update(group=0)
     async def _raw_precheckout(client, update, users, chats):
-        try:
-            if isinstance(update, UpdateBotPrecheckoutQuery):
-                # synthesize minimal query object for handler
-                class _Q:
-                    pass
-                q = _Q()
-                q.id = getattr(update, "query_id", "")
-                q.invoice_payload = getattr(update, "payload", b"")
-                if isinstance(q.invoice_payload, bytes):
-                    try:
-                        q.invoice_payload = q.invoice_payload.decode()
-                    except Exception:
-                        q.invoice_payload = ""
-                uid = getattr(update, "user_id", 0)
-                # pyrogram users dict maps peer id -> User
-                q.from_user = users.get(uid) if isinstance(users, dict) else None
-                if q.from_user is None:
-                    # fallback: mock with id only
-                    class _U:
-                        id = uid
-                    q.from_user = _U()
-                async def _answer(ok=True, error_message=None):
-                    from utils.subscription.payments_stars import _bot_api
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(None, lambda: _bot_api("answerPreCheckoutQuery", {"pre_checkout_query_id": q.id, "ok": ok, **({"error_message": error_message} if error_message else {})}))
-                q.answer = _answer
-                from utils.subscription.payments_stars import handle_pre_checkout
-                await handle_pre_checkout(client, q)
-        except Exception:
-            raise
+        if isinstance(update, UpdateBotPrecheckoutQuery):
+            # synthesize minimal query object for handler
+            class _Q:
+                pass
+            q = _Q()
+            q.id = getattr(update, "query_id", "")
+            q.invoice_payload = getattr(update, "payload", b"")
+            if isinstance(q.invoice_payload, bytes):
+                try:
+                    q.invoice_payload = q.invoice_payload.decode()
+                except Exception:
+                    q.invoice_payload = ""
+            uid = getattr(update, "user_id", 0)
+            # pyrogram users dict maps peer id -> User
+            q.from_user = users.get(uid) if isinstance(users, dict) else None
+            if q.from_user is None:
+                # fallback: mock with id only
+                class _U:
+                    id = uid
+                q.from_user = _U()
+            async def _answer(ok=True, error_message=None):
+                from utils.subscription.payments_stars import _bot_api
+                import asyncio
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: _bot_api("answerPreCheckoutQuery", {"pre_checkout_query_id": q.id, "ok": ok, **({"error_message": error_message} if error_message else {})}))
+            q.answer = _answer
+            from utils.subscription.payments_stars import handle_pre_checkout
+            await handle_pre_checkout(client, q)
         # Always let the dispatcher continue to the next handler in this group.
         raise ContinuePropagation
 
@@ -281,7 +278,7 @@ async def gate_and_quota_check(client, message: Message) -> bool:
                     lines.append(f"• channel `{cid}`")
             kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
             await message.reply_text(
-                f"🔒 Free access requires joining our channel(s) first:\n" + "\n".join(lines) + "\n\nJoin all, then send your link again. Or use /subscription to unlock without joining.",
+                "🔒 Free access requires joining our channel(s) first:\n" + "\n".join(lines) + "\n\nJoin all, then send your link again. Or use /subscription to unlock without joining.",
                 reply_markup=kb
             )
             return False

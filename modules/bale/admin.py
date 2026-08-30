@@ -2,11 +2,10 @@
 # Government-owned messenger => no cookies / POT / direct-forward / premium / subscriptions.
 # Only: users, blacklist, doc mode, size limits, abort, close.
 import logging
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import Router
 import config
-from utils.gate import load_database, add_user, remove_user, unblacklist_user, toggle_document_mode, is_document_mode
-import utils.shared as shared
+from utils.gate import is_document_mode
 
 router = Router()  # not used directly; handlers registered via dispatcher in bale_runner
 logger = logging.getLogger(__name__)

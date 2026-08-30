@@ -6,7 +6,7 @@ Mirrors the original utils/downloader.py extract_formats function exactly.
 
 import os
 import utils.shared as shared
-from .cookies import _resolve_jar_path, get_cookies_for_url
+from .cookies import _resolve_jar_path
 from .url_normalize import normalize_url, _is_youtube, _apply_pot_options
 from .sizing import (
     estimate_format_size,

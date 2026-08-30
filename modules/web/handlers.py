@@ -5,7 +5,6 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from utils.propagation import stop
 from modules.web.api import fetch_markdown_text
-from utils.gate import is_authorized
 
 def register_web_handlers(app: Client, premium_app: Client | None = None):
     @app.on_message(filters.command("web") & filters.private, group=0)

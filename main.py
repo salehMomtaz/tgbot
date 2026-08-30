@@ -10,7 +10,7 @@ import uvicorn
 from pyrogram import Client, filters, utils
 from pyrogram.types import Message, CallbackQuery  # Fixed: Imported missing type annotations
 import config
-from utils.shared import queue, DOWNLOAD_CACHE, LAST_UPDATE_TIME
+from utils.shared import LAST_UPDATE_TIME
 
 # Running as `python main.py` puts this module in sys.modules['__main__'] ONLY.
 # Any later `import main` would RE-EXECUTE this file and hand back a second

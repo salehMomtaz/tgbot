@@ -4,7 +4,6 @@ Error classification helpers for yt-dlp failures.
 Mirrors the original utils/downloader.py error functions exactly.
 """
 
-import config
 from .cookies import _site_cookie_context
 
 

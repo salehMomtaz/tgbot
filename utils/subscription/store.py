@@ -16,11 +16,8 @@ Uses file locking via fcntl where available; falls back to plain write.
 """
 from __future__ import annotations
 
-import json
-import os
 import time
 import threading
-from datetime import datetime, timezone
 
 import config
 

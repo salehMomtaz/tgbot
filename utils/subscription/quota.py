@@ -1,12 +1,11 @@
 """Daily quota tracking."""
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 
 import config
 from .tiers import TIERS
-from .store import get_subscription, is_subscription_active, get_settings
+from .store import is_subscription_active, get_settings
 
 
 def _today_str() -> str:

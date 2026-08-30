@@ -4,14 +4,12 @@ import re
 import uuid
 import json
 import zipfile
-import shutil
-import asyncio
 import urllib.parse
 from datetime import datetime, timedelta
 
 import aiohttp
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery
 from utils.propagation import stop
 
 import config
@@ -76,8 +74,11 @@ def _set_repo(gh_id: str, meta: dict):
 
 GITHUB_CACHE = _load_github_cache()
 
-MAX_GITHUB_ZIP_FILES = int(os.getenv("GITHUB_ZIP_MAX_FILES", "750"))
-MAX_GITHUB_ZIP_BYTES = int(os.getenv("GITHUB_ZIP_MAX_BYTES", str(512 * 1024 * 1024)))
+# Caps live in config.py (GITHUB_ZIP_MAX_FILES / GITHUB_ZIP_MAX_BYTES) so every
+# setting is read from one place; keep the module-level aliases because they are
+# referenced by name throughout the zip walker.
+MAX_GITHUB_ZIP_FILES = config.GITHUB_ZIP_MAX_FILES
+MAX_GITHUB_ZIP_BYTES = config.GITHUB_ZIP_MAX_BYTES
 
 REPO_REGEX = re.compile(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/?$")
 SUB_REGEX = re.compile(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/(issues|pull|discussions)/(\d+)/?$")
