@@ -20,6 +20,7 @@ from .state import (
     ACTIVE_PROMPTS,
     PREMIUM_GEN,
     _PREMIUM_GEN_TTL,
+    _purge_active_prompt,
 )
 
 from .premium_gen import (
@@ -30,7 +31,6 @@ from .premium_gen import (
     _finish_premium_gen,
     _time_monotonic,
     discard_client_quiet,
-    _purge_active_prompt,
 )
 
 from .cookies import (

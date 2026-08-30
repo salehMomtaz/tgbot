@@ -17,7 +17,6 @@ from utils.downloader import (
     extract_formats,
     download_media,
     extract_playlist_meta,
-    normalize_url,
     is_playlist_url,
     is_pure_playlist_url,
     PLAYLIST_TIERS,
@@ -26,9 +25,11 @@ from utils.uploader_handler import process_split_and_upload, send_reply_safe
 from utils.rich_stream import RichStream
 
 
-def is_link(text: str) -> bool:
-    """Helper to detect if incoming text is a web link."""
-    return text.startswith("http://") or text.startswith("https://")
+# Canonical is_link lives in utils.url_validator (transport-neutral, shared
+# with the Bale frontend). Imported by name here because
+# modules/admin/register.py does `from modules.downloader_handler import
+# is_link`.
+from utils.url_validator import is_link  # noqa: F401  (re-exported)
 
 
 def is_social_media_link(url: str) -> bool:
@@ -352,7 +353,6 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         # flood guard — tier-aware (free 5/min, paid higher, creator 30/min)
         try:
             from utils.security import is_flood
-            from utils.subscription.tiers import TIERS
             from utils.subscription.store import is_subscription_active
             active, sub = is_subscription_active(user_id)
             if user_id == getattr(config, "SYSTEM_CREATOR_ID", 0):
@@ -427,7 +427,7 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             async def direct_upload_job():
                 # re-check quota at execution time (queue may have waited)
                 try:
-                    from utils.subscription.quota import check_quota as _chk, increment_quota as _inc
+                    from utils.subscription.quota import check_quota as _chk
                     from utils.subscription.store import get_settings as _gs
                     if _gs().get("enabled"):
                         ok, _, _ = _chk(user_id)
@@ -547,7 +547,7 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         async def queued_transfer_job():
             # re-check quota at execution time (priority queue may have waited)
             try:
-                from utils.subscription.quota import check_quota as _cq2, increment_quota as _iq2
+                from utils.subscription.quota import check_quota as _cq2
                 from utils.subscription.store import get_settings as _gs2
                 if _gs2().get("enabled"):
                     ok2, _, _ = _cq2(user_id)
@@ -733,7 +733,7 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             for idx, entry in enumerate(entries, 1):
                 # per-video quota check
                 try:
-                    from utils.subscription.quota import check_quota as _cqp, increment_quota as _iqp
+                    from utils.subscription.quota import check_quota as _cqp
                     from utils.subscription.store import get_settings as _gsp
                     if _gsp().get("enabled"):
                         okq, _, _ = _cqp(user_id)

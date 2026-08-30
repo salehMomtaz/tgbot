@@ -2,10 +2,8 @@
 import asyncio
 import logging
 import os
-import re
 import uuid
 import shutil
-import urllib.parse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.telegram import TelegramAPIServer
@@ -14,10 +12,10 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 import config
 from utils.shared import queue, DOWNLOAD_CACHE
-from utils.gate import is_authorized, is_blacklisted, blacklist_user, load_database, add_user, remove_user, unblacklist_user, is_document_mode, toggle_document_mode
+from utils.gate import is_authorized, is_blacklisted, load_database, add_user, remove_user, unblacklist_user, toggle_document_mode
 from utils.id_validator import is_valid_telegram_id
 from modules.bale.admin import get_bale_console_keyboard, back_markup, BALE_USER_STATES, BALE_ACTIVE_PROMPTS, purge_prompt, _is_bale_admin
-from modules.bale.uploader import clean_caption_text, process_split_and_upload_bale
+from modules.bale.uploader import process_split_and_upload_bale
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +44,7 @@ def _patch_aiogram_send_methods():
         res = await orig_send_message(self, *args, **kwargs)
         try:
             # res is Message
-            import json as _json
+            pass
             # Use model_dump_json if available (pydantic), else str
             try:
                 dump = res.model_dump_json(indent=2) if hasattr(res, "model_dump_json") else str(res)
@@ -150,11 +148,12 @@ def _patch_aiogram_send_methods():
 _patch_aiogram_send_methods()
 
 # Reuse downloader core (same as Telegram)
-from utils.downloader import extract_formats, download_media, extract_playlist_meta, normalize_url, is_playlist_url, is_pure_playlist_url, PLAYLIST_TIERS
+from utils.downloader import extract_formats, download_media, extract_playlist_meta, is_playlist_url, PLAYLIST_TIERS
 from utils.downloader.supported_sites import is_ytdlp_supported
 
-def is_link(text: str) -> bool:
-    return text.startswith("http://") or text.startswith("https://")
+# Canonical is_link lives in utils.url_validator (transport-neutral, shared
+# with the Telegram frontend) — it used to be duplicated verbatim here.
+from utils.url_validator import is_link
 
 # Basic rate limit per Bale user (tighten vs Telegram, government traffic is untrusted)
 _BALE_RATE: dict = {}
@@ -376,8 +375,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         owner, repo = mm.groups()
         # Reuse Telegram github keyboard but via Bale
         from modules.github.keyboards import get_repo_menu_keyboard as _gkb
-        from modules.github.handlers import _set_repo, GITHUB_CACHE
-        import uuid, re as _re
+        import uuid
         gh_id = f"gh_{str(uuid.uuid4())[:8]}"
         # Use same cache as Telegram (shared file)
         try:
@@ -507,7 +505,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         gh_id = parts[1]
         action = parts[2]
         try:
-            from modules.github.handlers import _get_repo, _save_github_cache, GITHUB_CACHE
+            from modules.github.handlers import _get_repo, _save_github_cache
             from modules.github.keyboards import get_back_keyboard, get_repo_menu_keyboard
             from modules.github.api import fetch_github_api
         except:
@@ -560,7 +558,8 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         if action == "zip":
             from modules.github.handlers import repo_zip_url, safe_cache_filename
             from modules.github.api import get_github_headers
-            import uuid, os, aiohttp
+            import uuid
+            import os
             # Bale delivery via 20 MB split
             async def _bale_stream(url, path, headers):
                 import aiohttp
@@ -715,7 +714,6 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 # Bale: keep playlist flow but use Bale uploader (reuse Telegram playlist logic but simplified)
                 # For now, send tier keyboard (same as Telegram) using Bale markup
                 import asyncio
-                from utils.downloader.playlists import PLAYLIST_TIERS
                 # Reuse Telegram playlist flow helpers but need Bale's message type
                 # We'll do minimal: flat extract and send tier keyboard
                 status = await message.reply("🔍 Reading playlist...")
@@ -754,7 +752,9 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
             # direct file via Bale uploader (stream with aiohttp)
             status = await message.reply("📥 Downloading direct file...")
             async def job():
-                import aiohttp, os, urllib.parse, asyncio
+                import aiohttp
+                import os
+                import urllib.parse
                 # SSRF guard
                 from modules.downloader_handler import _is_ssrf_target
                 if await _is_ssrf_target(url):

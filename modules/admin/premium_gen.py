@@ -4,12 +4,11 @@ In-chat Premium session-string generation flow.
 Mirrors the original modules/admin.py premium generation functions exactly.
 """
 
-import asyncio
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from main import log_event
-from .state import PREMIUM_GEN, USER_STATES, ACTIVE_PROMPTS, _PREMIUM_GEN_TTL
+from .state import PREMIUM_GEN, USER_STATES, ACTIVE_PROMPTS, _PREMIUM_GEN_TTL, _purge_active_prompt
 from .keyboards import _gen_abort_markup, _gen_dial_pad_markup
 
 logger = logging.getLogger(__name__)
@@ -56,16 +55,6 @@ async def discard_client_quiet(tmp_client):
         await tmp_client.disconnect()
     except Exception:
         pass
-
-
-async def _purge_active_prompt(user_id: int, client):
-    """Helper to safely delete any active ForceReply prompt bubble from the chat stream."""
-    prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
-    if prompt_id:
-        try:
-            await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
-        except Exception:
-            pass
 
 
 async def _premium_gen_pad_text(callback_query, gen):

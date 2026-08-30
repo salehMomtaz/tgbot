@@ -4,12 +4,11 @@ Admin console callback query dispatcher — the core of the admin UI.
 Mirrors the original modules/admin.py _admin_callback_dispatch exactly.
 """
 
-import asyncio
 import os
 import shutil
 import logging
 import config
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
@@ -20,20 +19,10 @@ from main import log_event, schedule_self_restart, _mark_restart_pending
 from utils.shared import queue, signal_all_stop, reset_stop_flag
 from utils.gate import (
     load_database,
-    add_user,
-    remove_user,
-    unblacklist_user,
-    is_blacklisted,
-    is_authorized,
-    is_premium_user,
-    add_premium_user,
-    remove_premium_user,
     toggle_document_mode,
 )
-from utils.id_validator import is_valid_telegram_id
-from utils.shared import queue, signal_all_stop, reset_stop_flag
 
-from .state import USER_STATES, ACTIVE_PROMPTS, PREMIUM_GEN
+from .state import USER_STATES, ACTIVE_PROMPTS, PREMIUM_GEN, _purge_active_prompt
 from .keyboards import (
     build_console_keyboard,
     back_markup as _back_markup,
@@ -42,15 +31,13 @@ from .keyboards import (
     _gen_dial_pad_markup,
     get_cookie_action_keyboard,
     get_premium_menu_keyboard,
-    get_pot_menu_keyboard,
 )
 from .premium_gen import (
     _premium_gen_cleanup,
     _premium_gen_pad_text,
     _finish_premium_gen,
-    discard_client_quiet,
 )
-from .cookies import COOKIE_MAP, _write_cookie_jar
+from .cookies import COOKIE_MAP
 from .cookie_test import _test_cookie_jar
 from .pot_menu import _handle_pot_action
 from modules import direct_forward
@@ -785,6 +772,9 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await _admin_callback_dispatch(client, callback_query)
         return
 
+    # "admin_sub_set_channel" is a legacy alias: inline keyboards already
+    # sitting in the operator's chat history can still carry that callback_data,
+    # so it must keep routing even though the menu only emits "…_add_channel".
     elif data in ("admin_sub_set_channel", "admin_sub_add_channel"):
         USER_STATES[user_id] = "waiting_for_sub_channel_add"
         ACTIVE_PROMPTS[user_id] = callback_query.message.id
@@ -853,12 +843,5 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer()
 
 
-# Helper function for internal use
-async def _purge_active_prompt(user_id: int, client: Client):
-    """Helper to safely delete any active ForceReply prompt bubble from the chat stream."""
-    prompt_id = ACTIVE_PROMPTS.pop(user_id, None)
-    if prompt_id:
-        try:
-            await client.delete_messages(chat_id=user_id, message_ids=prompt_id)
-        except Exception:
-            pass
+# _purge_active_prompt now lives in .state (single definition, re-exported
+# from modules.admin) — it used to be duplicated here and in .premium_gen.

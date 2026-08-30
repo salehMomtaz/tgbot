@@ -5,11 +5,10 @@ Mirrors the original modules/admin.py register_admin_handlers exactly.
 """
 
 import os
-import asyncio
 import logging
 import config
 from pyrogram import Client, filters, ContinuePropagation
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery
 from utils.propagation import stop
 from dotenv import set_key
 from main import log_event
@@ -21,10 +20,8 @@ from utils.gate import (
     unblacklist_user,
     is_blacklisted,
     is_authorized,
-    is_premium_user,
     add_premium_user,
     remove_premium_user,
-    toggle_document_mode,
 )
 from utils.id_validator import is_valid_telegram_id
 
@@ -35,7 +32,8 @@ from .premium_gen import (
     _handle_premium_gen_input,
 )
 from .cookies import COOKIE_MAP
-from .callback_dispatch import _admin_callback_dispatch, _purge_active_prompt
+from .callback_dispatch import _admin_callback_dispatch
+from .state import _purge_active_prompt
 from modules.subscription.join import _greeting_text
 
 logger = logging.getLogger(__name__)
@@ -664,7 +662,6 @@ def register_admin_handlers(app: Client):
             try:
                 from utils.subscription.store import get_settings
                 from utils.subscription.access import check_access
-                from utils.subscription.tiers import TIERS
                 from modules.subscription.handlers import _tiers_keyboard, _sub_status_text
                 from modules.subscription.join import _channel_rows, build_greeting_keyboard
                 s = get_settings()
