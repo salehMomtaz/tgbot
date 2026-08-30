@@ -23,7 +23,6 @@ is re-read when the cache expires so admin jar replacements are picked up.
 """
 
 import os
-import io
 import math
 import time
 import random
@@ -254,9 +253,16 @@ async def _download_media(cl, media_obj, prefix):
             logger.info(f"[FriendMedia:ig] CDN fetch failed for story pk={getattr(media_obj,'pk','?')}, trying instagrapi fallback")
 
         def _dl():
+            # instagrapi's photo/video download take a media PK (int), NOT a
+            # Media object. Passing the object made str(obj) — a pydantic repr
+            # full of underscores ("Media(pk=…, thumbnail_url=…, user=…)") —
+            # reach media_pk()'s `media_pk, _ = media_id.split("_")`, which
+            # raises "too many values to unpack (expected 2)". That silently
+            # broke this CDN-fallback path on every single run.
+            pk = getattr(media_obj, "pk", None) or getattr(media_obj, "id", None)
             if getattr(media_obj, "media_type", 0) == 2:
-                return cl.video_download(media_obj, folder=d)
-            return cl.photo_download(media_obj, folder=d)
+                return cl.video_download(pk, folder=d)
+            return cl.photo_download(pk, folder=d)
 
         path = await loop.run_in_executor(None, _dl)
         if isinstance(path, (list, tuple)):
@@ -265,7 +271,10 @@ async def _download_media(cl, media_obj, prefix):
             return path
         return None
     except Exception as e:
-        logger.warning(f"[FriendMedia:ig] download failed: {e}")
+        # exc_info=True: this used to log a bare one-line message, so a real
+        # bug (media object passed where instagrapi wants a pk) hid in plain
+        # sight for hours. Always keep the traceback.
+        logger.warning(f"[FriendMedia:ig] download failed: {e}", exc_info=True)
         _cleanup(os.path.join(d, "nonexistent"))
         return None
 
@@ -625,7 +634,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                 logger.warning(f"[FriendMedia:ig:archive] profile pic failed: {e}")
         await _jitter()
         if status_cb:
-            await status_cb(f"profile pic ✓")
+            await status_cb("profile pic ✓")
 
         # 2. All posts/carousels/reels.
         def _posts():

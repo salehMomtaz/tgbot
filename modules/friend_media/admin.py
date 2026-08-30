@@ -17,7 +17,6 @@ ALL archived media is delivered ONLY to the safe destination (see common.py) —
 the friends themselves are NEVER messaged.
 """
 
-import os
 import random
 import asyncio
 import logging
@@ -25,7 +24,7 @@ import time
 import config
 from dotenv import set_key as dotenv_set_key
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, Message,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
 from . import state as fm_state
@@ -92,17 +91,6 @@ def _menu_keyboard():
 
 async def render_menu(client, callback_query):
     await callback_query.message.edit_text(_blurb(), reply_markup=_menu_keyboard())
-
-
-def _settings_keyboard():
-    """Settings submenu (kept for back-compat with the dead-handler path
-    fm_settings below; not currently reachable from the main menu — the
-    operator uses the top-level 'Set check interval' button on the main
-    Friend Media menu and the .env file for everything else)."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏱ Set check interval (min)", callback_data="fm_sched")],
-        [InlineKeyboardButton("◀️ Back", callback_data="fm_menu")],
-    ])
 
 
 def _friend_platform(friend):
@@ -270,14 +258,6 @@ async def fm_callback_dispatch(client, callback_query):
         await render_menu(client, callback_query)
         await callback_query.answer()
         return
-    if data == "fm_settings":
-        await callback_query.message.edit_text(
-            "⚙️ **Settings**\n\nDestination is where archived media lands (only you "
-            "see it). Instagram requires a valid igcookies jar. Settings persist "
-            "to `.env` automatically.",
-            reply_markup=_settings_keyboard())
-        await callback_query.answer()
-        return
     if data == "fm_list_choose":
         txt, kb = await _list_choose_message()
         await callback_query.message.edit_text(txt, reply_markup=kb)
@@ -438,7 +418,7 @@ async def fm_callback_dispatch(client, callback_query):
         key, _ = await _add_friend_from_user(u)
         asyncio.create_task(_auto_backfill(client, key))
         await callback_query.message.edit_text(
-            f"👤 **Friend**\n\n" + _label(await fm_state.get_friend(key)),
+            "👤 **Friend**\n\n" + _label(await fm_state.get_friend(key)),
             reply_markup=_friend_keyboard(key, await fm_state.get_friend(key)))
         await callback_query.answer("Added + backfill started.")
         return
@@ -844,6 +824,7 @@ async def _ig_add_archive(client, key):
     delivered = 0
     summary = ""
     session_dead = False
+    session_dead_error = ""
     try:
         delivered, summary = await _archive_one_friend(
             client, key, friend, full=False)
@@ -852,7 +833,13 @@ async def _ig_add_archive(client, key):
         # add-archive task. Surface this explicitly so the operator knows
         # to re-upload fresh cookies, instead of seeing "nothing new" and
         # wondering if the friend has no stories.
+        # NOTE: `except ... as e` unbinds `e` when the block exits, so the
+        # message must be captured here — the `session_dead` branch below runs
+        # after this block and referencing `e` there raises NameError, which the
+        # surrounding `except Exception: pass` then swallowed (the operator
+        # silently never got this alert).
         session_dead = True
+        session_dead_error = str(e)
         logger.warning(f"[FriendMedia] IG add-archive for {key} session expired: {e}")
     except Exception as e:
         logger.warning(f"[FriendMedia] IG add-archive for {key} failed: {e}")
@@ -868,7 +855,7 @@ async def _ig_add_archive(client, key):
             await client.send_message(
                 config.SYSTEM_CREATOR_ID,
                 f"⚠️ **IG session expired before the `{key}` first archive could run.**\n\n"
-                f"`{e}`\n\n"
+                f"`{session_dead_error}`\n\n"
                 f"The friend was added, but the profile pic + live stories weren't "
                 f"delivered. Re-upload a fresh `igcookies.txt` via Admin → 🍪 Cookie Jars "
                 f"(the mobile-app export has the device-binding cookies that survive "
