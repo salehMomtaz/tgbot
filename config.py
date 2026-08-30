@@ -45,7 +45,11 @@ SYSTEM_CREATOR_ID = get_env_int("SYSTEM_CREATOR_ID", 0)
 # To find it: add the bot to your private channel as admin, then read the chat ID.
 LOG_CHANNEL_ID = get_env_int("LOG_CHANNEL_ID", 0)  # Leave 0 if not used
 
-# Your Premium Account Session String (generated via generate_session.py).
+# Your Premium Account Session String. Generated IN-CHAT via
+# Admin -> 👑 Premium Uploads -> 🔑 Generate Session (see utils/premium_session.py).
+# There is deliberately no terminal generator script — the login code must be
+# entered on the console's dial pad, because a code typed as a chat message is
+# instantly invalidated by Telegram's anti-account-sharing detection.
 # Leave empty ("") if you do not want 4 GB uploads via a Premium Userbot client.
 PREMIUM_STRING_SESSION = os.getenv("PREMIUM_STRING_SESSION", "")
 
@@ -172,13 +176,22 @@ IG_DIRECT_COUNTRY_CODE = get_env_int("IG_DIRECT_COUNTRY_CODE", 1) or 1
 IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
 IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
 IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
-# Experimental MQTT push (pure Python, NO headless browser) — TikTok-like instant.
-# Instagram web + app use MQTToT on mqtt-mini.facebook.com; instagrapi's Realtime
-# mixin or standalone instagram_mqtt can listen steady. Current venv instagrapi
-# 2.1.2 has NO Realtime (see tools/test_ig_mqtt.py), so this stays OFF by default.
-# If you upgrade instagrapi or pip install instagram_mqtt, enable to trial:
-# same sessionid/proxy, ~5 MB RAM, needs keepalive + reconnect, experimental.
+# Experimental MQTToT push (pure Python, NO headless browser) — TikTok-like
+# instant delivery alongside the jittered poller, which stays on as the
+# fallback + cursor reconciler. Off by default because it is experimental:
+# Instagram can change MQTToT without notice and it needs keepalive + reconnect.
+# The venv ships instagrapi 2.18.14, which DOES provide the realtime_* methods
+# this needs (validate with tools/test_ig_mqtt.py). Same sessionid/proxy as the
+# poller, ~5 MB RAM.
 IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in ("true", "1", "yes")
+# TESTING ONLY — shortens the Instagram checkpoint freeze (normally 3-5h) to
+# 60-120s so a developer can iterate without waiting out the anti-detection
+# backoff. Both checkpoint sites (login + polling) honour it, so behaviour is
+# consistent. This is deliberately a SEPARATE knob from IG_DIRECT_MQTT_ENABLED:
+# that flag only enables the experimental MQTToT push listener and must never
+# silently disable the freeze that protects the account from a retry storm.
+# Leave false in production.
+IG_DIRECT_CHALLENGE_FREEZE_TEST = os.getenv("IG_DIRECT_CHALLENGE_FREEZE_TEST", "false").lower() in ("true", "1", "yes")
 
 # X / Twitter direct-forward (self-DM method). The X worker boots from the
 # shared xcookies jar (config.X_COOKIES) that yt-dlp keeps warm via write-back
@@ -249,6 +262,10 @@ BALE_DIRECT_DOWNLOAD = os.getenv("BALE_DIRECT_DOWNLOAD", "true").lower() in ("tr
 # GitHub explorer (ported from balebot — pure HTTP API, no Bale dependency)
 # =========================================================================
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+# Caps for the "zip a repo folder" action (protects the bot from trying to
+# archive an enormous tree and blowing up memory/disk).
+GITHUB_ZIP_MAX_FILES = get_env_int("GITHUB_ZIP_MAX_FILES", 750)
+GITHUB_ZIP_MAX_BYTES = get_env_int("GITHUB_ZIP_MAX_BYTES", 512 * 1024 * 1024)
 
 # =========================================================================
 # Subscription system (toggleable, 3 tiers + optional free with channel)
@@ -260,8 +277,6 @@ SUB_CHANNEL_USERNAME = os.getenv("SUB_CHANNEL_USERNAME", "")
 # Stars prices are in tiers.py (XTR). TON address for Gram/TON payments.
 SUB_TON_ADDRESS = os.getenv("SUB_TON_ADDRESS", "")
 SUB_TON_API_KEY = os.getenv("SUB_TON_API_KEY", "")
-# WebApp admin — secret for signing admin links (random if unset, but set it for persistence)
-SUB_WEBAPP_SECRET = os.getenv("SUB_WEBAPP_SECRET", "")
 # Rate-limit for subscription callbacks (per user, seconds)
 SUB_RATE_LIMIT_SECONDS = get_env_int("SUB_RATE_LIMIT_SECONDS", 3)
 
