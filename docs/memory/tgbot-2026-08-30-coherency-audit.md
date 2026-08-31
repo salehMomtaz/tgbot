@@ -61,6 +61,28 @@ dumping), then targeted reads, then production verification of every fix.
 All four IG failure modes were invisible because the failure log was a bare
 one-liner; it now passes `exc_info=True`.
 
+### Fix verification timeline (from `logs/bot.log`)
+
+The two friend-media fixes are individually confirmed — each error stops
+exactly at its own deploy, and neither has recurred since:
+
+| error | events | last seen | fix deployed |
+|---|---|---|---|
+| `too many values to unpack (expected 2)` | 16 | 20:21:30 | pk fix, ~20:23 |
+| `AssertionError: Must been photo` | 2 | 20:26:57 | album fix, ~20:29 |
+
+Note the second error only *starts* appearing after the first fix: until the pk
+reached instagrapi, execution never got past `media_pk()`, so the carousel
+assertion was unreachable. Fixing one silent failure exposed the next — which
+is the normal shape of these, so re-check the logs after each deploy rather
+than assuming a fix is final.
+
+**Log-filtering gotcha:** `awk -F'|' '$1 > "2026-08-31 03:16:00"'` on `bot.log`
+produces false positives. Traceback continuation lines have no `|` delimiter,
+so `$1` is the whole line and `"AssertionError…" > "2026-08-31…"` compares
+true. Always anchor on `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}` to select real
+log events.
+
 ## Doc/code contradictions resolved
 
 - **`generate_session.py`** still existed at the repo root, and
