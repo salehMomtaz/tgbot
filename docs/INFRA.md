@@ -1753,6 +1753,21 @@ select-mode adds **🗑 Delete selected**. Routing: `fm_list_choose` → `fm_lis
 Text states dispatched before the id gate in `register.py`:
 `waiting_for_friend_add|_ig:<key>|_dest|_schedule|_search|_phone`.
 
+**➕ Add IG Friend accepts a profile link, not just a bare username**
+(`common.extract_ig_username`, 2026-08-31). Operators paste the whole
+`instagram.com/<user>?igsi=…` share URL; the `igsi`/`igshid`/`utm_*`
+share-ID query params are per-share **tracking junk** that expire and carry no
+identity. The parser strips every query/fragment and the reserved path prefixes
+(`p`/`reel`/`tv`/`stories`/…), so only a clean, validated `ig:<username>` is
+ever persisted as the key + `ig_username`. A stored URL-as-username was the
+root cause of the "🟣 IG Friends list shows *internal errors*" bug: the raw URL
+as callback_data blew past Telegram's **64-byte** button limit (list render
+crashed) AND the archive loop sent the URL to the IG private API as a username
+(`/users/<url>/usernameinfo/`) → 404 + a 429 rate-limit storm on the shared
+session. `state._sanitize_friends` self-heals any such legacy record at load
+(re-key to the clean handle; drop if unparseable); `common.ig_username_of`
+re-cleans defensively at every archive read site.
+
 ## Hard-won gotchas
 
 - **`from main import X` re-executes main.py** when running as a script:

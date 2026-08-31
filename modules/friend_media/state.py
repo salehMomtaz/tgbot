@@ -28,6 +28,66 @@ def _default_state():
     return {"friends": {}}
 
 
+def _sanitize_friends(friends, path):
+    """One-shot repair of legacy/corrupted IG records at load time.
+
+    Before the share-link parser existed, pasting an Instagram *profile link*
+    (``instagram.com/<user>?igsi=…`` — the ``igsi``/``igshid`` share ID is
+    tracking junk) into ➕ Add IG Friend stored the WHOLE URL as the username.
+    Such a record poisons every consumer: it exceeds Telegram's 64-byte
+    callback_data limit (breaking the friends list with an internal error) and
+    the raw URL gets sent to IG API calls as a username, producing 404s and
+    429 rate-limits on the shared session.
+
+    Here any ``ig:<x>`` record whose stored username parses to a clean handle
+    is re-keyed to ``ig:<clean>`` (merging over an existing record of that
+    name); a record that parses to nothing at all is dropped. Returns the
+    repaired dict (the same object when nothing changed)."""
+    from .common import extract_ig_username
+    repaired = {}   # key -> (friend, was_corrupted)
+    changed = False
+    for key, friend in friends.items():
+        f = friend if isinstance(friend, dict) else {}
+        if not key.startswith("ig:"):
+            repaired[key] = (f, False)
+            continue
+        clean = extract_ig_username(f.get("ig_username") or key[3:])
+        if not clean:
+            logger.warning(f"[FriendMedia:state] dropping corrupted IG record {key!r} from {path}")
+            changed = True
+            continue
+        new_key = "ig:" + clean
+        corrupted = (new_key != key) or (f.get("ig_username") != clean)
+        if corrupted:
+            logger.warning(f"[FriendMedia:state] repairing corrupted IG record {key!r} -> {new_key!r} in {path}")
+            changed = True
+            f = dict(f)
+            f["ig_username"] = clean
+            if f.get("handle") == key[3:]:
+                f["handle"] = clean
+            if f.get("first_name") == key[3:]:
+                f["first_name"] = clean
+        if new_key in repaired:
+            target, t_corr = repaired[new_key]
+            # A clean record always WINS over a corrupted duplicate: the
+            # corrupted one only backfills fields the winner is missing
+            # (its watermarks are worthless — every fetch under the bogus
+            # username failed anyway).
+            if corrupted and not t_corr:
+                for k, v in f.items():
+                    target.setdefault(k, v)
+                continue
+            merged = dict(f)
+            for k, v in target.items():
+                merged.setdefault(k, v)
+            repaired[new_key] = (merged, t_corr or corrupted)
+            continue
+        repaired[new_key] = (f, corrupted)
+    if not changed:
+        return friends
+    return {k: v for k, (v, _) in repaired.items()}
+
+
 async def load_state():
     """Load the full state dict. Cached after first read; always refresh under lock."""
     global _state_cache
@@ -45,6 +105,9 @@ async def load_state():
         except Exception as e:
             logger.exception(f"[FriendMedia:state] failed to load {STATE_PATH}: {e}")
             data = _default_state()
+        friends = data.get("friends")
+        if isinstance(friends, dict) and friends:
+            data["friends"] = _sanitize_friends(friends, STATE_PATH)
         _state_cache = data
         return _state_cache
 

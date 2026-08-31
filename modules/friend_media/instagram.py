@@ -293,7 +293,7 @@ async def archive_instagram_stories(key, friend, bot=None):
     """Fetch + deliver CURRENT IG stories not already delivered. Returns count."""
     if not getattr(config, "FRIEND_MEDIA_IG_ENABLED", False):
         return 0
-    ig_user = friend.get("ig_username")
+    ig_user = common.ig_username_of(friend)
     if not ig_user:
         return 0
     cl = await _ig_client_retry()  # raises IGUnavailable with an actionable reason
@@ -392,7 +392,7 @@ async def archive_instagram_profile_pic(key, friend, bot=None):
     """
     if not getattr(config, "FRIEND_MEDIA_IG_ENABLED", False):
         return False
-    ig_user = friend.get("ig_username")
+    ig_user = common.ig_username_of(friend)
     if not ig_user:
         return False
     cl = await _ig_client_retry()
@@ -473,7 +473,7 @@ async def archive_instagram_posts(key, friend, bot=None):
     """
     if not getattr(config, "FRIEND_MEDIA_IG_ENABLED", False):
         return 0
-    ig_user = friend.get("ig_username")
+    ig_user = common.ig_username_of(friend)
     if not ig_user:
         return 0
     cl = await _ig_client_retry()  # raises IGUnavailable with an actionable reason
@@ -614,7 +614,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
     cadence) to avoid automation-flagging, per the operator's requirement.
     The result is ONE zip sent to the safe destination. Returns zip path or None.
     """
-    ig_user = (friend.get("ig_username") or "").lstrip("@")
+    ig_user = common.ig_username_of(friend)
     if not ig_user:
         raise RuntimeError("no ig_username set for this friend")
     cl = await _ig_client_retry()

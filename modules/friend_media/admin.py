@@ -352,7 +352,10 @@ async def fm_callback_dispatch(client, callback_query):
         await callback_query.message.edit_text(
             "➕ **Add Instagram Friend**\n\nSend the Instagram **username** "
             "(e.g. `nature_lover` or `@nature_lover` — both work, the leading "
-            "`@` is optional; one per line to add several).\n\n"
+            "`@` is optional; one per line to add several). You can also paste "
+            "a full **profile link** (`instagram.com/nature_lover?igsi=…`) — "
+            "the username is extracted and the tracking parameters are "
+            "stripped.\n\n"
             "They are added as IG friends — NEW stories + posts (posted after "
             "linking) are delivered. The current profile picture is also "
             "delivered once on the first cycle. No older IG history is fetched, "
@@ -869,7 +872,7 @@ async def _ig_add_archive(client, key):
 async def _run_ig_archive(client, status_msg, key, friend):
     """Run a full IG archive (-> zip) for one friend, streaming progress to a
     status message and delivering the zip to the safe destination."""
-    ig_user = (friend.get("ig_username") or "").lstrip("@")
+    ig_user = fm_common.ig_username_of(friend)
 
     msg = None
     try:
@@ -950,18 +953,19 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         return
 
     if state == "waiting_for_friend_add_ig":
-        lines = [l.strip().lstrip("@") for l in txt.splitlines() if l.strip()]
+        lines = [l.strip() for l in txt.splitlines() if l.strip()]
         USER_STATES.pop(user_id, None)
         await _clear_prompt()
         added, failed = [], []
         keys = []
-        for ig in lines:
-            key, friend = await _add_ig_friend(ig)
+        for raw in lines:
+            ig = fm_common.extract_ig_username(raw)
+            key, friend = await _add_ig_friend(ig) if ig else (None, None)
             if key:
                 added.append(f"`@{ig}`")
                 keys.append(key)
             else:
-                failed.append(ig)
+                failed.append(raw)
         if added:
             reply = "✅ Added IG friend(s):\n" + "\n".join(added)
             reply += ("\n\n📸 Profile picture + currently-live stories are being "
@@ -1244,8 +1248,13 @@ def _looks_like_username(h):
 
 async def _add_ig_friend(ig_username):
     """Add an Instagram-only friend keyed by ``ig:<username>``. First run primes
-    the posts watermark (via the normal archive path) and delivers nothing older."""
-    ig = (ig_username or "").lstrip("@").strip()
+    the posts watermark (via the normal archive path) and delivers nothing older.
+
+    The input goes through ``fm_common.extract_ig_username`` which strips
+    share-link tracking junk (``?igsi=`` / ``igshid=`` / ``utm_*``) and accepts
+    profile URLs, ``@handles`` and bare usernames alike — only a clean,
+    validated IG username is ever persisted as the key / ``ig_username``."""
+    ig = fm_common.extract_ig_username(ig_username)
     if not ig:
         return None, None
     key = "ig:" + ig

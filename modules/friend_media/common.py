@@ -19,11 +19,112 @@ the program may message anyone"):
 """
 
 import os
+import re
 import asyncio
 import logging
+from urllib.parse import urlparse, unquote
+
 import config
 
 logger = logging.getLogger(__name__)
+
+_IG_USERNAME_CHARS_RE = re.compile(r"^[a-z0-9._]{1,30}$")
+
+# Instagram path first-segments that are NEVER a username (post/reel share
+# links, app routes, feature pages). A profile URL is instagram.com/<username>.
+_IG_RESERVED_PATHS = {
+    "p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct",
+    "directory", "about", "developer", "legal", "help", "api", "static",
+    "u", "r", "s", "a", "www", "web", "m", "sharer", "share", "embed",
+}
+
+
+def extract_ig_username(raw):
+    """Extract a bare Instagram username from ANY form the operator may paste:
+    a profile URL (with or without scheme / www / trailing slash), an
+    instagram:// deeplink, ``@username``, ``username``, a mobile share link
+    carrying tracking junk (``?igsi=`` / ``?igshid=`` / ``utm_*`` / ``s=``),
+    or a ``/stories/<username>/...`` path.
+
+    Instagram share IDs (igsi/igshid) are per-share tracking tokens that
+    expire and carry no identity value; they (and every other query string /
+    fragment) are stripped here so they can never be persisted as a username.
+    Returns the cleaned lowercase username, or None when the input does not
+    yield a valid IG username (e.g. a post/reel share URL).
+    """
+    if not raw:
+        return None
+    text = str(raw).strip().strip('"').strip("'").rstrip(").,;!")
+    if not text:
+        return None
+
+    # Deeplink form: instagram://user?username=<name>
+    if text.lower().startswith("instagram://"):
+        try:
+            q = urlparse(text).query
+            for part in q.split("&"):
+                k, _, v = part.partition("=")
+                if k.strip().lower() == "username" and v.strip():
+                    text = v.strip()
+                    break
+        except Exception:
+            return None
+
+    candidate = None
+    if "://" in text or re.match(r"^(?:www\.|m\.)?instagram\.com", text, re.I):
+        url = text if "://" in text else "https://" + text
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return None
+        host = (parsed.netloc or "").lower()
+        if host and "instagram.com" not in host and host != "instagr.am":
+            return None
+        # Query (igsi/igshid/utm_*/...) and fragment are DISCARDED by design.
+        segs = [unquote(s) for s in (parsed.path or "").split("/") if s]
+        if segs:
+            first = segs[0].lower()
+            if first == "stories" and len(segs) > 1:
+                candidate = segs[1]          # /stories/<username>/<id>/
+            elif first == "u" and len(segs) > 1:
+                candidate = segs[1]          # legacy /u/<username>
+            elif first not in _IG_RESERVED_PATHS:
+                candidate = segs[0]          # /<username>/ profile path
+    else:
+        # Bare / @ form: strip everything from the first separator onward
+        # (handles "name?igsi=…" and "instagram.com/name" typed without a
+        # scheme, plus stray trailing slashes).
+        candidate = re.split(r"[?#]", text, 1)[0]
+        candidate = candidate.rstrip("/")
+        if "instagram.com" in candidate.lower() or "instagr.am" in candidate.lower():
+            candidate = candidate.split("instagram.com", 1)[-1].split("instagr.am", 1)[-1]
+            candidate = [s for s in candidate.split("/") if s]
+            candidate = candidate[0] if candidate else ""
+        candidate = candidate.lstrip("@")
+
+    if not candidate:
+        return None
+    candidate = str(candidate).strip().lstrip("@").lower()
+    # A username can still have arrived with a query (no-scheme URL path).
+    candidate = re.split(r"[?#]", candidate, 1)[0].rstrip("/")
+    if not candidate or len(candidate) > 30:
+        return None
+    if candidate.isdigit():
+        return None
+    if not _IG_USERNAME_CHARS_RE.match(candidate):
+        return None
+    if ".." in candidate or not any(c.isalnum() for c in candidate):
+        return None
+    return candidate
+
+
+def ig_username_of(friend):
+    """Read a friend record's IG username, defensively re-cleaned through
+    ``extract_ig_username``. Legacy/corrupted records (a full share URL stored
+    verbatim as the username) resolve to the bare handle instead of being
+    passed to the IG API as a username, and unparseable ones resolve to ""
+    so archive paths skip them cleanly instead of hammering 404/429s."""
+    return extract_ig_username((friend or {}).get("ig_username") or "") or ""
 
 
 def user_client():
