@@ -88,6 +88,14 @@ one-liner; it now passes `exc_info=True`.
 - **`IG_DIRECT_MQTT_ENABLED` comment** still claimed instagrapi 2.1.2 "has NO
   Realtime" and told the reader to upgrade; the venv ships 2.18.14, which
   provides `realtime_*`.
+- **`tools/test_ig_mqtt.py`** printed its whole report **on import** and its
+  conclusion was hardcoded ("instagrapi 2.1.2 has NO RealtimeMixin") while the
+  same run printed `realtime_connect`/`realtime_on` directly above it. The
+  verdict is now *computed* from the probe (checks the four `realtime_*`
+  methods the hybrid listener actually calls), reads the version from installed
+  metadata (instagrapi has no `__version__`), and is `__main__`-guarded.
+  Root cause worth generalising: **a conclusion stated in prose instead of
+  derived from the check beside it will always eventually contradict it.**
 
 ## Incompleteness removed
 
@@ -111,9 +119,28 @@ one-liner; it now passes `exc_info=True`.
 
 `py_compile` on all tracked modules · `bash -n install.sh run.sh uninstall.sh`
 · pyflakes 136 → 11 · **73/73 modules import cleanly** · Go monitor
-`go test ./...` green · 0 dead inline-keyboard buttons · bot restarted twice
-under `tgbot.service` (active, `Restart=always`) and logs checked: no
-`too many values to unpack` or `Must been photo` after the respective fixes.
+`go test ./...` green · 0 dead inline-keyboard buttons · bot restarted (final
+pass via `sudo systemctl restart tgbot`, restart counter reset to 0 = no
+crash-loop) and logs checked: no `too many values to unpack` or
+`Must been photo` after the respective fixes.
+
+Elevated-access checks (need `sudo`):
+
+- `tgbot.service` unit at `/etc/systemd/system/tgbot.service` is **rendered**
+  (no `__USER__`/`__PROJECT_DIR__`/`__MEMORY_MAX__` left over — invariant #7).
+- Invariant #1: **no `ulimit -v`** in the unit or `run.sh`; memory protection
+  is `MemoryMax=2621440000` (2.4 G), and `run.sh` only sets `-n/-u/-f`.
+- Invariant #2: PO provider listens on **127.0.0.1:4417 only** (upstream logs
+  `[::]:4417`, so the localhost patch is doing its job). Port is 4417 because
+  `.env` sets `YTDLP_POT_PORT` — not drift from the 4416 default.
+  `0.0.0.0:8080` is the FastAPI **streaming** server, intentionally public.
+- Invariant #15: `build/tgbot-monitor` is byte-identical to
+  `prebuilt/tgbot-monitor-linux-amd64` and newer than the Go sources, so no
+  prebuilt rebuild is owed.
+- Entrypoint scripts are `100755` in the git index *and* on disk.
+- Services: `tgbot` enabled+active, `tgbot-xchat-bridge` enabled+active,
+  `cookie-watch` enabled+active, `tgbot-monitor` disabled (by design — the bot
+  spawns it).
 
 ## Secrets re-check
 
