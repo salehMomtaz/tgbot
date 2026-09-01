@@ -46,9 +46,10 @@ cookies/tiktok/
 cookies/twitter/
 cookies/meta.json
 cookies/*.txt
-# cookies/ytdlp/ — tracked as empty templates; real cookies go in .gitignore'd files
-# but we don't track individual *.txt in ytdlp/ to avoid committing real cookies
-# !cookies/ytdlp/  # uncomment to track the directory structure only
+# Per-site jars under cookies/ytdlp/ were scaffolded as empty templates but are
+# now ignored — an admin Replace writes REAL session cookies to these exact
+# paths, and tracked files would leak them into the public repo on next commit.
+cookies/ytdlp/*.txt
 # Direct-forward client sessions (contain logged-in tokens)
 direct_ig_session.json
 direct_x_cookies.json
