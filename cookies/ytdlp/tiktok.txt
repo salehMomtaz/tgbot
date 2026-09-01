@@ -1,4 +1,0 @@
-# Netscape HTTP Cookie File
-# Empty cookie jar for tiktok - upload your cookies via Admin Console → Cookies → ➕ Per-Site Jar
-# Pattern: cookies/ytdlp/<site>.txt (e.g., pornhub.txt for pornhub.com)
-
