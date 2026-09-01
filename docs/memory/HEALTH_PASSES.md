@@ -1,6 +1,6 @@
 # Health passes — consolidated timeline
 
-All 5 point-in-time health passes merged chronologically. Each section is the original file verbatim under a dated header. See `docs/memory/README.md` for index.
+All 5 point-in-time health passes + the 2026-08-31 log audit, merged chronologically. Sections 1-5 are the original files verbatim under a dated header. See `docs/memory/README.md` for index.
 
 ## Sources consolidated
 
@@ -624,3 +624,83 @@ Rule for future agents: `tools/start_xchat_bridge.sh` is owned by systemd.
 Interact with the bridge only via `systemctl status/restart tgbot-xchat-bridge`;
 at most use `bash -n` for syntax checks — never run the wrapper directly while
 the unit exists, or you fork a duplicate sidecar.
+
+---
+
+## 6. 2026-09-01 six-hour log audit + three fixes
+
+Log audit of `logs/bot.log` + journald for the window 2026-08-31 21:48 →
+2026-09-01 03:48 (service up 14 h, no restarts in window). Findings and the
+fixes shipped as commits `e289dcc`, `aebac12`, `fbd50f5`.
+
+### What was in the window
+
+- **1 ERROR** — `utils.queue_manager`: one X direct-forward tweet download
+  hit `HTTP Error 503: Response object too large` from X's video CDN
+  (yt-dlp http downloader, `twitter.py::_x_deliver_tweet` → `download_media`).
+  Transient single occurrence; the queue reported `❌ Your request failed`
+  into the relay chat and kept draining (next tweet relayed 02:28). The relay
+  is at-most-once by design (cursor advances past failures) — NOT changed.
+- **215 WARNING** — `[media_bot] Waiting for 1-3 seconds ... upload.SaveBigFilePart`
+  — pyrogram flood-waits during big premium uploads. Benign pacing.
+- **3 WARNING** — X "No video could be found in this tweet" (photo-only
+  shares). Benign: each fell through to native photo delivery
+  ("delivering N photo(s) natively"), per the photo-fallback design.
+- **2 WARNING** — kurigram deprecation: `reply_to_message_id` is deprecated,
+  use `reply_parameters` → FIXED (`aebac12`, see below).
+- **System-monitor warning spam every ~60 s since 03:40** — the monitor was
+  correctly reporting >80% RAM/CPU, and the source was **the opencode agent
+  session itself** (2.0 GB RSS + 51% CPU on a 2-core box). Self-resolving
+  when the agent exits; no code bug. (`warnSeconds` cooldown is 60 s by
+  design — "I will keep reporting every minute until everything drops".)
+- **XChat bridge `Killed` message at 02:36** — benign: wrapper's own
+  config-reload restart (SIGTERM → SIGKILL of the process group), new sidecar
+  healthy 1 s later. Not an OOM.
+
+### Outside the window but real — fixed anyway
+
+- **Bale GitHub explorer raised pydantic ValidationErrors** (aiogram.event
+  ERRORs at 17:22-17:23 the previous day): `modules/github/keyboards.py`
+  builds PYROGRAM `InlineKeyboardMarkup`, and `modules/bale/runner.py` passed
+  it straight to aiogram `message.reply`/`edit_text`. Fixed with
+  `_bale_markup()` in the runner (pyrogram→aiogram conversion,
+  aiogram/None pass-through); applied at the repo-menu send, the `edit()`
+  helper and `back_kb`. Verified by an offline conversion test over
+  `get_repo_menu_keyboard`/`get_back_keyboard`/`get_branches_keyboard`.
+  (Also seen: `TelegramNotFound: message not found` on Bale edits —
+  benign race when the user deletes the status message; aiogram logs it,
+  handler swallows.)
+
+### Latent secret-leak trap found & defused
+
+- The 90 scaffolded empty per-site jars at `cookies/ytdlp/*.txt` were **git
+  tracked**, but an admin ➕ Per-Site Jar upload writes REAL session cookies
+  to those exact paths — the next `git add -A` would have pushed live cookies
+  to the PUBLIC repo. Full history scan: only one commit ever touched them
+  (`4a561c4`, all blobs empty) → nothing leaked so far. Untracked them
+  (`git rm --cached`, files kept on disk) and added the `cookies/ytdlp/*.txt`
+  ignore rule (`fbd50f5`). No code lists that directory (only
+  `cookie_manager` scans the snapshot dir), so templates are safe to untrack.
+
+### Deprecation migration detail
+
+- All quoted sends funnel through `send_reply_safe` (uploads, premium
+  `copy_message` relay, `RichStream` fallback) — the pyrogram call now passes
+  `reply_parameters=ReplyParameters(message_id=...)` there, one choke point.
+  The wrapper's own `reply_to_message_id=` param name is unchanged, so
+  invariant #14 in AGENTS.md still reads true.
+
+### Verification
+
+- `python3 -m py_compile $(git ls-files '*.py')` OK; converter + choke-point
+  tested offline; `systemctl restart tgbot` clean (workers up, zero new
+  errors in first minutes); pushed.
+
+### Deliberately NOT changed
+
+- **X CDN 503 retry**: adding a retry inside `_x_deliver_tweet` risks
+  duplicate relays (the queue already notifies the operator with `❌ Your
+  request failed`, and the operator can re-share). Transient one-off —
+  keeping the at-most-once semantics.
+- **`cookies/ytdlp/cookies.txt` (global fallback jar)**: on disk as a 28-byte
+  header-only stub, was never tracked, and the new ignore rule covers it.
