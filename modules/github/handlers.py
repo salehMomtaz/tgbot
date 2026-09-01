@@ -3,6 +3,7 @@ import os
 import re
 import uuid
 import json
+import logging
 import zipfile
 import urllib.parse
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from modules.github.keyboards import (
 )
 
 # persistent cache
+logger = logging.getLogger(__name__)
 GITHUB_CACHE_FILE = "cache/github_cache.json"
 GITHUB_CACHE_TTL_MINUTES = 30
 GITHUB_CACHE: dict = {}
@@ -236,31 +238,60 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             return
         owner, gist_id = m.groups()
         status = await message.reply_text("🔍 Extracting Gist files...")
+        # The handler MUST stop propagation exactly once at the end. The old
+        # code let an exception from the cleanup/except paths escape BEFORE
+        # stop(message), which let the group-1 downloader also grab the gist
+        # URL (double processing).
         try:
-            data = await fetch_github_api(f"https://api.github.com/gists/{gist_id}")
+            try:
+                data = await fetch_github_api(f"https://api.github.com/gists/{gist_id}")
+            except Exception as e:
+                try:
+                    await status.edit_text(f"❌ Failed to fetch Gist: {e}")
+                except Exception:
+                    pass
+                return
             files = data.get("files", {})
-            await status.edit_text(f"📦 **Gist:** `{gist_id}`\nDelivering {len(files)} files...")
-            os.makedirs("cache", exist_ok=True)
+            try:
+                await status.edit_text(f"📦 **Gist:** `{gist_id}`\nDelivering {len(files)} files...")
+            except Exception:
+                pass
+            delivered, failed = 0, 0
             for filename, file_data in files.items():
                 raw_url = file_data.get("raw_url")
                 if not raw_url:
                     continue
-                temp_path = f"cache/{uuid.uuid4().hex[:6]}_{safe_cache_filename(filename)}"
-                await stream_url_to_file(raw_url, temp_path)
-                await process_split_and_upload(
-                    bot_client=app, premium_client=premium_app,
-                    chat_id=message.chat.id, file_path=temp_path,
-                    action='d', title=filename, uploader="GitHub",
-                    duration=0, thumb_path=None, progress_msg=status,
-                    reply_to_message_id=message.id,
-                )
+                # One bad file must not abort the rest (mirrors the playlist
+                # skip-not-fatal rule).
+                try:
+                    temp_path = f"cache/{uuid.uuid4().hex[:6]}_{safe_cache_filename(filename)}"
+                    await stream_url_to_file(raw_url, temp_path)
+                    await process_split_and_upload(
+                        bot_client=app, premium_client=premium_app,
+                        chat_id=message.chat.id, file_path=temp_path,
+                        action='d', title=filename, uploader="GitHub",
+                        duration=0, thumb_path=None, progress_msg=None,
+                        delete_progress_after=False,
+                        reply_to_message_id=message.id,
+                    )
+                    delivered += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"[GitHub] gist {gist_id} file {filename} failed: {e}")
+                    try:
+                        await message.reply_text(f"⚠️ Skipped gist file `{filename}`: {e}")
+                    except Exception:
+                        pass
+            summary = f"✅ Gist `{gist_id}`: delivered {delivered} file(s)" + (f", {failed} failed" if failed else "")
             try:
-                await status.delete()
+                await status.edit_text(summary)
             except Exception:
-                pass
-        except Exception as e:
-            await status.edit_text(f"❌ Failed to fetch Gist: {e}")
-        stop(message)
+                try:
+                    await message.reply_text(summary)
+                except Exception:
+                    pass
+        finally:
+            stop(message)
     # ---- commands (group 0) ----
     @app.on_message(filters.command("search") & filters.private, group=0)
     async def github_search_handler(client: Client, message: Message):
