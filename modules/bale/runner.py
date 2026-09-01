@@ -208,6 +208,29 @@ def _bale_format_keyboard(cache_id: str, videos: list, audios: list) -> InlineKe
     rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data=f"dl:{cache_id}:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def _bale_markup(markup):
+    """Convert a shared-module PYROGRAM InlineKeyboardMarkup to aiogram's.
+
+    The github explorer keyboards live in modules/github/keyboards.py and are
+    built with pyrogram types (Telegram side is pyrogram); passing them to an
+    aiogram send/edit raises a pydantic model_type ValidationError. aiogram
+    markups (and None) pass through untouched.
+    """
+    if markup is None or isinstance(markup, InlineKeyboardMarkup):
+        return markup
+    rows = []
+    src_rows = getattr(markup, "inline_keyboard", None) or getattr(markup, "keyboard", []) or []
+    for row in src_rows:
+        rows.append([
+            InlineKeyboardButton(
+                text=getattr(b, "text", ""),
+                url=getattr(b, "url", None),
+                callback_data=getattr(b, "callback_data", None),
+            )
+            for b in row
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 async def _drain_bale_backlog(bot: Bot):
     # Bale's deleteWebhook(drop_pending_updates) is NOOP, drain manually
     try:
@@ -384,7 +407,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         except:
             # fallback simple
             pass
-        await message.reply(f"🐙 **GitHub Repository Browser**\n\n📁 **{owner}/{repo}**\n🔗 https://github.com/{owner}/{repo}\n\nSelect an action:", reply_markup=_gkb(gh_id))
+        await message.reply(f"🐙 **GitHub Repository Browser**\n\n📁 **{owner}/{repo}**\n🔗 https://github.com/{owner}/{repo}\n\nSelect an action:", reply_markup=_bale_markup(_gkb(gh_id)))
 
     @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().startswith("/search"))
     async def bale_search(message: Message):
@@ -527,7 +550,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
             await callback.answer("Session expired.", show_alert=True)
             return
         owner = meta["owner"]; repo = meta["repo"]
-        back_kb = get_back_keyboard(gh_id)
+        back_kb = _bale_markup(get_back_keyboard(gh_id))
         async def ack(t=None, show_alert=False):
             try:
                 await callback.answer(text=t, show_alert=show_alert)
@@ -535,7 +558,7 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 pass
         async def edit(t, kb=None):
             try:
-                return await callback.message.edit_text(t, reply_markup=kb)
+                return await callback.message.edit_text(t, reply_markup=_bale_markup(kb))
             except:
                 pass
         if action == "close":
