@@ -702,7 +702,10 @@ fixes shipped as commits `e289dcc`, `aebac12`, `fbd50f5`.
   duplicate relays (the queue already notifies the operator with `❌ Your
   request failed`, and the operator can re-share). Transient one-off —
   keeping the at-most-once semantics.
-- **`cookies/ytdlp/cookies.txt` (global fallback jar)**: on disk as a 28-byte
+- **CORRECTION (same day, later session):** `fbd50f5` did NOT actually untrack
+  the jars — its own `git add cookies/ytdlp` re-added the staged deletions in
+  the same commit, so the trap stayed armed. Fixed for real in `166d236`
+  (index-only removal + verified `git ls-files` secret-clean).
   header-only stub, was never tracked, and the new ignore rule covers it.
 
 ---
