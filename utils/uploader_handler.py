@@ -4,6 +4,7 @@ import asyncio
 import config
 from pyrogram import Client
 from pyrogram.errors import MessageIdInvalid, RPCError
+from pyrogram.types import ReplyParameters
 from utils.gate import is_document_mode, is_premium_user
 
 # Telegram upload ceilings (bytes).
@@ -28,7 +29,10 @@ async def send_reply_safe(send_fn, reply_to_message_id: int | None = None, **kwa
     """
     if reply_to_message_id is not None:
         try:
-            return await send_fn(reply_to_message_id=reply_to_message_id, **kwargs)
+            return await send_fn(
+                reply_parameters=ReplyParameters(message_id=reply_to_message_id),
+                **kwargs,
+            )
         except MessageIdInvalid:
             pass  # known bad reply target — fall through to unquoted send
         except RPCError as e:
