@@ -1,10 +1,15 @@
 # AGENTS.md — notes for contributors & AI agents working on tgbot
 
 This is a pyrogram-based Telegram media downloader/streamer — **tgbot is the
-primary bot and the reference implementation**. Its sibling **balebot**
-(aiogram v3, Bale.ai) was an experiment to try Bale.ai messenger bots; it shares
-the same download core (it was derived from tgbot's design), but tgbot is the
-source of truth. A future optional Bale frontend inside this repo is designed in
+primary bot and the reference implementation**. The **Bale frontend**
+(`modules/bale/`, aiogram v3, Bale.ai) is NOT an experiment — it is the bot's
+**lifeline during internet shutdowns in Iran**: Bale runs over the National
+Information Network and stays reachable domestically when the global internet
+is cut (2025-26 protests blackout from 8 Jan 2026, renewed blackout from the
+28 Feb 2026 strikes, partial restore only 26 May; permanent "digital
+isolation" plans reported — see `docs/memory/BALEBOT.md` §"WHY this frontend
+exists"). It shares the same download core with tgbot (derived from tgbot's
+design), but tgbot is the source of truth. Design + invariants:
 `docs/memory/BALEBOT.md`. This file captures the **non-obvious
 invariants** so you don't have to rediscover them.
 

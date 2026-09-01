@@ -2,6 +2,26 @@
 
 All Bale.ai frontend notes merged: integration plan, ported extras (GitHub/YouTube/Translate/Web), and hardening (20 MB limit, getUpdates drain, limited admin).
 
+## WHY this frontend exists (operator intent — do not treat Bale as dead weight)
+
+The Bale side is the bot's **lifeline during internet shutdowns in Iran**.
+Bale is a domestic messenger that keeps working over the National Information
+Network when the government cuts the global internet — which it has repeatedly
+done during the 2025-2026 protests (nationwide blackout from 8 Jan 2026, a
+renewed near-total blackout from 28 Feb 2026 with the war, only partially
+restored on 26 May, and reported long-term plans for permanent "Absolute
+Digital Isolation"). Iranians inside the country can be assumed to have Bale
+but NOT Telegram during those windows, so the Bale poller must stay deployed
+and as capable as its platform allows.
+
+Official Bale bot docs (docs.bale.ai — the bot API mirrors Telegram's over
+`tapi.bale.ai`) state a **50 MB bot file limit**, and newly registered
+accounts go through restrictions — **first forbidden from sending files, then
+from messaging** — so first-contact flows must tolerate silent failures from
+young accounts. Publicly reported user-side sending caps have also sat at
+**20 MB**, which is why `BALE_HARD_LIMIT_MB=20` + the split uploader is the
+correct posture even if the bot limit is 50.
+
 ## Sources consolidated
 
 - `docs/memory/tgbot-balebot-integration.md`

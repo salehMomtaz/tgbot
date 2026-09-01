@@ -8,7 +8,7 @@ These are consolidated, repo-local copies of the project's long-term memory (ori
 
 | Doc | What it covers | Sources merged |
 |---|---|---|
-| [Health passes — timeline](HEALTH_PASSES.md) | 5 point-in-time Telethon-driven health passes + 2026-09-01 log audit on the prod box | `tgbot-2026-08-07-health-pass`, `2026-08-08-x-selfdm-health-pass`, `2026-08-11-health-pass`, `2026-08-12-health-pass`, `2026-08-25-health-pass`, `2026-09-01-log-audit` |
+| [Health passes — timeline](HEALTH_PASSES.md) | 5 point-in-time Telethon-driven health passes + 2026-09-01 log audit on the prod box | `tgbot-2026-08-07-health-pass`, `2026-08-08-x-selfdm-health-pass`, `2026-08-11-health-pass`, `2026-08-12-health-pass`, `2026-08-25-health-pass`, `2026-09-01-log-audit`, `2026-09-01-bale-github-evaluation` |
 | [Direct-forward history](DIRECT_FORWARD_HISTORY.md) | IG / X self-DM / TikTok IM relay incidents, XChat bridge, state-race, photo fallback | `2026-08-08-x-pairing`, `2026-08-09-xchat-bridge`, `2026-08-11-selfdm-audit`, `2026-08-11-x-duplicate…`, `2026-08-11-x-photo-paste…`, `instagram-risky-and-push`, `vps-two-bots…` — user-facing setup stays in `../DIRECT_FORWARD_SETUP.md` |
 | [Balebot integration](BALEBOT.md) | Bale.ai experiment → optional frontend inside tgbot, ported extras, hardening | `tgbot-balebot-integration`, `tgbot-balebot-merge-2026-08-13`, `tgbot-balebot-hardening-2026-08-13` |
 

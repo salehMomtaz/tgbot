@@ -1,6 +1,6 @@
 # Health passes — consolidated timeline
 
-All 5 point-in-time health passes + the 2026-08-31 log audit, merged chronologically. Sections 1-5 are the original files verbatim under a dated header. See `docs/memory/README.md` for index.
+All 5 point-in-time health passes + the 2026-09-01 log audit + the 2026-09-01 Bale/GitHub full-side evaluation, merged chronologically. Sections 1-5 are the original files verbatim under a dated header. See `docs/memory/README.md` for index.
 
 ## Sources consolidated
 
@@ -704,3 +704,82 @@ fixes shipped as commits `e289dcc`, `aebac12`, `fbd50f5`.
   keeping the at-most-once semantics.
 - **`cookies/ytdlp/cookies.txt` (global fallback jar)**: on disk as a 28-byte
   header-only stub, was never tracked, and the new ignore rule covers it.
+
+---
+
+## 7. 2026-09-01 Bale-frontend + GitHub-module full evaluation (live-driven)
+
+Purpose recap (from the operator): **the Bale frontend exists for times of
+internet shutdowns in Iran** — Bale runs over the National Information Network
+and stays reachable for users inside Iran when the global internet is cut
+(nationwide blackouts: 8 Jan 2026 during the 2025-26 protests; renewed "near
+total" blackout 28 Feb 2026 with the war; partial restoration only 26 May;
+Filterwatch's reported "Absolute Digital Isolation / Barracks Internet" plan
+makes recurrence likely). Bale's own bot docs (docs.bale.ai) mirror the
+Telegram Bot API over `tapi.bale.ai` (multipart upload supported); the
+operator's official-doc notes say 50 MB bot file limit, and **newly registered
+accounts were first forbidden from sending files, then from messaging**
+(anti-spam ramp-up) — our `BALE_HARD_LIMIT_MB=20` split policy sits safely
+under that, since user-side Bale file sending has also been publicly reported
+as capped at 20 MB.
+
+### GitHub module (Telegram side) — FUNCTIONAL, not a shell, but 1 real bug fixed
+
+Live Telethon drive on `octocat/Hello-World`: repo menu (16 buttons) → Info
+(real stars/forks) → back → Branches → per-branch ZIP downloaded, queued,
+delivered; 22-press chain (readme/commits/contributors/languages/license/
+clone/issues/pulls/releases/tags/files→file download) completed with **0
+errors in the log**; issue sub-link (`cli/cli#13188`) rendered real thread
+data; `/search`, `/user`, `/trend` all answered with live data. Gist flow
+delivered all files of a live public gist.
+
+**Fixed (`838a207`):** multi-file gist handler could escape before
+`stop(message)` (progress msg deleted after file 1 → `except` tried to edit
+it → uncaught → the gist URL fell through to the group-1 downloader and was
+ALSO fetched as a direct file = double processing). Now per-file
+skip-not-fatal, safe status edits, stop in `finally`. Re-driven both the
+failure case (dead gist: clean ❌, zero downloader fallthrough) and the
+success case (4 files delivered + summary).
+
+### Bale side — real wiring, verified live
+
+- Poller runs in-process behind an isolated task; `getMe` on `tapi.bale.ai`
+  → `angelabalzacbot` alive; backlog drain works ("Drained 4 backlogged
+  updates" after a restart).
+- Operator's Bale account (1058935006) **matches** `BALE_SYSTEM_CREATOR_ID`
+  — the limited admin console genuinely worked (12/15 updates handled in the
+  2026-08-31 17:22 session; the 3 ERRORs were the gh-markup bug + benign
+  message-not-found edits, already fixed in commit `e289dcc`).
+- **Both Bale send paths proven live today:** the bespoke `upload_file_direct_to_bale`
+  multipart POST delivered a document to the creator chat, and aiogram
+  `send_message` returned msg_id — the delivery half of the shutdown-lifeline
+  is confirmed working end-to-end.
+- The 17:23 "links did nothing" test session is explained by the **4 msg/min
+  Bale rate limiter** (8 messages in 65 s → "⏳ Too fast") plus the gh
+  keyboard bug; not a routing failure. All three media URLs
+  (tiktok shortlink / x status / m.youtube) DO pass `is_ytdlp_supported`
+  (verified offline with the live compiled pattern set).
+
+### Fixed while auditing
+
+- `fab44c9` — direct-file path never followed redirects (aiohttp default
+  off): 302 URLs failed with "Server returned error 302" on BOTH frontends'
+  shared core; now follows + re-checks the SSRF gate on the final URL.
+- `fab44c9` — non-playable `action='d'` files (zip/txt/md/gist/transcripts)
+  arrived as unplayable 🎥 "video" bubbles; `send_single_media` now only
+  keeps media semantics for playable extensions, else send_document.
+- `174dd96` — Bale's duplicated inline direct-downloader removed; the job
+  reuses `download_direct_file` so the frontends can't drift.
+
+### Remaining known limitations (accepted, by design)
+
+- Bale gh: actions = info/zip/back/close only; the rest point the user to
+  Telegram (documented in the handler's fallback alert).
+- Bale direct uploads are single-part multipart POSTs under 20 MB (split
+  by the uploader); no premium/4 GB path on Bale by design.
+- Bale poller has no auto-restart after a crash (main.py comment: waits for
+  next bot restart) — acceptable for the shutdown use-case since the bot
+  process would itself be down.
+- Telegram-side document uploads with `action='d'` + playable extension keep
+  the legacy video-bubble behavior (audio extensions ride send_video too) —
+  unchanged on purpose to avoid regressing direct .mp4/.mp3 streaming.
