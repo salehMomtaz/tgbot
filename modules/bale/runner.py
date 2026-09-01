@@ -772,37 +772,24 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
             if not getattr(config, "BALE_DIRECT_DOWNLOAD", True):
                 await message.reply("❌ Direct file downloads disabled on Bale.")
                 return
-            # direct file via Bale uploader (stream with aiohttp)
+            # direct file via Bale uploader — reuses the Telegram core
+            # (download_direct_file: SSRF gate incl. post-redirect re-check,
+            # redirect following, cache/<id>/ layout) so the two frontends
+            # cannot drift apart.
             status = await message.reply("📥 Downloading direct file...")
             async def job():
-                import aiohttp
                 import os
-                import urllib.parse
-                # SSRF guard
-                from modules.downloader_handler import _is_ssrf_target
-                if await _is_ssrf_target(url):
-                    await status.edit_text("❌ Refusing private network address."); return
                 cache_id = str(uuid.uuid4())[:8]
                 task_dir = f"cache/{cache_id}"
-                os.makedirs(task_dir, exist_ok=True)
                 try:
-                    parsed = urllib.parse.urlparse(url)
-                    fname = os.path.basename(parsed.path) or f"download_{cache_id}"
-                    fname = urllib.parse.unquote(fname)
+                    from modules.downloader_handler import download_direct_file
+                    out = await download_direct_file(url, cache_id, None)
                     if custom:
-                        fname = custom
-                    out = f"{task_dir}/{fname}"
-                    async with aiohttp.ClientSession() as sess:
-                        async with sess.get(url, timeout=600) as resp:
-                            if resp.status != 200:
-                                await status.edit_text(f"❌ Server {resp.status}"); return
-                            tot = int(resp.headers.get('content-length',0))
-                            cur=0
-                            with open(out,"wb") as f:
-                                async for chunk in resp.content.iter_chunked(512*1024):
-                                    f.write(chunk); cur+=len(chunk)
+                        renamed = os.path.join(task_dir, custom)
+                        if renamed != out:
+                            os.rename(out, renamed); out = renamed
                     await status.edit_text("📤 Uploading to Bale...")
-                    await process_split_and_upload_bale(message.bot, message.chat.id, out, 'd', fname, "Direct", 0, None, status)
+                    await process_split_and_upload_bale(message.bot, message.chat.id, out, 'd', os.path.basename(out), "Direct", 0, None, status)
                 except Exception as e:
                     try: await status.edit_text(f"❌ Direct failed: {e}")
                     except: pass
