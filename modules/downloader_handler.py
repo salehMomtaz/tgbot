@@ -937,7 +937,11 @@ async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
     out_path = f"{task_dir}/{file_name}"
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=1800) as response:
+        async with session.get(url, timeout=1800, allow_redirects=True) as response:
+            # Redirected targets must pass the same SSRF gate as the original
+            # URL (http://evil -> http://127.0.0.1:4417 must be refused).
+            if str(response.url) != url and await _is_ssrf_target(str(response.url)):
+                raise RuntimeError("Refusing redirected local/private target.")
             if response.status != 200:
                 raise RuntimeError(f"Server returned error {response.status}")
 

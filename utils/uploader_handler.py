@@ -17,6 +17,10 @@ _PREMIUM_HARD = 4000 * 1024 * 1024       # hard ceiling under Telegram's 4 GB
 _BOT_TARGET = 1900 * 1024 * 1024         # ~1.86 GB target per segment (Bot API)
 _BOT_HARD = 2000 * 1024 * 1024           # hard ceiling under Telegram's 2 GB
 
+# Extensions that deserve native media bubbles when a job says "document".
+_PLAYABLE_VIDEO = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+_PLAYABLE_AUDIO = {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".wav", ".opus"}
+
 
 async def send_reply_safe(send_fn, reply_to_message_id: int | None = None, **kwargs):
     """Send via *send_fn*, quoting *reply_to_message_id* when given.
@@ -85,6 +89,13 @@ async def send_single_media(bot_client: Client, premium_client: Client, chat_id:
             )
 
     client = premium_client if use_premium else bot_client
+
+    # action 'd' means "deliver the file as the user got it": playable media
+    # keeps video/audio message semantics (inline streaming), everything else
+    # (zip, txt, md, gist files, transcripts) must go as a document — a text
+    # file sent via send_video arrives as an unplayable "video" bubble.
+    if action == 'd' and os.path.splitext(file_path)[1].lower() not in (_PLAYABLE_VIDEO | _PLAYABLE_AUDIO):
+        force_document = True
 
     if force_document:
         return await send_reply_safe(
