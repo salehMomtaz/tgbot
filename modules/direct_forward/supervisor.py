@@ -31,7 +31,13 @@ async def _direct_forward_supervisor(bot_client, premium_client, chat_id: int) -
         return
 
     logger.info(f"[DirectForward] started -> chat {chat_id}, {len(workers)} platform(s)")
-    await asyncio.gather(*workers)
+    # One worker crashing (network blip, bad jar) must not take the other
+    # platforms down with it — each worker already loops forever, so an
+    # exception here means the worker truly died; log it and keep the rest.
+    results = await asyncio.gather(*workers, return_exceptions=True)
+    for res in results:
+        if isinstance(res, BaseException) and not isinstance(res, asyncio.CancelledError):
+            logger.error(f"[DirectForward] worker died: {res!r}")
 
 
 def start_direct_forward_task(bot_client, premium_client):

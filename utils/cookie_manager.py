@@ -106,6 +106,25 @@ def touch_cookie_failure(cookie_path: str, reason: str) -> None:
     _save_meta(meta)
 
 
+def record_auth_failure(cookie_path: str | None, error_text: str) -> None:
+    """Record an auth/session failure against a REAL jar path (not a snapshot).
+
+    Used when no snapshot exists to commit (e.g. the jar vanished between
+    extract and download, or a no-auth attempt hit a login wall). Mirrors the
+    failure half of :func:`commit` so every auth-walled failure — snapshot or
+    not — lands in ``meta.json`` and the cookie history.
+    """
+    if not cookie_path:
+        return
+    original = _snapshot_registry.get(cookie_path, cookie_path)
+    marker = classify_auth_error(error_text or "")
+    if marker:
+        touch_cookie_failure(original, (error_text or "")[:300])
+        cookie_history.record(
+            original, "commit_failure", actor="yt_dlp",
+            note=f"auth marker: {marker} — {(error_text or '')[:180]}")
+
+
 def touch_cookie_uploaded(cookie_path: str) -> None:
     """Record that the admin (re)uploaded this jar just now. Used by the
     freshness watchdog so a fresh upload is treated as warm without faking a

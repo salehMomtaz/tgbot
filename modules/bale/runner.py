@@ -298,6 +298,15 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
         return await handler(event, data)
 
     # --- /start /console --- (must be registered BEFORE generic link handler)
+    # Placeholder "—" filler buttons in every keyboard carry callback_data
+    # "none" with no handler — without this no-op the client spinner hangs.
+    @dp.callback_query(F.data == "none")
+    async def bale_noop(callback: CallbackQuery):
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+
     @dp.message(F.chat.type == "private", lambda m: m.text and m.text.strip().lower() in ("/start","/admin","console","🛠 console","hi!","hey"))
     async def bale_start(message: Message):
         uid = message.from_user.id
@@ -368,6 +377,8 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
             BALE_USER_STATES[uid]="waiting_for_setlimit"; BALE_ACTIVE_PROMPTS[uid]=callback.message.message_id
             await callback.message.edit_text("⚙️ **Set Size Limits**\nSend: `<key> <value_mb>`\nKeys: bale_hard_limit_mb (20), bale_split_target_mb (19), binary_chunk_mb\nExample: `bale_hard_limit_mb 20`", reply_markup=back_markup); await callback.answer()
         elif d == "bale_admin_abort":
+            from utils.shared import signal_all_stop
+            signal_all_stop()
             queue._pending.clear(); queue._active=False
             if os.path.exists("cache"):
                 try: shutil.rmtree("cache"); os.makedirs("cache", exist_ok=True)

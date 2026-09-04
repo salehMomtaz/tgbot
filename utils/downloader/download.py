@@ -215,6 +215,19 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             or "certain audiences" in error_msg
         ):
             snap_in_play = cookie_manager.acquire(site_jar)
+            if snap_in_play is None:
+                # The jar vanished between extract and download (admin replaced
+                # it, refresher in flight). Record the auth signal against the
+                # jar path directly — an invisible no-auth retry would surface
+                # the same login-wall text with no bookkeeping at all.
+                cookie_manager.record_auth_failure(site_jar, last_attempt_error or error_msg)
+                retry_opts = dict(ydl_opts)
+                retry_opts.pop('cookiefile', None)
+                try:
+                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                except Exception as e2:
+                    last_attempt_error = str(e2)
             retry_opts = dict(ydl_opts)
             if snap_in_play:
                 retry_opts['cookiefile'] = snap_in_play
@@ -259,7 +272,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
 
         if info is None:
             cookie_manager.commit(snap_in_play, success=False, error_text=last_attempt_error)
-            raise RuntimeError(_classify_ytdl_error(e, url))
+            raise RuntimeError(_classify_ytdl_error(last_attempt_error or e, url))
 
     # The winning attempt's snapshot is merged back on success (no-op when
     # the win was a no-auth attempt: snap_in_play is None).
@@ -303,7 +316,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
 
     # yt-dlp may leave fragment/part files on interruption; purge them after a successful download
     for leftover in os.listdir(task_dir):
-        if leftover.endswith(('.part', '.part-Frag0', '.ytdl', '.tmp')):
+        if leftover.endswith(('.part', '.ytdl', '.tmp')) or '.part-Frag' in leftover:
             try:
                 os.remove(os.path.join(task_dir, leftover))
             except Exception:

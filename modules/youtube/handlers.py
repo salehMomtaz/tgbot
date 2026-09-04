@@ -19,6 +19,11 @@ from modules.youtube.scraper import clean_vtt_subtitles, search_ytdlp_flat
 def register_youtube_handlers(app: Client, premium_app: Client | None = None):
     @app.on_message(filters.command("yt") & filters.private, group=0)
     async def yt_search(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            # Strangers stay invisible to extras: no reply (avoids oracle),
+            # no fall-through (avoids the downloader grabbing "/yt ...").
+            stop(message)
+            return
         # parse: /yt [limit] query
         raw = (message.text or "")[3:].strip()
         if not raw:
@@ -57,6 +62,9 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
         stop(message)
     @app.on_message(filters.command("ytrecent") & filters.private, group=0)
     async def ytrecent_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            stop(message)
+            return
         raw = (message.text or "")[9:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/ytrecent <@channel_handle> [count]`")
@@ -89,6 +97,9 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
         stop(message)
     @app.on_message(filters.command("ytch") & filters.private, group=0)
     async def ytch_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            stop(message)
+            return
         raw = (message.text or "")[5:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/ytch <@channel_handle> <query>`")
@@ -138,19 +149,37 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
             def extract_subs():
                 ydl_opts = {'quiet': True, 'skip_download': True, 'writeautomaticsub': True, 'writesubtitles': True, 'subtitleslangs': ['en', 'fa', 'auto'], 'outtmpl': f"{task_dir}/subtitle", 'proxy': getattr(config, 'YTDLP_PROXY', None)}
                 from utils.downloader.cookies import get_cookies_for_url
+                from utils import cookie_manager
+                cookie_snapshot = None
                 try:
-                    ydl_opts['cookiefile'] = get_cookies_for_url(url)
-                except: pass
+                    cookie_snapshot = get_cookies_for_url(url)
+                except Exception:
+                    cookie_snapshot = None
+                if cookie_snapshot:
+                    ydl_opts['cookiefile'] = cookie_snapshot
                 if getattr(config, 'YTDLP_USER_AGENT', ''):
                     ydl_opts['user_agent'] = config.YTDLP_USER_AGENT
                 try:
                     # use url_normalize's patch if available
                     from utils.downloader.url_normalize import _apply_pot_options as _pot
                     ydl_opts = _pot(ydl_opts, url)
-                except Exception:
-                    pass
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=True)
+                except Exception as pot_exc:
+                    # YouTube = cookies + PO token, no fallback: a down
+                    # provider must surface as an error, not a silent PO-less
+                    # run that fails confusingly downstream.
+                    if cookie_snapshot:
+                        cookie_manager.commit(cookie_snapshot, success=False, error_text=str(pot_exc))
+                    raise
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                except Exception as exc:
+                    if cookie_snapshot:
+                        cookie_manager.commit(cookie_snapshot, success=False, error_text=str(exc))
+                    raise
+                if cookie_snapshot:
+                    cookie_manager.commit(cookie_snapshot, success=bool(info))
+                return info
             try:
                 info = await loop.run_in_executor(None, extract_subs)
                 title = info.get('title', 'Unknown')

@@ -13,7 +13,7 @@ def _is_sign_in_error(error_text: str) -> bool:
     markers = [
         "sign in to confirm",
         "confirm you're not a bot",
-        "confirm you're not a bot",
+        "confirm you’re not a bot",
         "sign in to continue",
         "please sign in",
         "authentication required",
@@ -32,6 +32,19 @@ def _classify_ytdl_error(exc: Exception, url: str) -> str:
         return (
             f"{site} is requiring sign-in / is bot-challenging this server. "
             f"Please send a fresh `{jar}` jar via Admin Console → Cookies."
+        )
+
+    # Instagram's audience gate (follower/age-restricted reels served to
+    # anonymous fetches). The download ladder matches these strings for the
+    # cookie retry, but a terminal failure on the same text used to fall
+    # through to a raw yt-dlp dump — name the jar like every other auth wall.
+    if "available to everyone" in text or "certain audiences" in text:
+        site, jar = _site_cookie_context(url)
+        return (
+            f"{site} refused this fetch as a login-walled / audience-restricted "
+            f"post (cookies didn't satisfy it). Please send a fresh `{jar}` jar "
+            "from a logged-in browser that can actually view this post, via "
+            "Admin Console → Cookies."
         )
 
     if "unexpected response from webpage request" in text and "tiktok.com" in url.lower():

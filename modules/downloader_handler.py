@@ -163,15 +163,18 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
         premium_allowed = is_premium_user(user_id)
         keyboard = build_format_keyboard(cache_id, data["videos"], data["audios"], premium_allowed=premium_allowed)
 
-        await log_event(f"ℹ️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
+        await log_event(f"i️ **Link analyzed:** `{data['title']}` for User `{user_id}`.")
         await status.close()
+        # Duration can be None (lives/stories) — extract_formats normalizes to
+        # 0, but coerce defensively so a null never crashes the keyboard post.
+        _dur = data.get("duration") or 0
         await send_reply_safe(
             message._client.send_message,
             reply_to_id,
             chat_id=message.chat.id,
             text=(
                 f"📥 **Format Selection**\n\n📝 **Title:** {data['title']}\n"
-                f"⏱ **Duration:** {int(data['duration'] // 60)}m {int(data['duration'] % 60)}s\n\n"
+                f"⏱ **Duration:** {int(_dur // 60)}m {int(_dur % 60)}s\n\n"
                 f"Select an option below:"
                 + ("" if premium_allowed else "\n\n🔒 = 4GB Premium upload (ask the admin to enable it)")
             ),
@@ -446,7 +449,8 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                     file_path = await download_direct_file(url, cache_id, dl_progress)
 
                     dir_name = os.path.dirname(file_path)
-                    clean_name = custom_filename if custom_filename else os.path.basename(file_path)
+                    from utils.security import safe_task_filename as _safe_name
+                    clean_name = _safe_name(custom_filename, os.path.basename(file_path)) if custom_filename else os.path.basename(file_path)
                     clean_file_path = os.path.join(dir_name, clean_name)
                     if clean_file_path != file_path:
                         os.rename(file_path, clean_file_path)
@@ -515,7 +519,10 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             )
             return
 
-        format_id = parts[3]
+        format_id = parts[3] if len(parts) > 3 else None
+        if not format_id:
+            await callback_query.answer("⚠️ Malformed button payload.", show_alert=True)
+            return
         cache_data = DOWNLOAD_CACHE.get(cache_id)
         if not cache_data:
             await callback_query.answer("⚠️ Session expired or not found.", show_alert=True)
@@ -585,7 +592,8 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
 
                 custom_name = cache_data.get("custom_filename")
                 if custom_name:
-                    clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name}{ext}"
+                    from utils.security import safe_task_filename as _safe_name2
+                    clean_name = _safe_name2(custom_name, os.path.basename(file_path), ext)
                 else:
                     clean_name = os.path.basename(file_path)
 
@@ -772,7 +780,8 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
 
                     custom_name = cache_data.get("custom_filename")
                     if custom_name:
-                        clean_name = custom_name if custom_name.endswith(ext) else f"{custom_name} {idx}{ext}"
+                        from utils.security import safe_task_filename as _safe_name3
+                        clean_name = _safe_name3(f"{custom_name} {idx}", os.path.basename(file_path), ext)
                     else:
                         clean_name = os.path.basename(file_path)
                     clean_file_path = os.path.join(dir_name, clean_name)
@@ -932,8 +941,9 @@ async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
     os.makedirs(task_dir, exist_ok=True)
 
     parsed_url = urllib.parse.urlparse(url)
-    file_name = os.path.basename(parsed_url.path) or f"download_{cache_id}"
-    file_name = urllib.parse.unquote(file_name)
+    from utils.security import safe_task_filename as _safe_dl_name
+    raw_name = os.path.basename(parsed_url.path) or f"download_{cache_id}"
+    file_name = _safe_dl_name(urllib.parse.unquote(raw_name), f"download_{cache_id}")
     out_path = f"{task_dir}/{file_name}"
 
     async with aiohttp.ClientSession() as session:
@@ -946,6 +956,13 @@ async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
                 raise RuntimeError(f"Server returned error {response.status}")
 
             total_size = int(response.headers.get('content-length', 0))
+            if total_size > 0:
+                # Fail fast before streaming: the direct path previously had
+                # no size gate at all, so a multi-GB file filled the VPS
+                # mid-stream. Unknown-size files still stream (checked below
+                # once the real byte count is known).
+                from utils.downloader import _ensure_disk_space, required_merge_headroom
+                _ensure_disk_space(task_dir, required_merge_headroom(total_size))
             downloaded = 0
 
             with open(out_path, "wb") as f:
@@ -954,5 +971,12 @@ async def download_direct_file(url: str, cache_id: str, progress_fn) -> str:
                     downloaded += len(chunk)
                     if progress_fn:
                         await progress_fn(downloaded, total_size)
+
+    if total_size <= 0:
+        # Size was unknown up front — verify after the fact so an oversized
+        # direct file at least surfaces a clear error instead of silently
+        # filling the disk for the next job.
+        from utils.downloader import _ensure_disk_space as _ensure_after
+        _ensure_after(task_dir, 0)
 
     return out_path

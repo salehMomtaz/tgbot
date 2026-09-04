@@ -132,12 +132,18 @@ def split_video_by_size_generator(file_path: str, target_size_bytes: int, hard_l
                     f"Segment exceeds hard limit even after retries: {part_path}"
                 )
 
+            # Capture the size BEFORE yielding: the consumer (uploader)
+            # deletes each part right after sending it, then resumes this
+            # generator — statting after resume measured a deleted file and
+            # always fell back to target_size_bytes, so adaptation never
+            # adapted. A local variable survives the yield; the file may not.
+            actual = os.path.getsize(part_path) if os.path.exists(part_path) else target_size_bytes
+
             yield part_path
 
             start += attempt_seconds
             part_num += 1
             # Adapt next estimate from the actual yielded size
-            actual = os.path.getsize(part_path) if os.path.exists(part_path) else target_size_bytes
             if actual > 0:
                 seg_seconds = max(1.0, attempt_seconds * (target_size_bytes / actual))
 

@@ -47,3 +47,21 @@ def is_safe_url(url: str) -> bool:
     if not url or len(url) > 2048:
         return False
     return url.startswith("http://") or url.startswith("https://")
+
+
+def safe_task_filename(value: str | None, fallback: str, ext: str = "") -> str:
+    """Sanitize a user-supplied filename so it can never escape its task dir.
+
+    Strips directories (``../``, absolute paths), collapses unsafe characters,
+    and re-appends *ext* when the name doesn't already carry it. The result is
+    always a bare filename — ``os.path.join(task_dir, result)`` stays inside
+    ``task_dir``.
+    """
+    name = (value or "").strip()
+    # Drop any directory components first (../, /abs/path, C:\\...).
+    import os as _os
+    name = _os.path.basename(name.replace("\\", "/"))
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or fallback
+    if ext and not name.lower().endswith(ext.lower()):
+        name = f"{name}{ext}"
+    return name

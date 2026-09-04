@@ -48,7 +48,8 @@ def get_premium_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_cookie_action_keyboard(cookie_key: str) -> InlineKeyboardMarkup:
-    """Per-jar action keyboard. Test/Backup/Restore are YouTube-specific."""
+    """Per-jar action keyboard. Test/Backup/Restore are YouTube-specific.
+    History is available for every jar."""
     rows = [[
         InlineKeyboardButton("📤 Download", callback_data=f"admin_cookie_action:{cookie_key}:download"),
         InlineKeyboardButton("✏️ Replace", callback_data=f"admin_cookie_action:{cookie_key}:replace"),

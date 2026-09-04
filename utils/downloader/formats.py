@@ -128,7 +128,9 @@ def extract_formats(url: str) -> dict:
     if info is None:
         raise RuntimeError(f"Extraction failed: {_classify_ytdl_error(last_error, url)}")
 
-    duration_seconds = info.get('duration', 0)
+    # yt-dlp sets duration to None (not 0) for lives/stories/highlights.
+    # Normalize before anything does arithmetic or comparisons on it.
+    duration_seconds = info.get('duration', 0) or 0
     formats = info.get('formats', [])
 
     video_options = []

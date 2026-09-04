@@ -22,6 +22,9 @@ def estimate_format_size(fmt: dict, duration_seconds: int) -> int:
     """
     DEFAULT_POST_DURATION = 60  # Instagram reels / TikTok / short-form posts
 
+    # yt-dlp reports null durations (lives, stories) as None, not 0.
+    duration_seconds = duration_seconds or 0
+
     size = fmt.get('filesize') or fmt.get('filesize_approx') or 0
     if size > 0:
         return size
@@ -71,6 +74,8 @@ def _sane_filesize(size: int | None, duration_seconds: int, tbr: float) -> int:
     (invariant #11) instead of lying about a fragment.
     """
     size = size or 0
+    # Null durations (lives/stories) arrive as None — treat as unknown.
+    duration_seconds = duration_seconds or 0
     if size <= 0 or duration_seconds <= 0 or not tbr or tbr <= 0:
         return size
     implied_kbps = (size * 8) / duration_seconds / 1000

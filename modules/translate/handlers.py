@@ -2,12 +2,18 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from utils.propagation import stop
+from utils.gate import is_authorized
 from modules.translate.api import google_translate_async
 
 
 def register_translate_handlers(app: Client):
     @app.on_message(filters.command("tr") & filters.private, group=0)
     async def tr_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            # Strangers stay invisible to extras: no reply (avoids oracle),
+            # no fall-through (avoids the downloader grabbing "/tr ...").
+            stop(message)
+            return
         txt = (message.text or "").strip()
         args = txt[3:].strip() if len(txt) > 3 else ""
         if not args:

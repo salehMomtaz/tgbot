@@ -373,6 +373,12 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
             if msg_id in seen:
                 continue
             seen.add(msg_id)
+            # Cap the in-memory set alongside the persisted list (both 2000):
+            # without this the set grows one id per push for the life of the
+            # process while the disk copy stays trimmed.
+            if len(seen) > 2000:
+                for old in sorted(seen)[:-2000]:
+                    seen.discard(old)
             state = _load_state()
             state.setdefault("tiktok", {"seen_msg_ids": []})
             state["tiktok"]["seen_msg_ids"] = sorted(seen)[-2000:]

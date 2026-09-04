@@ -356,6 +356,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         )
         await log_event("👑 **Premium Session:** New PREMIUM_STRING_SESSION saved to .env by creator. Restarting automatically.")
         await callback_query.answer()
+        _mark_restart_pending()
         schedule_self_restart(delay=3.0)
 
     # =========================================================================
@@ -617,6 +618,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                 reply_markup=get_direct_menu_keyboard())
             await log_event("📨 **Admin Action:** IG direct-forward enabled. Auto-restarting.")
             await callback_query.answer()
+            _mark_restart_pending()
             schedule_self_restart(delay=3.0)
         else:
             await callback_query.message.edit_text(
@@ -670,6 +672,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                 reply_markup=get_direct_menu_keyboard())
             await log_event("📨 **Admin Action:** X direct-forward enabled. Auto-restarting.")
             await callback_query.answer()
+            _mark_restart_pending()
             schedule_self_restart(delay=3.0)
         else:
             await callback_query.message.edit_text(
@@ -703,6 +706,7 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                 reply_markup=get_direct_menu_keyboard())
             await log_event("📨 **Admin Action:** TikTok direct-forward enabled. Auto-restarting.")
             await callback_query.answer()
+            _mark_restart_pending()
             schedule_self_restart(delay=3.0)
         else:
             await callback_query.message.edit_text(

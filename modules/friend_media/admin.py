@@ -200,8 +200,6 @@ async def _render_contacts(callback_query, page=0):
         (f"{getattr(c, 'first_name', '') or c.id} {('@' + c.username) if getattr(c, 'username', None) else ''}")[:40],
         callback_data=f"fm_contact_add:{c.id}")]
         for c in chunk]
-    for r in rows:
-        pass
     kb = InlineKeyboardMarkup(rows + _contacts_keyboard(page, total_pages).inline_keyboard)
     header = (f"📇 **Telegram Contacts** ({len(contacts)})\n\nTap a contact to ADD them as an "
               "archived friend (silent add_contact — nothing is sent to them).")

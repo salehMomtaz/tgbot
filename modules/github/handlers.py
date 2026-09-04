@@ -193,6 +193,8 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
         text = message.text.strip().split("|")[0].strip()
         m = REPO_REGEX.match(text)
         if not m:
+            # Not actually a repo link (filter ran on untrimmed text) — let
+            # the downloader decide rather than swallowing the message.
             return
         owner, repo = m.groups()
         gh_id = f"gh_{str(uuid.uuid4())[:8]}"
@@ -208,6 +210,8 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             return
         m = SUB_REGEX.match(message.text.strip())
         if not m:
+            # Filter matched but the trimmed text doesn't parse — let the
+            # downloader decide rather than swallowing the message.
             return
         owner, repo, sub_type, num = m.groups()
         api_sub = "issues" if sub_type == "pull" else sub_type
@@ -235,6 +239,8 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
             return
         m = GIST_REGEX.match(message.text.strip())
         if not m:
+            # Filter matched but the trimmed text doesn't parse — let the
+            # downloader decide rather than swallowing the message.
             return
         owner, gist_id = m.groups()
         status = await message.reply_text("🔍 Extracting Gist files...")
@@ -295,6 +301,11 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
     # ---- commands (group 0) ----
     @app.on_message(filters.command("search") & filters.private, group=0)
     async def github_search_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            # Strangers stay invisible to extras: no reply (avoids oracle),
+            # no fall-through (avoids the downloader grabbing "/search ...").
+            stop(message)
+            return
         parts = message.text.split(None, 1)
         if len(parts) < 2 or not parts[1].strip():
             await message.reply_text("⚠️ **Usage:** `/search <query>`")
@@ -318,6 +329,9 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
         stop(message)
     @app.on_message(filters.command("user") & filters.private, group=0)
     async def github_user_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            stop(message)
+            return
         parts = message.text.split(None, 1)
         if len(parts) < 2 or not parts[1].strip():
             await message.reply_text("⚠️ **Usage:** `/user <username>`")
@@ -341,6 +355,9 @@ def register_github_handlers(app: Client, premium_app: Client | None = None):
         stop(message)
     @app.on_message(filters.command("trend") & filters.private, group=0)
     async def github_trend_handler(client: Client, message: Message):
+        if not is_authorized(message.from_user.id):
+            stop(message)
+            return
         status = await message.reply_text("🔍 Fetching weekly trending...")
         try:
             since = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d')

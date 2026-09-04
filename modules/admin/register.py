@@ -96,7 +96,7 @@ def register_admin_handlers(app: Client):
     @app.on_message(
         filters.text &
         filters.private &
-        filters.create(lambda _, __, m: m.from_user.id in USER_STATES),
+        filters.create(lambda _, __, m: bool(m.from_user) and m.from_user.id in USER_STATES),
         group=0
     )
     async def admin_state_message_handler(client: Client, message: Message):
@@ -521,8 +521,8 @@ def register_admin_handlers(app: Client):
     @app.on_message(
         filters.document &
         filters.private &
-        filters.create(lambda _, __, m: m.from_user.id == config.SYSTEM_CREATOR_ID) &
-        filters.create(lambda _, __, m: USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_")),
+        filters.create(lambda _, __, m: bool(m.from_user) and m.from_user.id == config.SYSTEM_CREATOR_ID) &
+        filters.create(lambda _, __, m: bool(m.from_user) and USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_")),
         group=0
     )
     async def admin_cookie_replace_document_handler(client: Client, message: Message):
@@ -576,8 +576,8 @@ def register_admin_handlers(app: Client):
     @app.on_message(
         filters.document &
         filters.private &
-        filters.create(lambda _, __, m: m.from_user.id == config.SYSTEM_CREATOR_ID) &
-        filters.create(lambda _, __, m: USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_per_site_")),
+        filters.create(lambda _, __, m: bool(m.from_user) and m.from_user.id == config.SYSTEM_CREATOR_ID) &
+        filters.create(lambda _, __, m: bool(m.from_user) and USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_per_site_")),
         group=0
     )
     async def admin_per_site_cookie_document_handler(client: Client, message: Message):

@@ -236,7 +236,9 @@ def register_subscription_payments(app: Client):
     @app.on_message(pay_filter & filters.private, group=0)
     async def _on_success(client, message):
         from utils.subscription.payments_stars import handle_successful_payment
+        from utils.propagation import stop as _stop
         await handle_successful_payment(client, message)
+        _stop(message)
 
 
 async def gate_and_quota_check(client, message: Message) -> bool:

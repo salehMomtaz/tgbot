@@ -9,6 +9,12 @@ from modules.web.api import fetch_markdown_text
 def register_web_handlers(app: Client, premium_app: Client | None = None):
     @app.on_message(filters.command("web") & filters.private, group=0)
     async def web_handler(client: Client, message: Message):
+        from utils.gate import is_authorized
+        if not is_authorized(message.from_user.id):
+            # Strangers stay invisible to extras: no reply (avoids oracle),
+            # no fall-through (avoids the downloader grabbing "/web ...").
+            stop(message)
+            return
         raw = (message.text or "")[4:].strip()
         if not raw:
             await message.reply_text("⚠️ **Usage:** `/web <url>`")

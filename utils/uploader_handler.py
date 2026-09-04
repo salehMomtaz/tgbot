@@ -304,7 +304,10 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 title=title if not is_split else f"{title} (Part {part_num})",
                 uploader=uploader,
                 duration=duration,
-                thumb_path=(thumb_path if part_num == 1 else None),
+                # Every video part carries the thumbnail: split parts are
+                # forced to documents, and document uploads without a thumb
+                # arrive with no visual preview.
+                thumb_path=thumb_path,
                 progress_fn=upload_progress,
                 force_document=force_document or is_split,
                 caption=caption if part_num == 1 else None,
