@@ -144,15 +144,11 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
                 if getattr(config, 'YTDLP_USER_AGENT', ''):
                     ydl_opts['user_agent'] = config.YTDLP_USER_AGENT
                 try:
-                    pass
                     # use url_normalize's patch if available
                     from utils.downloader.url_normalize import _apply_pot_options as _pot
                     ydl_opts = _pot(ydl_opts, url)
                 except Exception:
-                    try:
-                        from operators.downloader import _apply_pot_options as _old
-                        ydl_opts = _old(ydl_opts, url)
-                    except: pass
+                    pass
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=True)
             try:

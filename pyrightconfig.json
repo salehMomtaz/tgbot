@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": "venv",
+  "reportPrivateImportUsage": "none",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalIterable": "warning",
+  "reportOptionalOperand": "warning",
+  "reportOptionalCall": "warning",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "warning",
+  "reportCallIssue": "warning",
+  "reportAssignmentType": "warning",
+  "reportIndexIssue": "warning",
+  "reportReturnType": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportTypedDictNotRequiredAccess": "warning",
+  "reportOperatorIssue": "warning",
+  "reportPossiblyUnboundVariable": "warning"
+}
