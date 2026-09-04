@@ -12,6 +12,7 @@ import re
 import time
 
 import config
+from utils import cookie_history
 from utils import ig_anti_detect
 from utils.shared import _should_stop
 
@@ -167,12 +168,22 @@ def _ig_pk_from_url(cl, url: str) -> int:
 
 async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                                   header_lines: list[str], body: str,
-                                  url: str | None = None) -> bool:
+                                  url: str | None = None,
+                                  allow_clips: bool = False) -> bool:
     """Deliver one Instagram post/story natively through the logged-in
     instagrapi session — photo posts and carousels reliably break yt-dlp's
     extractor ('No video formats found'), so photos/albums download straight
     from the CDN here. Returns False (so the caller can fall back to yt-dlp)
-    when the media is actually a reel (clips product type)."""
+    when the media is actually a reel (clips product type) and *allow_clips*
+    is False.
+
+    ``allow_clips=True`` delivers reels too: it is the LAST-RESORT path for a
+    reel yt-dlp already failed on (audience-restricted media — "It can't be
+    seen by certain audiences" — which Instagram's WEB endpoint refuses even
+    for accounts that can watch it in the app, but the app API serves fine).
+    Historically this function returned False for clips, so the "trying
+    native" fallback was a no-op for reels and every such reel degraded to a
+    preview image even while the session was perfectly healthy (2026-09-04)."""
     loop = asyncio.get_event_loop()
     try:
         async with _ig_api_lock:
@@ -213,7 +224,7 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
         header_lines = _header_lines("Instagram", sender_label, user.username,
                                      str(getattr(user, "pk", "")), url)
         body = getattr(media, "caption_text", None) or body
-    if mt == 2 and product_type == "clips":
+    if mt == 2 and product_type == "clips" and not allow_clips:
         return False  # reel: yt-dlp handles quality/merge properly
 
     targets: list[tuple[str, bool]] = []           # (cdn_url, is_video)
@@ -290,7 +301,8 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                 if not sent_any:
                     raise
         await _send_followups(bot_client, chat_id, followups)
-        logger.info(f"[DirectForward/IG] ✅ native relayed {url} (media_type={mt}, {len(files)} file(s))")
+        note = " (clips fallback)" if (mt == 2 and product_type == "clips") else ""
+        logger.info(f"[DirectForward/IG] ✅ native relayed {url}{note} (media_type={mt}, {len(files)} file(s))")
         return True
     finally:
         for p, _f in files:
@@ -325,7 +337,10 @@ def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] native path failed for {url}: {e} — falling back to yt-dlp")
         if is_ig and "/reel/" in url:
-            # reels: yt-dlp-first (quality merge), native as fallback
+            # reels: yt-dlp-first (quality merge), native as fallback.
+            # allow_clips=True — this is the reel's LAST-RESORT delivery: a
+            # clips return-False here is what turned every audience-gated
+            # reel into a preview image (2026-09-04).
             try:
                 await _download_and_deliver(bot_client, premium_client, chat_id, url,
                                             header_lines, body, None)
@@ -334,7 +349,9 @@ def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                 logger.warning(f"[DirectForward/IG] yt-dlp reel failed for {url}: {e} — trying native")
                 if pk:
                     try:
-                        if await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header_lines, body, url):
+                        if await _ig_native_deliver_once(bot_client, chat_id, cl, pk,
+                                                         header_lines, body, url,
+                                                         allow_clips=True):
                             return
                     except Exception as e2:
                         logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
@@ -399,17 +416,29 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
             # needs neither — account_info() alone proves it's alive.
             cl.account_info()  # forces a session check
             logger.info(f"{log_prefix} Resumed persisted direct session.")
+            cookie_history.record(None, "ig_login_ok", platform="instagram",
+                                  actor=log_prefix.strip("[]"),
+                                  note="resumed persisted direct_ig_session.json")
             return
         except Exception as e:
             logger.info(f"{log_prefix} Persisted session unusable ({e}); trying sessionid.")
+            cookie_history.record(None, "ig_session_dead", platform="instagram",
+                                  actor=log_prefix.strip("[]"),
+                                  note=f"persisted session unusable: {e}")
 
     sessionid = _ig_sessionid_from_jar()
     if not sessionid:
+        cookie_history.record(None, "ig_relogin_failed", platform="instagram",
+                              actor=log_prefix.strip("[]"),
+                              note="no sessionid in jar — upload a fresh igcookies.txt")
         raise RuntimeError(
             "No sessionid in igcookies.txt. Upload a fresh igcookies.txt "
             "(Admin → Cookies) — there is no password login fallback by design.")
     if cl.login_by_sessionid(sessionid):
         logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
+        cookie_history.record(None, "ig_login_ok", platform="instagram",
+                              actor=log_prefix.strip("[]"),
+                              note="logged in via sessionid from igcookies.txt")
         # Persist the live session tokens Instagram just re-issued back into the
         # shared jar so it stays warm (instagrapi discards them).
         try:
@@ -861,6 +890,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         mqtt_task = asyncio.create_task(_ig_mqtt_listener())
         logger.info("[DirectForward/IG-MQTT] hybrid enabled — polling + push (TikTok-like)")
 
+    relogin_failures = 0  # consecutive mid-poll re-login failures (alert gate)
     try:
         while True:
             state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
@@ -1025,15 +1055,38 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 await asyncio.sleep(freeze)
             except LoginRequired:
                 logger.warning("[DirectForward/IG] session expired — attempting re-login.")
+                relogin_failures += 1
+                cookie_history.record(None, "ig_session_dead", platform="instagram",
+                                      actor="DirectForward/IG",
+                                      note=f"poll hit LoginRequired (attempt {relogin_failures})")
                 try:
                     await loop.run_in_executor(None, lambda: _ig_login(cl))
                     cl.dump_settings("direct_ig_session.json")
+                    relogin_failures = 0
                     try:
                         await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
                     except Exception as e:
                         logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
                 except Exception as e:
                     logger.error(f"[DirectForward/IG] re-login failed: {e}. Sleeping 1h.")
+                    cookie_history.record(None, "ig_relogin_failed", platform="instagram",
+                                          actor="DirectForward/IG",
+                                          note=f"{e} — the jar's sessionid is dead; upload a fresh igcookies.txt")
+                    # Tell the operator AFTER two consecutive dead cycles (~2h of
+                    # failing reels): "reels arriving as images" is the symptom;
+                    # a jar re-upload is the fix. Alert once per failure streak.
+                    if relogin_failures == 2:
+                        await _post_ig_alert(
+                            bot_client, chat_id,
+                            (f"💀 **Instagram session is dead** (re-login failed twice)\n\n"
+                             f"The IG cookie jar's `sessionid` is no longer accepted "
+                             f"({e}).\n\n"
+                             f"Reels will keep arriving as preview images and DM "
+                             f"relaying will stay broken until you upload a fresh "
+                             f"`igcookies.txt`:\n**Admin Console → 🍪 Cookie Jars → "
+                             f"Instagram → ✏️ Replace**.\n\n"
+                             f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "
+                             f"Instagram → 📜 History."))
                     await asyncio.sleep(3600)
             except Exception as e:
                 logger.error(f"[DirectForward/IG] poll error: {e}")

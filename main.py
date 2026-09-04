@@ -342,6 +342,14 @@ def initialize_cookie_jars():
         cookie_manager.lock_jar(file_path)
     print("[Cookies] Locked primary jars read-only at rest (write-back merge keeps them fresh).")
 
+    # History: stamp the boot state of every primary jar so the timeline has a
+    # clean "known good at boot" anchor between operator uploads and refresher
+    # cycles (see utils/cookie_history.py).
+    from utils import cookie_history
+    for file_path in (config.YT_COOKIES, config.IG_COOKIES,
+                      config.TT_COOKIES, config.X_COOKIES):
+        cookie_history.record(file_path, "startup", actor="main.py")
+
 async def auto_clean_cache_directory():
     """Periodically sweeps the cache directory every hour to purge orphaned files older than the configured age.
 

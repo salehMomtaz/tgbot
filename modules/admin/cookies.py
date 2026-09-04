@@ -9,6 +9,7 @@ import shutil
 import logging
 import config
 from utils import cookie_manager
+from utils import cookie_history
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ def _has_real_cookie_line(content: str) -> bool:
     return False
 
 
-def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
+def _write_cookie_jar(cookie_key: str, file_path: str, content: str,
+                      actor: str = "admin_upload") -> None:
     """Validate and atomically write a cookie jar, keeping primary jars read-only.
 
     Defense in depth so the live jar can never be corrupted:
@@ -51,7 +53,10 @@ def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
         through cookie_manager's atomic merge, which re-applies the lock;
       * purge stale yt-dlp snapshots so the next download uses the fresh jar;
       * record the upload in cookies/meta.json so the freshness watchdog
-        treats the jar as warm from now on.
+        treats the jar as warm from now on;
+      * record the change in cookies/history.jsonl (``actor`` distinguishes an
+        operator upload from the headless refresher) with a full snapshot copy
+        for forensics.
     """
     from utils.downloader import _purge_cookie_snapshots
 
@@ -71,6 +76,7 @@ def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
             shutil.copy(file_path, f"{file_path}.autobak")
         except Exception:
             pass
+    prev_sha16 = cookie_history._sha16(file_path) if os.path.exists(file_path) else None
 
     # os.replace is a directory-level rename, so it succeeds even when the
     # existing file is 0o444 (read-only). The old inode is unlinked and a
@@ -87,6 +93,10 @@ def _write_cookie_jar(cookie_key: str, file_path: str, content: str) -> None:
         os.chmod(file_path, 0o444)
     _purge_cookie_snapshots(file_path)
     cookie_manager.touch_cookie_uploaded(file_path)
+    cookie_history.record(
+        file_path, "admin_replace", actor=actor,
+        note=(f"replaced jar (prev sha {prev_sha16})" if prev_sha16
+              else "initial jar write"))
     # Instagram: fresh jar invalidates the persisted private-API session.
     # If we keep direct_ig_session.json, the next _ig_login will try to resume
     # that stale session first (account_info -> 403), waste a cycle, then fall

@@ -61,7 +61,10 @@ def get_cookie_action_keyboard(cookie_key: str) -> InlineKeyboardMarkup:
         rows.append([
             InlineKeyboardButton("♻️ Restore Backup", callback_data=f"admin_cookie_action:{cookie_key}:restore")
         ])
-    rows.append([InlineKeyboardButton("◀️ Back", callback_data="admin_cookies_menu")])
+    rows.append([
+        InlineKeyboardButton("📜 History", callback_data=f"admin_cookie_action:{cookie_key}:history"),
+        InlineKeyboardButton("◀️ Back", callback_data="admin_cookies_menu"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 

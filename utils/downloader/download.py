@@ -201,9 +201,19 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             except Exception as e2:
                 last_attempt_error = str(e2)
 
-        # Case B: we skipped cookies but Instagram returned 400 → the post is
-        #   login-walled. Retry with cookies (private content needs them).
-        elif instagram_has_cookies and "http error 400" in error_msg:
+        # Case B: we skipped cookies but Instagram refused the fetch → the post
+        #   needs login. Two refusals mean login-wall here: an explicit HTTP 400
+        #   on the private/web API, and the audience gate — "This content isn't
+        #   available to everyone: It can't be seen by certain audiences." —
+        #   which Instagram serves INSTEAD of a 400 for follower/age-restricted
+        #   media. Without this match the ladder never escalated to cookies and
+        #   every audience-restricted reel degraded to a preview image even
+        #   though the logged-in session could see it (2026-09-04 report).
+        elif instagram_has_cookies and (
+            "http error 400" in error_msg
+            or "available to everyone" in error_msg
+            or "certain audiences" in error_msg
+        ):
             snap_in_play = cookie_manager.acquire(site_jar)
             retry_opts = dict(ydl_opts)
             if snap_in_play:

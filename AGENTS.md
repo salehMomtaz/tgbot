@@ -161,6 +161,42 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    Freshness: `freshness_warnings()` powers the startup watchdog + the admin
    Cookies menu status line; knob: `COOKIE_STALE_WARNING_DAYS` (default 21).
 
+   **Cookie history tracker (2026-09-04):** every jar change and every IG
+   session-health event is appended to `cookies/history.jsonl`
+   (`utils/cookie_history.py`; content-changing events also keep a full
+   snapshot copy under `cookies/history_snapshots/`, rotated to 40 per jar).
+   Events: `startup` (main.py), `admin_replace` (`_write_cookie_jar`, actor
+   distinguishes operator upload vs headless refresher), `overlay`
+   (instagrapi write-back), `merge` (yt-dlp write-back, with the rotated
+   cookie NAMES), `commit_failure` (auth-classified errors), `restore`,
+   and `ig_login_ok` / `ig_session_dead` / `ig_relogin_failed`. Values are
+   NEVER logged — only `first4…last4(len)` fingerprints. View it in-chat:
+   Admin → 🍪 Cookie Jars → *<jar>* → 📜 History (jar events + IG health
+   interleaved, for correlating the first session-death with the nearest jar
+   write). Do not remove these hooks when refactoring the cookie paths.
+
+   **The headless cookie refresher must NEVER overwrite a jar it was logged
+   out of (2026-09-04 fix).** The old refresher replaced the ENTIRE jar with
+   whatever the headless Chromium context held after the visit. On 2026-09-03
+   16:49 the IG session was dead, the visit produced an anonymous cookie set
+   (fresh anonymous `sessionid`, login form), and the jar — with the dead
+   sessionid — was replaced by it, permanently destroying the jar's contents
+   ("site behaves like no cookies" in the operator's incognito test). Now
+   `_refresh_one` gates every write: IG requires a `sessionid` in the
+   extracted context AND no `/accounts/login` URL AND no anonymous login form
+   in the DOM (`action="/accounts/login/ajax/"`); other sites refuse when the
+   final URL looks like a login page. A refused visit records
+   `refresher_refused` (with a snapshot of the untouched jar) and writes
+   NOTHING; a verified visit applies the rotated cookies as an OVERLAY
+   (`cookie_manager.overlay_cookies`, never a full replace — full replace was
+   also shrinking jars 24→14 lines). Related fix: yt-dlp's Instagram ladder
+   now escalates to cookies on the audience gate too — "It can't be seen by
+   certain audiences" is treated like the HTTP-400 login-wall (it's what
+   Instagram serves instead of a 400 for follower/age-restricted reels), and
+   the reel's native fallback (`_ig_native_deliver_once` with
+   `allow_clips=True`) actually delivers the clip video from the app API
+   instead of no-oping to the preview image.
+
 5. **Keep `[default,curl-cffi]` on yt-dlp upgrades AND pin `curl_cffi<0.14`.**
    `utils/updater.py` runs `pip install -U --pre "yt-dlp[default,curl-cffi]"
    "curl_cffi<0.14"` — plain `yt-dlp` would silently strip the certifi/curllib

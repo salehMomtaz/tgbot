@@ -409,7 +409,8 @@ def write_back_session(cl, jar_path: str) -> None:
         if not updates:
             return
         from utils import cookie_manager
-        changed = cookie_manager.overlay_cookies(jar_path, updates)
+        changed = cookie_manager.overlay_cookies(jar_path, updates,
+                                                 actor="instagrapi_writeback")
         if changed:
             logger.info(f"[IG anti-detect] wrote back {changed} live session "
                         f"cookie(s) to {jar_path}")

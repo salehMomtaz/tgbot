@@ -50,6 +50,8 @@ import threading
 import time
 from typing import Any
 
+from utils import cookie_history
+
 SNAPSHOT_DIR = os.path.join("cache", "cookies")
 META_FILE = os.path.join("cookies", "meta.json")
 
@@ -321,8 +323,14 @@ def commit(snapshot_path: str | None, *, success: bool, error_text: str | None =
                 mark_merge(original, changed)
             touch_cookie_success(original)
         elif not success and original:
-            if classify_auth_error(error_text or ""):
+            marker = classify_auth_error(error_text or "")
+            if marker:
                 touch_cookie_failure(original, (error_text or "")[:300])
+                # History: an auth-classified failure is exactly the "first IG
+                # error" the operator correlates against nearest jar changes.
+                cookie_history.record(
+                    original, "commit_failure", actor="yt_dlp",
+                    note=f"auth marker: {marker} — {(error_text or '')[:180]}")
     finally:
         try:
             if os.path.exists(snapshot_path):
@@ -354,10 +362,12 @@ def _merge_snapshot_into(original_path: str, snapshot_path: str) -> int:
             real_by_key[key] = line  # last-write wins per key, but the LIST keeps all entries
 
         changed = 0
+        changed_names: list[str] = []
         for key, line in snap_entries:
             if real_by_key.get(key) != line:
                 real_by_key[key] = line
                 changed += 1
+                changed_names.append(key[2])
         if changed == 0:
             return 0
 
@@ -369,6 +379,10 @@ def _merge_snapshot_into(original_path: str, snapshot_path: str) -> int:
         lines = [real_by_key.get(key, line) for key, line in real_entries]
         content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
         _atomic_write(original_path, content, mode=prev_mode)
+        # History: record which cookies the site rotated during this run.
+        cookie_history.record(
+            original_path, "merge", actor="yt_dlp_writeback",
+            changed=changed_names)
         return changed
 
 
@@ -387,7 +401,8 @@ def purge_snapshots(original_path: str | None = None) -> None:
                 pass
 
 
-def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> int:
+def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str],
+                    actor: str = "unknown") -> int:
     """Overlay specific cookie value updates into a Netscape jar, atomically.
 
     ``updates`` maps ``(domain, name) -> new_value``. Only the named cookies are
@@ -395,7 +410,10 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> in
     login just re-issued); every other line is preserved byte-for-byte, and no
     cookie is ever deleted. The jar's previous file mode (0o444 at rest) is
     restored. Returns the number of lines actually changed, or -1 when the jar
-    was missing/unreadable and nothing could be safely written."""
+    was missing/unreadable and nothing could be safely written.
+
+    Every content-changing overlay is recorded in the cookie history
+    (``actor`` names the writer, e.g. ``instagrapi_writeback``)."""
     if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
         return -1
     entries = _parse_cookie_lines(cookie_path)
@@ -408,6 +426,7 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> in
     for i, (key, line) in enumerate(entries):
         latest_idx[(key[0], key[2])] = i  # last-write wins per (domain, name)
     changed = 0
+    changed_names: list[str] = []
     new_entries: "list[tuple[tuple[str, str, str], str]]" = list(entries)
     for (domain, name), value in updates.items():
         idx = latest_idx.get((domain, name))
@@ -418,6 +437,7 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> in
                 parts[6] = value
                 new_entries[idx] = (key, "\t".join(parts))
                 changed += 1
+                changed_names.append(name)
         else:
             # Cookie absent from the jar: append a new entry (session cookie form).
             new_key = (domain, "/", name)
@@ -425,12 +445,14 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str]) -> in
             new_entries.append((new_key, new_line))
             latest_idx[(domain, name)] = len(new_entries) - 1
             changed += 1
+            changed_names.append(name)
     if changed == 0:
         return 0
     prev_mode = get_jar_mode(cookie_path)
     lines = [line for _, line in new_entries]
     content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
     _atomic_write(cookie_path, content, mode=prev_mode)
+    cookie_history.record(cookie_path, "overlay", actor=actor, changed=changed_names)
     return changed
 
 
@@ -452,6 +474,12 @@ _AUTH_MARKERS = (
     "http error 403",
     "unauthorized",
     "account required",
+    # Instagram's audience gate: "This content isn't available to everyone:
+    # It can't be seen by certain audiences." Fires for anonymous fetches of
+    # follower/age-restricted media — i.e. the session wasn't accepted. Only
+    # drives failure bookkeeping (meta.json + history), never control flow.
+    "available to everyone",
+    "certain audiences",
 )
 
 

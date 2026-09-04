@@ -46,6 +46,11 @@ cookies/tiktok/
 cookies/twitter/
 cookies/meta.json
 cookies/*.txt
+# Cookie history tracker (fingerprints only, but jar snapshots are FULL jars —
+# they contain real session cookies and must never be committed)
+cookies/history.jsonl
+cookies/history.jsonl.1
+cookies/history_snapshots/
 # Per-site jars under cookies/ytdlp/ were scaffolded as empty templates but are
 # now ignored — an admin Replace writes REAL session cookies to these exact
 # paths, and tracked files would leak them into the public repo on next commit.

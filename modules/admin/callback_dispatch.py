@@ -517,6 +517,9 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                 shutil.copy(backup_path, file_path)
                 os.chmod(file_path, 0o444)
                 _purge_cookie_snapshots(file_path)
+                from utils import cookie_history
+                cookie_history.record(file_path, "restore", actor="admin",
+                                      note=f"restored from {backup_path}")
                 await callback_query.message.edit_text(
                     f"✅ Restored `{cookie_key}.txt` from `{backup_path}`.",
                     reply_markup=get_cookie_action_keyboard(cookie_key)
@@ -555,6 +558,26 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
                     f"❌ Failed to save backup: {e}",
                     reply_markup=get_cookie_action_keyboard(cookie_key)
                 )
+
+        elif action == "history":
+            from utils import cookie_history
+            platform = {
+                "ytcookies": "youtube",
+                "igcookies": "instagram",
+                "ttcookies": "tiktok",
+                "xcookies": "twitter",
+            }.get(cookie_key)
+            text = cookie_history.format_timeline(
+                f"{cookie_key}.txt", platform or "unknown", limit=22)
+            await callback_query.message.edit_text(
+                f"📜 **Jar History — `{cookie_key}.txt`** (newest first)\n\n"
+                f"{text}\n\n"
+                f"_Snapshots: `cookies/history_snapshots/` · raw log: "
+                f"`cookies/history.jsonl`. Correlation: read the first 💀 "
+                f"session-death and check the jar writes just above it._",
+                reply_markup=get_cookie_action_keyboard(cookie_key)
+            )
+            await callback_query.answer()
 
     # =========================================================================
     # PO Token Provider Sub-Menus
