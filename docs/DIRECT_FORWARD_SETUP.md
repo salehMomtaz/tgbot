@@ -65,9 +65,14 @@ IG_DIRECT_ENABLED=true
 IG_DIRECT_FROM_USERNAME=your_personal_ig_handle
 ```
 
-3. `IG_DIRECT_USERNAME` / `IG_DIRECT_PASSWORD` are only a **fallback** when the
-   sessionid login fails (dead session). `IG_DIRECT_TOTP_SEED` is optional for
-   accounts with TOTP-based 2FA.
+3. There is deliberately **NO username/password fallback** (removed
+   2026-08-26). The IG private API is **sessionid-only**: the client
+   bootstraps from the `sessionid` in your `igcookies.txt` jar, and a dead
+   sessionid is fixed by uploading a fresh jar — never by re-entering
+   credentials (password login hammered `accounts/login/` and deepened
+   Instagram's rate-limit on the VPS IP). The old `IG_DIRECT_USERNAME` /
+   `IG_DIRECT_PASSWORD` / `IG_DIRECT_TOTP_SEED` keys no longer exist in
+   config; stale values left in a local `.env` are inert and can be deleted.
 
 Session persistence: after the first successful login the client dumps its
 session to `direct_ig_session.json` (git-ignored, `chmod 600`) and resumes it

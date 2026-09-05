@@ -722,8 +722,26 @@ async def _run_archives(client, friends, status_msg, full=False):
             f"[FriendMedia] IG archives paused for this cycle (session dead: "
             f"{fm_ig._IG_BREAKER['reason'] or 'auth rejected'}). Upload a fresh "
             f"igcookies.txt to resume.")
+    prev_had_ig = False
     for key, friend in friends:
         label = friend.get("first_name") or friend.get("handle") or key
+        # Inter-friend IG gap (2026-09-05): consecutive friends' IG archive
+        # work back-to-back is exactly the per-friend scraping cadence
+        # Instagram's automation detector keys on. Insert a human pause
+        # between two friends that BOTH have IG work (TG-only transitions
+        # don't need one; the first friend never waits).
+        this_has_ig = (friend.get("ig_enabled") and friend.get("ig_username")
+                       and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)
+                       and not (fm_ig._IG_BREAKER["tripped_at"]
+                                and fm_ig._ig_breaker_open()))
+        if this_has_ig and prev_had_ig:
+            gap = random.uniform(
+                float(getattr(config, "FRIEND_MEDIA_FRIEND_GAP_MIN", 20) or 20),
+                float(getattr(config, "FRIEND_MEDIA_FRIEND_GAP_MAX", 60) or 60))
+            logger.info(f"[FriendMedia] IG inter-friend pause: {gap:.0f}s "
+                        f"before `{label}`.")
+            await asyncio.sleep(gap)
+        prev_had_ig = this_has_ig
         try:
             delivered, summary = await _archive_one_friend(
                 client, key, friend, status_msg=status_msg, full=full)

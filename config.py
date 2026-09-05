@@ -163,9 +163,13 @@ DIRECT_FORWARD_PROXY = os.getenv("DIRECT_FORWARD_PROXY", "").strip() or None
 
 # Instagram direct-forward
 IG_DIRECT_ENABLED = os.getenv("IG_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
-IG_DIRECT_USERNAME = os.getenv("IG_DIRECT_USERNAME", "")          # bot account login (fallback)
-IG_DIRECT_PASSWORD = os.getenv("IG_DIRECT_PASSWORD", "")          # bot account password (fallback)
-IG_DIRECT_TOTP_SEED = os.getenv("IG_DIRECT_TOTP_SEED", "")        # optional 2FA seed
+# NOTE (2026-09-05): there is deliberately NO username/password/TOTP login
+# fallback — removed 2026-08-26 because password login hammered
+# accounts/login/ and deepened Instagram's rate-limit on the VPS IP. The
+# private API is sessionid-only: a dead sessionid means the operator uploads
+# a fresh igcookies.txt, nothing else. The old IG_DIRECT_USERNAME /
+# IG_DIRECT_PASSWORD / IG_DIRECT_TOTP_SEED keys are gone from config; stale
+# values left in a local .env are inert.
 IG_DIRECT_FROM_USERNAME = os.getenv("IG_DIRECT_FROM_USERNAME", "")  # YOUR IG handle (whose DMs to accept)
 # Anti-detection (utils/ig_anti_detect.py). The private API previously rode a
 # plain Python requests TLS fingerprint (a dead giveaway); these pin the
@@ -316,3 +320,17 @@ FRIEND_MEDIA_MAX_POSTS_PER_RUN = get_env_int("FRIEND_MEDIA_MAX_POSTS_PER_RUN", 1
 FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 60)
 # Per-item send delay (seconds) to reduce FloodWait risk when archiving hundreds.
 FRIEND_MEDIA_SEND_DELAY = get_env_int("FRIEND_MEDIA_SEND_DELAY", 1)
+# IG archiver pacing (seconds, 2026-09-05). The operator-triggered full IG
+# archive is deliberately SLOW: every private-API call made during an archive
+# sleeps a random pause inside [PACE_MIN, PACE_MAX] first, and the per-item /
+# per-phase sleeps in the archive scale from the same range. The 02:55
+# session death on 2026-09-05 happened mid-archive-burst — pacing is the
+# operator-requested mitigation ("archiver is not something I want done in
+# the least possible time").
+FRIEND_MEDIA_ARCHIVE_PACE_MIN = get_env_int("FRIEND_MEDIA_ARCHIVE_PACE_MIN", 4)
+FRIEND_MEDIA_ARCHIVE_PACE_MAX = get_env_int("FRIEND_MEDIA_ARCHIVE_PACE_MAX", 10)
+# Extra pause (seconds) between two consecutive friends' IG archive work in
+# one cycle — back-to-back per-friend scraping is exactly the pattern IG's
+# automation detector keys on.
+FRIEND_MEDIA_FRIEND_GAP_MIN = get_env_int("FRIEND_MEDIA_FRIEND_GAP_MIN", 20)
+FRIEND_MEDIA_FRIEND_GAP_MAX = get_env_int("FRIEND_MEDIA_FRIEND_GAP_MAX", 60)

@@ -56,6 +56,39 @@ _ig_lock = asyncio.Lock()
 _IG_BREAKER = {"tripped_at": 0.0, "reason": ""}
 _IG_BREAKER_COOLDOWN = 3600  # 1h: one probe per cycle, never a hammer
 
+# ---------------------------------------------------------------------------
+# Archive pacing window (2026-09-05, operator request). While a full IG
+# archive runs, EVERY private-API call on the shared client first sleeps a
+# random pause inside FRIEND_MEDIA_ARCHIVE_PACE_MIN..MAX — the 02:55 session
+# death happened mid-archive-burst, and the archiver is explicitly not
+# time-sensitive ("steps time need to be more random and increased"). The
+# flag is global + timestamp-gated: the wrapper is installed once per client
+# in _build(), hourly story/post cycles are untouched while no archive runs,
+# and concurrent archives just extend the window (refcounted).
+# ---------------------------------------------------------------------------
+_IG_PACE = {"refs": 0, "until": 0.0}
+
+
+def _pace_range() -> tuple[float, float]:
+    lo = float(getattr(config, "FRIEND_MEDIA_ARCHIVE_PACE_MIN", 4) or 4)
+    hi = float(getattr(config, "FRIEND_MEDIA_ARCHIVE_PACE_MAX", 10) or 10)
+    if hi < lo:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def pace_window_enter(duration_s: float = 3 * 3600):
+    """Open (or extend) the pacing window; refcounted so overlapping
+    archives can't close each other's window early."""
+    _IG_PACE["refs"] += 1
+    _IG_PACE["until"] = max(_IG_PACE["until"], time.time() + duration_s)
+
+
+def pace_window_exit():
+    _IG_PACE["refs"] = max(0, _IG_PACE["refs"] - 1)
+    if _IG_PACE["refs"] == 0:
+        _IG_PACE["until"] = 0.0
+
 
 def _ig_auth_failure(exc: Exception) -> bool:
     """True when the exception indicates IG rejected the session (403
@@ -186,6 +219,26 @@ async def _ig_client():
                 ig_anti_detect.install_token_echo(c)
             except Exception as e:
                 logger.warning(f"[FriendMedia:ig] token-echo install degraded: {e}")
+
+            # Archive pacing hook (2026-09-05). Wrapped AFTER the token-echo
+            # install so the echo capture stays inside the chain. Flag-gated:
+            # while no archive is running this is a no-op pass-through, so
+            # hourly story/post polls keep their normal delay_range [2, 4]
+            # cadence; during an archive EVERY private-API call (including
+            # user_medias_v1's internal pagination, which delay_range does
+            # NOT pace) first sleeps a random pause inside the configured
+            # FRIEND_MEDIA_ARCHIVE_PACE_MIN..MAX window. The login calls
+            # below happen before any archive opens the window, so they are
+            # never delayed by this.
+            _paced_request = c.private_request
+
+            def _pace_gated(*args, **kwargs):
+                if time.time() < _IG_PACE["until"]:
+                    lo, hi = _pace_range()
+                    time.sleep(random.uniform(lo, hi))
+                return _paced_request(*args, **kwargs)
+
+            c.private_request = _pace_gated
 
             sid = _ig_sessionid_from_jar()
             if not sid:
@@ -427,13 +480,13 @@ async def archive_instagram_stories(key, friend, bot=None):
             # Inter-story jitter (anti-rate-limit). The cl.delay_range inside
             # instagrapi paces the per-call jitter, but the back-to-back
             # call pattern across N items still looks like scraping to IG's
-            # behavior model. A small per-item pause (0.6 - 2.4s, scaled
-            # with the burst size so big backfills space out further) makes
-            # the cumulative cadence look human.
+            # behavior model. A per-item pause scaled with the burst size
+            # (bumped 2026-09-05: the old 0.6-2s ceiling still read as a
+            # scraper cadence) makes the cumulative cadence look human.
             if idx > 1:
                 burst_n = max(len(fresh), 1)
-                base = 0.6 + (math.log2(burst_n + 1) * 0.5)
-                await asyncio.sleep(base + random.uniform(-0.3, 0.9))
+                base = 1.2 + (math.log2(burst_n + 1) * 1.0)
+                await asyncio.sleep(base + random.uniform(-0.3, 1.5))
             path = None
             try:
                 path = await _download_media(cl, story, "fmig_s_")
@@ -609,11 +662,12 @@ async def archive_instagram_posts(key, friend, bot=None):
             # Inter-post jitter (anti-rate-limit). Same idea as the story
             # loop above: scale with the burst so big backfills space out
             # further, but stay under 30s so a 10-item cycle doesn't take
-            # forever.
+            # forever. Bumped 2026-09-05 (was 0.8 + log2*0.6 ≈ 1-3s — too
+            # scraper-like once the archiver bursts became the trigger).
             if idx > 1:
                 burst_n = max(len(new_items), 1)
-                base = 0.8 + (math.log2(burst_n + 1) * 0.6)
-                await asyncio.sleep(base + random.uniform(-0.3, 1.0))
+                base = 1.5 + (math.log2(burst_n + 1) * 1.2)
+                await asyncio.sleep(base + random.uniform(-0.3, 1.8))
             path = None
             try:
                 path = await _download_media(cl, media, "fmig_p_")
@@ -704,6 +758,15 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
 
     Every fetch/download step is paced with a human-ish jitter (no zombie
     cadence) to avoid automation-flagging, per the operator's requirement.
+
+    PACING (2026-09-05, operator request): the archiver is explicitly NOT
+    time-sensitive. While it runs, every private-API call on the shared
+    client first sleeps a random pause inside
+    FRIEND_MEDIA_ARCHIVE_PACE_MIN..MAX (this also paces user_medias_v1's
+    internal pagination, which delay_range does not), and the inter-item /
+    inter-phase sleeps below scale from the same range. The archive can
+    therefore take a while — that is the point.
+
     The result is ONE zip sent to the safe destination. Returns zip path or None.
     """
     ig_user = common.ig_username_of(friend)
@@ -711,17 +774,21 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
         raise RuntimeError("no ig_username set for this friend")
     cl = await _ig_client_retry()
     loop = asyncio.get_event_loop()
-
-    # Resolve the user + profile pic.
-    def _user():
-        pk = cl.user_id_from_username(ig_user)
-        return cl.user_info_v1(pk)
-    user = await loop.run_in_executor(None, _user)
-    await _jitter()
+    lo, hi = _pace_range()
+    item_lo = 1.5
+    item_hi = max(4.0, hi * 0.6)
 
     workdir = tempfile.mkdtemp(prefix="fmig_archive_")
     counted = 0
+    pace_window_enter(duration_s=4 * 3600)
     try:
+        # Resolve the user + profile pic.
+        def _user():
+            pk = cl.user_id_from_username(ig_user)
+            return cl.user_info_v1(pk)
+        user = await loop.run_in_executor(None, _user)
+        await _jitter(lo, hi)
+
         zip_path = os.path.join(workdir, f"ig_{ig_user}_archive.zip")
 
         # 1. Profile picture.
@@ -734,7 +801,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                 counted += 1
             except Exception as e:
                 logger.warning(f"[FriendMedia:ig:archive] profile pic failed: {e}")
-        await _jitter()
+        await _jitter(lo, hi)
         if status_cb:
             await status_cb("profile pic ✓")
 
@@ -743,7 +810,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
             pk = cl.user_id_from_username(ig_user)
             return cl.user_medias_v1(pk, amount=0) or []
         medias = await loop.run_in_executor(None, _posts)
-        await _jitter()
+        await _jitter(lo, hi)
         posts = sorted(medias or [], key=lambda m: int(getattr(m, "pk", 0) or 0))
         for idx, m in enumerate(posts, start=1):
             paths = []
@@ -762,26 +829,26 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
             counted += len(paths)
             if status_cb and idx % 5 == 0:
                 await status_cb(f"posts {idx}/{len(posts)}")
-            await _jitter()
+            await _jitter(item_lo, item_hi)
 
         # 3. Highlights (each story media inside).
         def _highlights():
             pk = cl.user_id_from_username(ig_user)
             return cl.user_highlights_v1(pk, amount=0) or []
         highlights = await loop.run_in_executor(None, _highlights)
-        await _jitter()
+        await _jitter(lo, hi)
         if status_cb:
             await status_cb(f"highlights: {len(highlights or [])}")
         consecutive_failures = 0
-        for hi, hl in enumerate(highlights or [], start=1):
+        for hi_idx, hl in enumerate(highlights or [], start=1):
             try:
                 full = await loop.run_in_executor(None, cl.highlight_info_v1, str(hl.pk))
                 items = getattr(full, "items", None) or []
                 for si, story in enumerate(items or [], start=1):
                     paths = await loop.run_in_executor(
-                        None, _download_media_urls, cl, story, workdir, f"hl{hi}_{si}_")
+                        None, _download_media_urls, cl, story, workdir, f"hl{hi_idx}_{si}_")
                     counted += len(paths)
-                    await _jitter()
+                    await _jitter(item_lo, item_hi)
                 consecutive_failures = 0
             except Exception as e:
                 if _ig_auth_failure(e):
@@ -790,7 +857,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                     # exact burst that ended the session for good. Abort now.
                     _ig_breaker_trip(str(e))
                     raise IGUnavailable(
-                        f"session died mid-archive at highlight {hi}: {e}")
+                        f"session died mid-archive at highlight {hi_idx}: {e}")
                 # Instagram also kills a dying session with bare
                 # {"message":"","status":"fail"} (no login_required marker) —
                 # the exact payload highlights 2-8 returned AFTER the first
@@ -803,10 +870,14 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                                      f"({str(e)[:80]})")
                     raise IGUnavailable(
                         f"session unusable mid-archive (3 consecutive failures "
-                        f"at highlight {hi}): {e}")
-                logger.warning(f"[FriendMedia:ig:archive] highlight {hi} failed: {e}")
+                        f"at highlight {hi_idx}): {e}")
+                logger.warning(f"[FriendMedia:ig:archive] highlight {hi_idx} failed: {e}")
             if status_cb:
-                await status_cb(f"highlight {hi}/{len(highlights or [])}")
+                await status_cb(f"highlight {hi_idx}/{len(highlights or [])}")
+            # ALWAYS breathe between highlight reels — before this fix a
+            # failing highlight went straight into the next one with no
+            # human gap at all.
+            await _jitter(2.0, hi)
 
         if status_cb:
             await status_cb("zipping…")
@@ -838,3 +909,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
         except Exception:
             pass
         raise
+    finally:
+        # Release the archive pacing window no matter how we exit (success,
+        # failure, or cancellation) — hourly cycles must never inherit it.
+        pace_window_exit()

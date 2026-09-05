@@ -393,10 +393,15 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     sends photos, videos, reels, story shares, tweet shares and plain links
     into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi` (sync → always
     via `run_in_executor`; bootstraps its login from the `sessionid` in the
-    igcookies jar). **There is NO password login fallback (removed 2026-08-26)**
+    igcookies jar).     **There is NO password login fallback (removed 2026-08-26)**
     — password login hammered `accounts/login/` and deepened Instagram's 429
     rate-limit on the VPS IP, so `_ig_login` is sessionid-only (resume persisted
     session → `login_by_sessionid` from the jar → else raise, never credentials).
+    The config keys `IG_DIRECT_USERNAME`/`IG_DIRECT_PASSWORD`/
+    `IG_DIRECT_TOTP_SEED` were deleted from config.py + .env.example on
+    2026-09-05 (nothing ever read them post-removal; stale values in a local
+    `.env` are inert — delete them at will). The sessionid is either valid or
+    it isn't; the ONLY recovery is the operator uploading a fresh jar.
     Each platform runs in its own
     contained loop (`try/except` per poll; LoginRequired → re-login once).
     **No third-party APIs.** Downloads route through the normal yt-dlp
@@ -939,6 +944,21 @@ Don't port it to Go.
   the old 320×320+extension heuristic misrouted them into `send_photo` →
   `[400 PHOTO_EXT_INVALID]` (TikTok photo share, 2026-09-04 13:39). Sniff
   first; rename the file to the sniffed extension before send_photo.
+  **IG archiver pacing (2026-09-05, operator requirement — do not tighten):**
+  the archiver is explicitly NOT time-sensitive. While `archive_instagram_full`
+  runs it opens a pacing window (`pace_window_enter`, refcounted, closed in a
+  `finally`); the client's `private_request` is wrapped once per build
+  (`_pace_gated` in `_build`, installed AFTER `install_token_echo`) so EVERY
+  private-API call during the window — including `user_medias_v1`'s internal
+  pagination, which `delay_range` does NOT pace — first sleeps a random pause
+  in `FRIEND_MEDIA_ARCHIVE_PACE_MIN..MAX` (default 4-10 s). Per-item/
+  inter-highlight sleeps scale from the same range (items 1.5-6 s, between
+  highlight reels 2-10 s, ALWAYS between reels — the 02:55 incident ran
+  failing highlights back-to-back with no gap). Hourly story/post cycles get
+  bumped per-item bases (1.2-2.7 s / 1.5-3.6 s) and `_run_archives` inserts a
+  `FRIEND_MEDIA_FRIEND_GAP_MIN..MAX` (default 20-60 s) pause between two
+  consecutive friends that both have IG work. A full archive of a friend with
+  many posts/highlights can take 30+ minutes — that is by design, not a bug.
 
 ## When porting from balebot
 

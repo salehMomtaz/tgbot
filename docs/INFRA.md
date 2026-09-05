@@ -581,6 +581,13 @@ This document captures the key technical learnings from implementing **full yt-d
 2. **No fallback credentials**: `IG_DIRECT_USERNAME` / `IG_DIRECT_PASSWORD` not set in `.env`.
 3. **Worker behavior**: The IG worker (`_instagram_worker`) retries login on poll cadence but **cannot recover without fresh cookies or credentials**.
 
+> **2026-09-05 note:** this section is a HISTORICAL record from 2026-08-12,
+> when a password fallback still existed. The fallback was **removed
+> 2026-08-26** — the IG private API is sessionid-only by design (password
+> login deepened the rate-limit). The `IG_DIRECT_USERNAME` /
+> `IG_DIRECT_PASSWORD` / `IG_DIRECT_TOTP_SEED` config keys no longer exist;
+> a dead sessionid is fixed only by uploading a fresh `igcookies.txt`.
+
 ### Why Cookies Went Stale
 - Instagram rotates `sessionid`/`csrftoken` on **every response** via `Set-Cookie`.
 - The bot's **cookie write-back** mechanism (`utils/cookie_manager.py`) captures these rotations *only on successful yt-dlp runs*.

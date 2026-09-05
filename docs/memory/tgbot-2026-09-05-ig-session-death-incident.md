@@ -99,11 +99,49 @@ automatically (no restart needed):
 - Friend Media re-arms on the jar mtime change within one cycle.
 - Direct-forward picks up the new sessionid on its next login backoff retry.
 
+## Follow-up (same day, operator request): archiver pacing
+
+The operator confirmed the archiver is explicitly **not** time-sensitive
+("steps time need to be more random and increased"), and asked for
+confirmation that no password login fallback exists (it doesn't — see
+below). Shipped:
+
+- **Password-fallback cleanup**: the fallback CODE was already gone
+  (removed 2026-08-26), but its dead config definitions
+  (`IG_DIRECT_USERNAME` / `IG_DIRECT_PASSWORD` / `IG_DIRECT_TOTP_SEED` in
+  config.py), the .env.example template entries, the stale values in the
+  live .env, and a stale line in docs/DIRECT_FORWARD_SETUP.md all
+  survived and made it look like a fallback might exist. All removed;
+  config.py + .env.example now carry an explicit "sessionid-only, no
+  credentials fallback" note. The IG private API is either fed a valid
+  sessionid or waits for the operator to upload a fresh jar.
+- **Pace window for the full archive**: `archive_instagram_full` opens a
+  refcounted window (`pace_window_enter/exit`); the shared client's
+  `private_request` is wrapped once per build (flag-gated, installed after
+  the token-echo wrapper) so every private-API call during an archive —
+  including `user_medias_v1`'s internal pagination, which `delay_range`
+  does not pace — sleeps a random pause in
+  `FRIEND_MEDIA_ARCHIVE_PACE_MIN..MAX` (default 4-10 s) first.
+- **Inter-step delays scale from the same range**: per-post/per-highlight-
+  item 1.5-6 s, between highlight reels 2-10 s (previously a failing
+  highlight went straight into the next one with NO gap), phase
+  transitions 4-10 s.
+- **Inter-friend gap**: `_run_archives` pauses
+  `FRIEND_MEDIA_FRIEND_GAP_MIN..MAX` (default 20-60 s) between two
+  consecutive friends that both have IG work.
+- **Hourly story/post item jitters bumped**: stories 1.2-2.7 s+ per item
+  (was 0.6-2 s), posts 1.5-3.6 s+ (was 0.8-2.4 s).
+
+New .env knobs: `FRIEND_MEDIA_ARCHIVE_PACE_MIN/MAX` (4/10),
+`FRIEND_MEDIA_FRIEND_GAP_MIN/MAX` (20/60). A full archive of a friend
+with many posts/highlights now takes 30+ minutes by design.
+
 ## Verification
 
 - All unit checks pass (breaker open/close/re-arm, half-open probe,
   auth-failure classification incl. `login_by_sessionid` underscore marker,
-  noise filter idempotence, JPEG/PNG/WebP/GIF magic sniffing, RIFF≠WebP).
+  noise filter idempotence, JPEG/PNG/WebP/GIF magic sniffing, RIFF≠WebP,
+  pace-window refcounting, gated pacing 4-10 s vs 0 ms pass-through).
 - `python -m py_compile` clean repo-wide; pyright 0 errors on touched files.
 - Live: post-restart cycle shows friend 1 tripping the breaker with ONE
   warning, friends 2-12 skipped instantly, zero instagrapi traceback spam
