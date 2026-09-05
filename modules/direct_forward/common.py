@@ -24,6 +24,66 @@ IG_POST_RE = re.compile(r"(instagram\.com/(?:reel|reels|p|tv|stories)/[^\s?]+)")
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
 
+# Magic-byte photo signatures (the same class of check as
+# thumbnails.py::_looks_like_image). Extensions lie: yt-dlp can hand us a
+# photo post whose file has NO .jpg/.png suffix, and
+# probe_video_dimensions()'s "no video stream" fallback (320, 320) then
+# misroutes it into send_photo with a bogus extension → Telegram rejects
+# with [400 PHOTO_EXT_INVALID] (seen 2026-09-04 13:39 on a TikTok photo
+# share). Sniffing the bytes is the only reliable answer.
+_PHOTO_MAGIC = (
+    (b"\xff\xd8\xff", ".jpg"),          # JPEG
+    (b"\x89PNG\r\n\x1a\n", ".png"),    # PNG
+    (b"RIFF", ".webp"),                 # WebP (RIFF....WEBP)
+    (b"GIF8", ".gif"),                  # GIF
+)
+
+
+def sniff_image_extension(path: str) -> str | None:
+    """Return '.jpg'/'.png'/'.webp'/'.gif' when the file at ``path`` starts
+    with a known image magic signature, else None. Best-effort: any I/O
+    error means "not an image"."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except Exception:
+        return None
+    if not head:
+        return None
+    for magic, ext in _PHOTO_MAGIC:
+        if head.startswith(magic):
+            # WebP needs the WEBP tag in bytes 8-12; RIFF alone could be WAV.
+            if ext == ".webp" and b"WEBP" not in head:
+                continue
+            return ext
+    return None
+
+
+def normalize_photo_file(file_path: str) -> str:
+    """Ensure a photo file on disk carries an extension Telegram accepts.
+
+    ``send_photo`` requires the *file name* to end in a photo extension when
+    the media can't be inferred otherwise. If the sniffed image type differs
+    from the current suffix, the file is RENAMED (same dir, same stem, new
+    extension) and the new path is returned; on any mismatch-free/no-image
+    case the input path is returned unchanged.
+    """
+    ext = sniff_image_extension(file_path)
+    if not ext:
+        return file_path
+    base, cur = os.path.splitext(file_path)
+    if cur.lower() == ext:
+        return file_path
+    # cur may be "" (no extension), ".bin", ".image", ".mp4"-on-a-jpeg, etc.
+    new_path = base + ext
+    try:
+        if os.path.exists(new_path):
+            os.remove(new_path)
+        os.rename(file_path, new_path)
+        return new_path
+    except Exception:
+        return file_path
+
 
 def _poll_interval() -> float:
     """Effective delay between inbox sweeps: base ± jitter.
@@ -149,8 +209,17 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
 
         file_path = result["file_path"]
         width, height, _dur = probe_video_dimensions(file_path)
-        is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
-            (".jpg", ".jpeg", ".png", ".webp"))
+        # Photo routing: byte-sniff FIRST (extensions and the 320×320 probe
+        # fallback both lie — the PHOTO_EXT_INVALID incident), then fall back
+        # to the extension/probe heuristics for non-image files that
+        # instagrapi/yt-dlp delivered without a usable suffix.
+        sniffed_photo = sniff_image_extension(file_path)
+        if sniffed_photo:
+            file_path = normalize_photo_file(file_path)
+            is_photo = True
+        else:
+            is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".webp"))
 
         if is_photo:
             await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)

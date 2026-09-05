@@ -43,6 +43,71 @@ _IG_CLIENT_TTL = 1800  # seconds
 _ig_client_cache = {"cl": None, "ts": 0.0}
 _ig_lock = asyncio.Lock()
 
+# ---------------------------------------------------------------------------
+# Circuit breaker — the 2026-09-05 incident: the IG session died at 02:55 and
+# every hourly cycle then made 12 friends × (stories + posts) login attempts,
+# each burning ~4 private-API 403s (instagrapi's login_by_sessionid fallback
+# probes users/<id>/info/ AND users/<id>/info_stream/) ≈ 100 authenticated
+# requests/hour against a dead session — pure checkpoint fuel. The breaker
+# trips on the FIRST auth-classified login failure and grounds all friend-
+# media IG calls until either the jar changes on disk (operator re-upload)
+# or the cooldown lapses. Non-auth errors (network) don't trip it.
+# ---------------------------------------------------------------------------
+_IG_BREAKER = {"tripped_at": 0.0, "reason": ""}
+_IG_BREAKER_COOLDOWN = 3600  # 1h: one probe per cycle, never a hammer
+
+
+def _ig_auth_failure(exc: Exception) -> bool:
+    """True when the exception indicates IG rejected the session (403
+    login_required / login wall / checkpoint), as opposed to a transient
+    network/timeout error that should NOT trip the breaker."""
+    from instagrapi.exceptions import LoginRequired, ChallengeRequired
+    if isinstance(exc, (LoginRequired, ChallengeRequired)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "login_required", "exceeded 30 redirects", "login_by_sessionid",
+        "login by sessionid", "checkpoint", "login wall",
+    ))
+
+
+def _ig_breaker_open() -> bool:
+    """True while the breaker is tripped and the cooldown hasn't lapsed."""
+    if not _IG_BREAKER["tripped_at"]:
+        return False
+    if _jar_mtime() > _IG_BREAKER["tripped_at"]:
+        # The jar changed on disk (operator re-upload / refresher rotation)
+        # — give the new session a chance and re-arm.
+        logger.info("[FriendMedia:ig] jar changed since breaker tripped — re-arming.")
+        _IG_BREAKER.update({"tripped_at": 0.0, "reason": ""})
+        return False
+    if time.time() - _IG_BREAKER["tripped_at"] >= _IG_BREAKER_COOLDOWN:
+        # Cooldown lapsed: probe once on the next call (half-open). A fresh
+        # failure re-trips for another hour, so the worst case is ONE failed
+        # login per cycle — exactly the anti-hammering budget we want.
+        _IG_BREAKER["tripped_at"] = time.time()
+        return False
+    return True
+
+
+def _ig_breaker_trip(reason: str):
+    now = time.time()
+    if not _IG_BREAKER["tripped_at"] or now - _IG_BREAKER["tripped_at"] > 300:
+        logger.warning(f"[FriendMedia:ig] IG session unusable ({reason}) — "
+                       f"pausing IG archives for ~{_IG_BREAKER_COOLDOWN // 60}m "
+                       f"(one login probe per cycle until the jar is re-uploaded).")
+        # Mirror the trip into cookies/history.jsonl so the in-chat jar
+        # History view (Admin → 🍪 → Instagram → 📜) shows WHY the archives
+        # went quiet, correlated with the jar's own write events.
+        try:
+            from utils import cookie_history
+            cookie_history.record(None, "ig_session_dead", platform="instagram",
+                                  actor="FriendMedia/IG",
+                                  note=f"archives paused: {str(reason)[:160]}")
+        except Exception:
+            pass
+    _IG_BREAKER.update({"tripped_at": now, "reason": str(reason)})
+
 
 def _jar_mtime():
     try:
@@ -77,6 +142,10 @@ async def _ig_client():
     Raises IGUnavailable with the REASON when unavailable — a silent None made
     the admin summary say "0 new IG stories" while the real problem was a dead
     cookie jar."""
+    if _ig_breaker_open():
+        raise IGUnavailable(
+            f"IG archives paused (session dead: {_IG_BREAKER['reason'] or 'auth failure'}) "
+            f"— upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars")
     async with _ig_lock:
         now = time.time()
         cl = _ig_client_cache["cl"]
@@ -138,6 +207,11 @@ async def _ig_client():
         try:
             cl = await loop.run_in_executor(None, _build)
         except Exception as e:
+            if _ig_auth_failure(e):
+                # The session is dead/rejected — trip the breaker so the OTHER
+                # 11 IG friends this cycle don't each retry the same dead
+                # login (the 02:55 incident made ~100 auth'd 403s/hour).
+                _ig_breaker_trip(str(e))
             raise IGUnavailable(str(e))
         _ig_client_cache["cl"] = cl
         _ig_client_cache["ts"] = now
@@ -153,6 +227,12 @@ async def _ig_client_retry():
     try:
         return await _ig_client()
     except IGUnavailable:
+        # Auth-rejected login → the breaker is tripped; rebuilding from the
+        # SAME dead jar only doubles the 403s (the 02:55 incident pattern).
+        # A rebuild is only worthwhile for a NON-auth failure (network glitch
+        # / mid-run rotation that has not been classified as a dead session).
+        if _ig_breaker_open():
+            raise
         # Force a one-time rebuild from the freshest jar (the cache may hold a
         # session Instagram just rotated).
         async with _ig_lock:
@@ -323,7 +403,12 @@ async def archive_instagram_stories(key, friend, bot=None):
         except Exception as first:
             # Session rotated mid-run (login-wall redirect loop) — rebuild from
             # the freshest jar sessionid ONCE and retry, instead of reporting
-            # "IG stories skipped" and dropping live stories.
+            # "IG stories skipped" and dropping live stories. An auth-classified
+            # failure (dead session) is NOT retried here: the breaker is already
+            # tripped and re-login against the same dead jar only burns more
+            # 403s (the 02:55 incident pattern).
+            if _ig_auth_failure(first):
+                raise
             logger.warning(f"[FriendMedia:ig] stories fetch failed ({first}); "
                            f"rebuilding client and retrying once for @{ig_user}.")
             cl = await _ig_client_retry()
@@ -407,6 +492,10 @@ async def archive_instagram_profile_pic(key, friend, bot=None):
         try:
             ig_pk, info = await loop.run_in_executor(None, _info)
         except Exception as first:
+            # Same policy as the stories path: retry only non-auth failures
+            # (a dead session must not be re-probed per friend).
+            if _ig_auth_failure(first):
+                raise
             logger.warning(f"[FriendMedia:ig] profile_pic info fetch failed ({first}); "
                            f"rebuilding client and retrying once for @{ig_user}.")
             cl = await _ig_client_retry()
@@ -493,6 +582,9 @@ async def archive_instagram_posts(key, friend, bot=None):
         try:
             medias = await loop.run_in_executor(None, _fetch)
         except Exception as first:
+            # Same policy as the stories path: retry only non-auth failures.
+            if _ig_auth_failure(first):
+                raise
             logger.warning(f"[FriendMedia:ig] posts fetch failed ({first}); "
                            f"rebuilding client and retrying once for @{ig_user}.")
             cl = await _ig_client_retry()
@@ -659,6 +751,13 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                 paths = await loop.run_in_executor(
                     None, _download_media_urls, cl, m, workdir, f"post_{idx}_")
             except Exception as e:
+                if _ig_auth_failure(e):
+                    # The session died mid-archive (the 02:55 incident: every
+                    # later step 403s anyway) — abort instead of hammering a
+                    # dead session through the remaining posts/highlights.
+                    _ig_breaker_trip(str(e))
+                    raise IGUnavailable(
+                        f"session died mid-archive at post {idx}: {e}")
                 logger.warning(f"[FriendMedia:ig:archive] post {idx} failed: {e}")
             counted += len(paths)
             if status_cb and idx % 5 == 0:
@@ -673,6 +772,7 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
         await _jitter()
         if status_cb:
             await status_cb(f"highlights: {len(highlights or [])}")
+        consecutive_failures = 0
         for hi, hl in enumerate(highlights or [], start=1):
             try:
                 full = await loop.run_in_executor(None, cl.highlight_info_v1, str(hl.pk))
@@ -682,7 +782,28 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                         None, _download_media_urls, cl, story, workdir, f"hl{hi}_{si}_")
                     counted += len(paths)
                     await _jitter()
+                consecutive_failures = 0
             except Exception as e:
+                if _ig_auth_failure(e):
+                    # 2026-09-05 02:55: highlight 1 returned 403 login_required
+                    # and highlights 2-8 were STILL fetched back-to-back — the
+                    # exact burst that ended the session for good. Abort now.
+                    _ig_breaker_trip(str(e))
+                    raise IGUnavailable(
+                        f"session died mid-archive at highlight {hi}: {e}")
+                # Instagram also kills a dying session with bare
+                # {"message":"","status":"fail"} (no login_required marker) —
+                # the exact payload highlights 2-8 returned AFTER the first
+                # 403 in the 02:55 incident. Treat a streak of consecutive
+                # empty-fail payloads as a dead session too: abort the burst
+                # instead of feeding it.
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    _ig_breaker_trip(f"3 consecutive highlight failures "
+                                     f"({str(e)[:80]})")
+                    raise IGUnavailable(
+                        f"session unusable mid-archive (3 consecutive failures "
+                        f"at highlight {hi}): {e}")
                 logger.warning(f"[FriendMedia:ig:archive] highlight {hi} failed: {e}")
             if status_cb:
                 await status_cb(f"highlight {hi}/{len(highlights or [])}")

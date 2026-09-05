@@ -916,6 +916,29 @@ Don't port it to Go.
   `dotenv.set_key('.env')` + `setattr(config)`. Kurigram treats digit-string
   ids as PHONE numbers — pass user ids as `int`. `search_contacts` returns a
   `FoundContacts` object (use `.users`, not a bare list).
+  **IG circuit breaker (2026-09-05):** when the IG session dies
+  auth-classified (`LoginRequired` / redirect-loop / checkpoint —
+  `_ig_auth_failure`), `modules/friend_media/instagram.py::_ig_breaker_trip`
+  grounds ALL friend-media IG calls for 1 h (one probe per cycle, re-arms the
+  moment the jar's mtime changes = operator re-upload). Without it a dead
+  session meant 12 friends × 2 login attempts × 4 private-API 403s per hour
+  (~100 auth'd requests/h of checkpoint fuel — the 02:55 incident). Mid-archive
+  bursts abort on the first auth failure or 3 consecutive non-auth highlight
+  failures. The operator gets ONE DM per dead-session streak
+  (`_IG_DEAD_ALERTED` in admin.py), and `archive_instagram_full`'s remaining
+  posts/highlights are skipped, not hammered. Related: instagrapi's
+  dead-session fallback probe (`user_stream_by_id_v1`) logs ERROR+traceback
+  per attempt — `_install_login_noise_filter` (utils/ig_anti_detect.py,
+  installed from `install_transport`) drops exactly those records so the log
+  channel carries OUR single actionable line instead of 158 tracebacks.
+  Do NOT remove the breaker or "simplify" it back to per-friend retries.
+  **Direct-forward photo routing is magic-bytes, not extensions**
+  (`sniff_image_extension` / `normalize_photo_file` in
+  modules/direct_forward/common.py, used by `_download_and_deliver` and
+  `_x_deliver_tweet`): yt-dlp photo posts can carry no/bogus extensions, and
+  the old 320×320+extension heuristic misrouted them into `send_photo` →
+  `[400 PHOTO_EXT_INVALID]` (TikTok photo share, 2026-09-04 13:39). Sniff
+  first; rename the file to the sniffed extension before send_photo.
 
 ## When porting from balebot
 

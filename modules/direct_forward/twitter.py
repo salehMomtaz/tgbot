@@ -643,8 +643,15 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
             )
             file_path = result["file_path"]
             width, height, _dur = probe_video_dimensions(file_path)
-            is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
-                (".jpg", ".jpeg", ".png", ".webp"))
+            # Byte-sniff first: extensions + the 320×320 probe fallback both
+            # mislabel photo posts (PHOTO_EXT_INVALID incident, 2026-09-04).
+            from modules.direct_forward.common import sniff_image_extension, normalize_photo_file
+            if sniff_image_extension(file_path):
+                file_path = normalize_photo_file(file_path)
+                is_photo = True
+            else:
+                is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
+                    (".jpg", ".jpeg", ".png", ".webp"))
             if is_photo:
                 await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
             else:

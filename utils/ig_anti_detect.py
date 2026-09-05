@@ -101,6 +101,51 @@ _DEFAULT_IMPERSONATE = "chrome136"
 
 _DECODE_PATCHED = False  # CurlStreamResponse._decode signature shim: once per process
 
+_LOGIN_NOISE_FILTERED = False  # instagrapi login-fallback spam filter: once per process
+
+_NOISE_MARKERS = (
+    "Client error user_stream_by_id_v1",   # login_by_sessionid fallback probe
+    "Client error user_info_by_id_v1",     # same family, user_info_v1 probe
+)
+
+
+def _install_login_noise_filter():
+    """Drop instagrapi's DEAD-SESSION probe noise from the logs.
+
+    ``login_by_sessionid`` validates a session by calling ``user_info_v1``;
+    when the session is dead, instagrapi catches the 403 and probes
+    ``user_stream_by_id_v1`` as a fallback, and that second probe logs an
+    ERROR **with a full traceback** per attempt. With 12 IG friends × an
+    hourly cycle this alone produced ~158 ERROR posts in the log channel
+    over 12h (2026-09-05 incident) — the actionable signal ("IG session is
+    dead, re-upload the jar") is already logged once by OUR code
+    (friend_media's breaker / direct_forward's re-login handler); the
+    per-probe tracebacks are pure noise. This filter drops only those
+    records; every other instagrapi error still passes through.
+    Idempotent per process.
+    """
+    global _LOGIN_NOISE_FILTERED
+    if _LOGIN_NOISE_FILTERED:
+        return
+    try:
+        ig_user_logger = logging.getLogger("instagrapi.mixins.user")
+
+        def _drop_login_probe_noise(record):
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return True
+            return not any(marker in msg for marker in _NOISE_MARKERS)
+
+        # A logger-level filter applies before the logger's own level check
+        # propagates the record to root, so the tracebacks never reach any
+        # handler (file mirror + Telegram channel).
+        ig_user_logger.addFilter(_drop_login_probe_noise)
+        _LOGIN_NOISE_FILTERED = True
+        logger.info("[IG anti-detect] instagrapi dead-session probe noise filter installed")
+    except Exception as e:
+        logger.warning(f"[IG anti-detect] login-noise filter install failed: {e}")
+
 
 def _patch_decode_signature():
     """Compat shim: curl-adapter 1.1.0's ``CurlStreamResponse._decode`` has the
@@ -174,6 +219,9 @@ def install_transport(cl, impersonate: str = "chrome136") -> bool:
     requests adapter.
     """
     _patch_private_retry(impersonate)
+    # Every client build passes through here — the natural once-per-process
+    # hook for the dead-session log-noise filter.
+    _install_login_noise_filter()
 
     adapter_cls = _load_curl_adapter()
     if not adapter_cls:

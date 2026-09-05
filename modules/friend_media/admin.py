@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # time keeps the user account under flood limits and deliveries ordered.
 _ARCHIVE_LOCK = asyncio.Lock()
 
+# One operator DM per dead-session streak (not one per friend per cycle —
+# the 2026-09-05 incident would have sent 12 identical alerts/hour). The
+# streak identity is the breaker's tripped_at: a re-arm (jar re-upload or
+# cooldown probe success) sets a new tripped_at on the next failure, so a
+# NEW death always alerts again.
+_IG_DEAD_ALERTED = {"streak": 0.0}
+
 _ENV_FILE = ".env"
 
 
@@ -626,8 +633,15 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
                     key, friend, status_msg=status_msg, full=full)
                 parts.append(tg_summary)
                 delivered_total += _count_new_in_summary(tg_summary)
+            # The IG breaker (see modules/friend_media/instagram.py) opens when
+            # the session is auth-dead: all IG sub-archives are then skipped
+            # for this friend without any network call, and _run_archives logs
+            # ONE shared "IG archives paused" line per cycle instead of a
+            # "⚠️ IG ... skipped" summary per friend.
+            ig_paused = bool(fm_ig._IG_BREAKER["tripped_at"]) and fm_ig._ig_breaker_open()
             if (friend.get("ig_enabled") and friend.get("ig_username")
-                    and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)):
+                    and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)
+                    and not ig_paused):
                 # One-time profile picture on the first cycle (per
                 # operator's "current stories + profile picture on add"
                 # request). After the first successful delivery we set
@@ -696,6 +710,18 @@ async def _run_archives(client, friends, status_msg, full=False):
     total_new = 0
     checked = 0
     failed_keys = []
+    # When the IG session is known-dead (breaker tripped), the per-friend IG
+    # sub-archives all raise IGUnavailable without touching the network —
+    # but that still produces a "⚠️ IG ... skipped" summary line per friend,
+    # every cycle, for hours (the 2026-09-05 pattern: 12 lines/hour of
+    # identical noise). Collapse it to ONE honest line per cycle here.
+    ig_paused = False
+    if fm_ig._IG_BREAKER["tripped_at"] and fm_ig._ig_breaker_open():
+        ig_paused = True
+        logger.warning(
+            f"[FriendMedia] IG archives paused for this cycle (session dead: "
+            f"{fm_ig._IG_BREAKER['reason'] or 'auth rejected'}). Upload a fresh "
+            f"igcookies.txt to resume.")
     for key, friend in friends:
         label = friend.get("first_name") or friend.get("handle") or key
         try:
@@ -717,6 +743,24 @@ async def _run_archives(client, friends, status_msg, full=False):
                 # in last_count for the console.
                 logger.info(
                     f"[FriendMedia] `{label}` ({key}): {summary} (no new material)")
+            # A tripped IG breaker means every remaining IG friend this cycle
+            # will "skip" — tell the operator ONCE per dead-session streak
+            # instead of logging 12 identical skip warnings every hour.
+            if (fm_ig._IG_BREAKER["tripped_at"]
+                    and _IG_DEAD_ALERTED["streak"] != fm_ig._IG_BREAKER["tripped_at"]):
+                _IG_DEAD_ALERTED["streak"] = fm_ig._IG_BREAKER["tripped_at"]
+                try:
+                    await client.send_message(
+                        config.SYSTEM_CREATOR_ID,
+                        ("💀 **Instagram session is dead** (Friend Media Archiver)\n\n"
+                         f"Reason: `{fm_ig._IG_BREAKER['reason'] or 'auth rejected'}`\n\n"
+                         "IG stories/posts archives are paused for all friends until the "
+                         "jar is re-uploaded (one login probe per cycle). The direct-forward "
+                         "IG worker has the same problem — a single fresh `igcookies.txt` "
+                         "upload fixes both:\n**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
+                         "Recent jar changes: Admin Console → 🍪 Cookie Jars → Instagram → 📜 History."))
+                except Exception as e:
+                    logger.warning(f"[FriendMedia] IG dead-session alert failed: {e}")
         except Exception as e:
             logger.exception(f"[FriendMedia] archive {key} failed: {e}")
             failed_keys.append(key)

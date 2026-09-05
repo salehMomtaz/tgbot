@@ -694,3 +694,29 @@ exactly like scripted scraping to Instagram's behavior model.
 bypass paths.** Each is independently failing-safe (degrades to a
 no-op on a missing dep / library change) and wired into
 `_instagram_worker` in `modules/direct_forward/instagram.py`.
+
+---
+
+## Fourth incident (2026-09-05 02:55 UTC) — private-API session death mid-archive
+
+Full analysis: `docs/memory/tgbot-2026-09-05-ig-session-death-incident.md`.
+Summary:
+
+- The IG **private API** killed the session mid full-archive (highlight
+  `feed/reels_media/` → 403 login_required) while the **web surface** kept
+  accepting the same sessionid — so the headless refresher's logged-in gate
+  correctly passed and overlaid device-cookie rotations (overlay never
+  touches `sessionid`; the jar was NOT corrupted — verified via
+  `cookies/history.jsonl` fingerprints).
+- The failure mode is burst-triggered (posts pagination + 8 highlight
+  fetches in ~90 s), not jar corruption.
+- Hardening: Friend Media IG circuit breaker (1 h grounding, re-arms on jar
+  mtime change), mid-archive abort on auth failure / 3 consecutive
+  highlight failures, one operator DM per dead-session streak, breaker
+  events recorded as `ig_session_dead` in `cookies/history.jsonl`, and a
+  log filter that drops instagrapi's `user_stream_by_id_v1` dead-session
+  probe traceback spam (~158 ERROR posts/12 h → 1 actionable line).
+- Recovery is ALWAYS the same operator action: upload a fresh
+  `igcookies.txt` (Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace). Both
+  consumers (direct-forward IG worker, Friend Media) pick it up without a
+  restart.
