@@ -156,3 +156,47 @@ throttling.
   confirming the allowlist. DM relays resumed (X polling, TikTok WS connected,
   IG retrying) — **IG is down only because its `sessionid` is dead and needs a
   fresh operator upload; that is not code-fixable.**
+
+## 5. Follow-up: why downtime items were missing + hardening shipped
+
+After the operator uploaded a fresh `igcookies.txt` (15:40) and still reported
+"nothing from downtime on IG/X/TikTok", the relay paths were traced:
+
+- **IG was working again** — the fresh jar logged in at 15:45 and the gap fetch
+  replayed 22 pending items (paced relays from 15:49). The earlier silence was
+  purely the dead `sessionid`.
+- **X lost its backlog to the Abort cache wipe.** At 03:44:42 "Abort
+  Operations" ran `shutil.rmtree("cache")`, which deletes
+  `cache/xchat_bridge_state.json` **even though the hourly cache cleaner
+  protects it**. The Deno bridge restarted at 03:45:26, saw no state file, and
+  logged `first run — cursor primed to <newest>, backlog skipped` — so
+  everything before that point was silently dropped. (The X cursor lives in
+  the XChat `sequenceId` space, shared with the worker's `last_id`; a wiped
+  bridge cursor cannot be reconstructed.)
+- **TikTok is push-only.** `_tt_run_ws` connects, sends the cmd-1001
+  `get_stranger_conversation_list` frame and then only relays live cmd-500
+  pushes; there is no history fetch, so a long disconnect has no backfill.
+  Not a regression — a protocol limitation (a future enhancement could request
+  the conversation page explicitly).
+- **IG now also alerts on the startup login-failure path** (it previously only
+  logged; the 2-consecutive-failure DM only covered the mid-poll re-login path).
+
+### Hardening shipped this follow-up
+1. `Abort Operations` is a **transient pause**: `signal_all_stop()` +
+   `reset_stop_flag()` after `ABORT_AUTO_CLEAR_SECONDS` (30 s); the
+   direct-forward / friend-media / cookie-refresher loops use
+   `wait_if_stopped()` (pause) instead of `return`. An abort can no longer
+   disable the relays until a restart.
+2. The abort cache purge now preserves `PROTECTED_CACHE_FILES` (shared with the
+   hourly cleaner) — no more XChat-cursor deletion.
+3. **Relay watchdog** (`modules/direct_forward/supervisor.py`): workers stamp
+   `mark_worker_alive(platform)`; the supervisor DMs the operator when an
+   enabled platform is silent > 30 min (15 min boot grace), once per streak.
+4. The Telegram log channel drops the per-file `Retrying "upload.SaveFilePart"`
+   WARNING spam (keeps the terminal ERROR + the lossless file mirror).
+5. **X is at-least-once**: the cursor is not advanced past a failed relay, with
+   a 3-strike cap so one poison message can't block the queue forever.
+
+Verified: `wait_if_stopped` resumes ~2 s after the flag clears; heartbeats
+update; the protected-file purge keeps `xchat_bridge_state.json` and removes
+job dirs; `py_compile` + `bash -n` + `go test` all clean.

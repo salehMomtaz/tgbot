@@ -550,6 +550,22 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     bumps inside the owned write. The only remaining `_save_state` caller is
     inside `_merge_state_save` itself — keep it that way.
 
+    **Abort Operations is a transient PAUSE, not an off switch (2026-09-15).**
+    `utils/shared.signal_all_stop()` sets the flag; the abort handler schedules
+    `reset_stop_flag()` after `ABORT_AUTO_CLEAR_SECONDS` (30s) and the loops
+    call `wait_if_stopped()` (pause-until-clear) instead of `return`. Never go
+    back to "flag cleared only on restart": that silently killed the IG/X
+    relays for 11 h on 2026-09-15. The abort's cache purge must go through
+    `PROTECTED_CACHE_FILES` (shared with the hourly cleaner) — a raw
+    `rmtree("cache")` deleted `cache/xchat_bridge_state.json`, making the Deno
+    bridge re-prime `last_seq` to newest and skip the entire X backlog.
+    A **relay watchdog** (`modules/direct_forward/supervisor.py`) DMs the
+    operator when an enabled platform's in-memory heartbeat
+    (`mark_worker_alive`) has not advanced for 30 min (15 min boot grace);
+    workers refresh it per poll and per backfill item. **X is at-least-once**:
+    the cursor is not advanced past a failed relay (3-strike cap unblocks a
+    poison message) — do not restore the old unconditional `_bump_cursor`.
+
  14. **Interactive responses quote the user's link message.** The format
      keyboard, playlist menus, skip warnings and **every uploaded file part**
      sent on behalf of a link quote-reply to that link's message
