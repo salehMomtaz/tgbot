@@ -546,8 +546,18 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                 await callback_query.answer(f"❌ {disk_err}", show_alert=True)
                 return
 
-        await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
-        await callback_query.answer("Transfer enqueued...")
+        # Cosmetic status edits/answers must never abort the enqueue: a
+        # double-tap re-sends identical text (MessageNotModified), and a stale
+        # callback raises QueryIdInvalid. Both used to escape the handler and
+        # the job was silently never queued (seen 2026-09-08 17:15).
+        try:
+            await callback_query.message.edit_text("⏳ Request enqueued in Active Job Queue...")
+        except Exception:
+            pass
+        try:
+            await callback_query.answer("Transfer enqueued...")
+        except Exception:
+            pass
 
         task_dir = f"cache/{cache_id}"
 
