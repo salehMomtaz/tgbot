@@ -1019,6 +1019,17 @@ Don't port it to Go.
   `FRIEND_MEDIA_FRIEND_GAP_MIN..MAX` (default 20-60 s) pause between two
   consecutive friends that both have IG work. A full archive of a friend with
   many posts/highlights can take 30+ minutes — that is by design, not a bug.
+  **Highlight 403 must not kill the archive (2026-09-15).** Instagram serves
+  highlight MEDIA (`feed/reels_media`) only for accounts the bot FOLLOWS; for
+  an unfollowed/private account it returns 403 `login_required`. Because the
+  highlights phase runs AFTER profile+posts, reaching it already proves the
+  session works — so an auth failure there is now logged, the remaining
+  highlights are skipped, and the zip is still delivered (do **not** re-introduce
+  `raise IGUnavailable`/`_ig_breaker_trip` for a highlight `feed/reels_media`
+  403). `FRIEND_MEDIA_IG_HIGHLIGHTS` (default true) skips the phase entirely.
+  The ad-hoc `🗂 Archive IG username (no add)` console flow archives a bare
+  @username without creating a friend record (synthetic `{"platform":
+  "instagram","ig_username":…}` passed to `archive_instagram_full`).
 
 ## When porting from balebot
 
