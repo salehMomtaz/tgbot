@@ -57,6 +57,7 @@ async def _render_direct_menu(callback_query: CallbackQuery):
             f"• {ig_enabled} Status: **{direct_forward.pairing_status('ig', state)}**\n\n"
             f"**X / Twitter**\n"
             f"• {x_enabled} Status: **{'enabled' if config.X_DIRECT_ENABLED else 'disabled'}**\n"
+            f"• Link: **{direct_forward.pairing_status('x', state)}**\n"
             f"• Cookies: {x_cookie_status}\n"
             f"• X Chat PIN: {pin_status}\n"
             f"• Method: self-DM — send tweet links/photos/videos to your own X "

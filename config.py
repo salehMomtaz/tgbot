@@ -196,6 +196,11 @@ IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in
 # silently disable the freeze that protects the account from a retry storm.
 # Leave false in production.
 IG_DIRECT_CHALLENGE_FREEZE_TEST = os.getenv("IG_DIRECT_CHALLENGE_FREEZE_TEST", "false").lower() in ("true", "1", "yes")
+# Emoji the bot's Instagram account reacts with on each DM it receives from the
+# paired contact (acknowledges receipt in the IG thread). Instagram supports a
+# fixed reaction set (❤ 👍 😂 😮 😢 😡 🎉 🔥 💯 …); "✅" is NOT a valid IG DM
+# reaction, so the default is the thumbs-up. Set empty to disable reacting.
+IG_DIRECT_REACT_EMOJI = os.getenv("IG_DIRECT_REACT_EMOJI", "👍")
 
 # X / Twitter direct-forward (self-DM method). The X worker boots from the
 # shared xcookies jar (config.X_COOKIES) that yt-dlp keeps warm via write-back

@@ -452,12 +452,36 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
         "official app — no password login fallback by design.")
 
 
+async def _ig_react_to(cl, loop, thread_id, item_id) -> None:
+    """React to a received DM with the configured emoji (best-effort).
+
+    Instagram's private API exposes reactions (``direct_send_reaction``), so no
+    browser automation is needed. Only valid IG reaction emojis work; the
+    default is 👍 (``IG_DIRECT_REACT_EMOJI``, empty disables)."""
+    emoji = (getattr(config, "IG_DIRECT_REACT_EMOJI", "") or "").strip()
+    if not emoji or not thread_id or not item_id:
+        return
+    if not (str(thread_id).isdigit() and str(item_id).isdigit()):
+        return
+    try:
+        ok = await loop.run_in_executor(
+            None, lambda: cl.direct_send_reaction(int(thread_id), int(item_id), emoji))
+        if ok:
+            logger.info(f"[DirectForward/IG] reacted {emoji} to item {item_id}")
+    except Exception as e:
+        logger.warning(f"[DirectForward/IG] reaction on item {item_id} failed: {e}")
+
+
 async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
-                              bot_client, premium_client, paired_username: str) -> None:
+                              bot_client, premium_client, paired_username: str,
+                              thread_id=None) -> None:
     """Process one RAW direct_v2 DM item (dict) from the paired contact."""
     sender_label = f"@{paired_username}" if paired_username else "paired contact"
     item_id = item.get("item_id", "?")
     item_type = (item.get("item_type") or "").lower()
+    # Acknowledge receipt in the IG thread (👍 by default). Fire first so a
+    # reaction still lands even if this item's relay later fails.
+    await _ig_react_to(cl, loop, thread_id, item_id)
     resolved = _ig_resolve_raw(item)
     kind = (resolved or {}).get("kind")
 
@@ -842,7 +866,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         return
                     logger.info(f"[DirectForward/IG-MQTT] push item {item.get('item_id')} from @{pr['username']} — instant relay")
                     try:
-                        await _ig_process_message(item, mqtt_cl, loop, queue, chat_id, bot_client, premium_client, pr["username"])
+                        await _ig_process_message(item, mqtt_cl, loop, queue, chat_id, bot_client, premium_client, pr["username"], thread_id=item.get("thread_id"))
                         _bump_cursor(st, "ig", int(item["item_id"]))
                         await _state_save_owned(st, {"ig"})
                     except Exception as e:
@@ -1018,7 +1042,8 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                                 pairing_active = "ig" in _pending_pairs
                             if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
                                 await _ig_process_message(m, cl, loop, queue, chat_id,
-                                                          bot_client, premium_client, pair.get("username", ""))
+                                                          bot_client, premium_client, pair.get("username", ""),
+                                                          thread_id=th.id)
                                 success = True
                             elif consumed:
                                 success = True

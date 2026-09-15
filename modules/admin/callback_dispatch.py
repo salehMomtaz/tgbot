@@ -679,6 +679,33 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer("Pairing forgotten" if removed else "Nothing to forget",
                                     show_alert=True)
 
+    elif data == "admin_direct_pair_x":
+        code = direct_forward.request_pair_code("x", requested_by=user_id)
+        await callback_query.message.edit_text(
+            "🔗 **X / Twitter linking handshake**\n\n"
+            f"Your one-time code: **`{code}`**\n\n"
+            f"1. Open X and go to your self-DM (**Message Yourself**).\n"
+            f"2. Send this code (just the 6 digits) to yourself.\n"
+            f"3. Within ~2 poll intervals the bot will confirm here which X "
+            f"account is linked.\n\n"
+            "The code expires in 10 minutes. The self-DM method relays message "
+            "media from the one X account whose session is in `xcookies.txt`.",
+            reply_markup=get_direct_menu_keyboard()
+        )
+        await log_event(f"📨 **Admin Action:** X linking code issued (user {user_id}).")
+        await callback_query.answer()
+
+    elif data == "admin_direct_unpair_x":
+        removed = direct_forward.unpair_platform("x")
+        await callback_query.message.edit_text(
+            "💔 X / Twitter link removed. " if removed else "ℹ️ No X link existed. ",
+            reply_markup=get_direct_menu_keyboard()
+        )
+        await log_event("📨 **Admin Action:** X DM link removed." if removed else
+                        "📨 **Admin Action:** X unlink requested (was unlinked).")
+        await callback_query.answer("Link forgotten" if removed else "Nothing to forget",
+                                    show_alert=True)
+
     elif data == "admin_direct_toggle_x":
         new_state = not config.X_DIRECT_ENABLED
         if new_state and not getattr(config, "DIRECT_FORWARD_CHAT_ID", 0):

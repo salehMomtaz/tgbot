@@ -18,7 +18,7 @@ from utils.shared import DOWNLOAD_CACHE, wait_if_stopped, mark_worker_alive
 
 from .state import (
     _load_state, _state_save_owned, _cursor,
-    _bump_cursor,
+    _bump_cursor, _pending_pairs, _set_pair,
 )
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
@@ -336,10 +336,49 @@ async def _x_fallback_photos(client, url: str) -> list[str]:
     return out
 
 
+async def _x_pairing_scan(text: str, self_uid: str, state: dict,
+                          bot_client, chat_id: int) -> bool:
+    """Consume an X linking code sent to the self-DM; on match, record the link
+    and confirm in Telegram. Returns True when the message was the code.
+
+    X uses the SELF-DM method (the bot account messages itself), so the linked
+    account is always the account whose session is in ``xcookies.txt`` — this
+    handshake just verifies the operator controls it and gives the console a
+    "linked account" to display (mirrors the Instagram pairing)."""
+    pending = _pending_pairs.get("x")
+    if not pending:
+        return False
+    if pending["expires_at"] <= time.time():
+        _pending_pairs.pop("x", None)
+        return False
+    if pending["code"] not in (text or ""):
+        return False
+    _set_pair(state, "x", self_uid)
+    await _state_save_owned(state, {"x"})
+    _pending_pairs.pop("x", None)
+    try:
+        await bot_client.send_message(
+            chat_id=chat_id,
+            text=(f"✅ **X / Twitter linked!**\n\n"
+                  f"The bot will relay message media sent to the X self-DM "
+                  f"(**Message Yourself**) of the linked account `{self_uid}`."),
+        )
+    except Exception as e:
+        logger.warning(f"[DirectForward/X] linking confirmation failed: {e}")
+    logger.info(f"[DirectForward/X] linked to self-DM account {self_uid} via handshake code")
+    return True
+
+
 async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premium_client, self_uid: str) -> None:
     """Process one raw self-DM message (dict from _x_fetch_self_messages)."""
     self_label = f"x-user `{self_uid}`"
     msg_id = m.get("id", "?")
+
+    # Linking handshake: a pending code sent to the self-DM is consumed here
+    # instead of being relayed.
+    if await _x_pairing_scan(m.get("text", "") or "", self_uid,
+                             _load_state(), bot_client, chat_id):
+        return
 
     # 1) Tweet shared via DM → route through the yt-dlp pipeline, auto-picking
     #    the highest quality; the format keyboard is posted when the top format
@@ -403,6 +442,10 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
     self_label = f"x-user `{self_uid}`"
     msg_id = line.get("id", "?")
     kind = line.get("kind")
+
+    if await _x_pairing_scan(line.get("text", "") or "", self_uid,
+                             _load_state(), bot_client, chat_id):
+        return
 
     if kind == "tweet":
         url = line.get("url", "")
