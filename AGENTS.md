@@ -175,6 +175,20 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    interleaved, for correlating the first session-death with the nearest jar
    write). Do not remove these hooks when refactoring the cookie paths.
 
+   **Netscape parsing is deduplicated by `(domain, path, name)` (2026-09-15).**
+   `cookie_manager._parse_cookie_lines` collapses duplicate lines to one per
+   triple (last/freshest value wins, first position kept) and `overlay_cookies`
+   rewrites every line matching `(domain, name)` — a jar can only hold one
+   cookie per triple, so a frozen stale copy beside a rotating live one is
+   corruption. `_merge_snapshot_into` also *appends* newly-issued cookies.
+   Never reintroduce "keep the duplicate count" semantics. The headless
+   refresher (`utils/cookie_refresher.py`) carries a **per-site domain
+   allowlist** (`_SITES` 4th element) and must never overlay cookies from other
+   domains (the old code copied `google.com` / ISP-injected `internet.tci.ir`
+   cookies into the IG jar). Its logged-in gate reads `page.content()` **before**
+   `context.close()` — after close it silently no-ops. One-time repair tool:
+   `venv/bin/python tools/normalize_cookie_jar.py ig`.
+
    **The headless cookie refresher must NEVER overwrite a jar it was logged
    out of (2026-09-04 fix).** The old refresher replaced the ENTIRE jar with
    whatever the headless Chromium context held after the visit. On 2026-09-03
@@ -786,6 +800,18 @@ Root logger gets two handlers (`main.py::setup_system_logger`): the
 (`logs/bot.log`, 5 MB × 3). Both only attach when `LOG_CHANNEL_ID != 0`; the file
 mirror is added regardless inside `ensure_local_log_handler`. New code should use
 `logging.getLogger(__name__)` / `await log_event(...)`, not `print`.
+
+**Channel handlers MUST stay bounded (`utils/logger/queued_channel.py`,
+2026-09-15).** Both handlers share a `QueuedChannelHandler` base: `emit()`
+formats and `put_nowait`s onto a bounded queue drained by a **fixed** pool of
+daemon workers (main 2, bale 1); a full queue **drops** records (counted,
+occasional stderr notice). Never go back to
+`threading.Thread(…).start()` per record: during the 2026-09-15 Telegram
+throttling that spawned unbounded 5-10 s POST threads until the process hit
+`LimitNPROC=512` (`run.sh` `ulimit -u 512`), every `run_in_executor` — including
+pyrogram's session restart — then raised `RuntimeError("can't start new thread")`
+and the bot's sessions crash-looped (38 errors in the channel). Dropping log
+lines under sustained failure is deliberate; the local file mirror is lossless.
 
 **Strict split (`d723798`):** the main `bale_log` Telegram channel gets ONLY
 Bale/aiogram logger lines, while the regular Telegram log channel gets

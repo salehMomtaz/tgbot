@@ -720,3 +720,41 @@ Summary:
   `igcookies.txt` (Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace). Both
   consumers (direct-forward IG worker, Friend Media) pick it up without a
   restart.
+
+## 5. Source: `docs/memory/tgbot-2026-09-15-log-and-cookie-audit.md`
+
+# 2026-09-15 — duplicate-line semantics, per-site allowlists, jar repair
+
+Earlier revisions treated a jar's duplicate lines as something to preserve
+"byte-for-byte". That was wrong: **no HTTP cookie jar can hold two cookies for
+the same `(domain, path, name)`** — every consumer keeps the last one — so a
+jar that listed the same block twice, together with an overlay that rewrote
+only the *last* copy, produced a frozen stale half beside a rotating live half
+(the operator's IG jar had `csrftoken` `VJgc…` in the first copy and `Yjfk…` in
+the second; `datr`/`mid`/`ig_did`/`rur` likewise diverged).
+
+Changes:
+
+- `_parse_cookie_lines` deduplicates by the full `(domain, path, name)` triple
+  (last/freshest value, first position kept). Distinct variants — same name on
+  a different path or domain — are different keys and survive. `#HttpOnly_`
+  lines parse with the prefix stripped but round-trip with it.
+- `overlay_cookies` rewrites **every** line matching `(domain, name)` and its
+  index ignores a leading dot, so one fresh copy can never sit beside a stale
+  one. `_merge_snapshot_into` now also **appends** newly-issued cookies.
+- `cookie_refresher._SITES` carries a **per-site domain allowlist**
+  (`instagram.com`; `x.com,twitter.com`; `tiktok.com`; `youtube.com,google.com`).
+  Only allowlisted cookies are compared/written back. This stops the browser
+  context's foreign cookies (`.google.com`, ISP-injected `internet.tci.ir`)
+  from being appended into a jar — the old code overlaid every context cookie.
+- The refresher captures `page.content()` / `final_url` **before**
+  `context.close()`; after close the DOM read silently no-ops, which had
+  disabled the anonymous-login-form half of the logged-in gate.
+- `cookie_manager.domain_matches` + `normalize_jar` back the repair tool
+  `tools/normalize_cookie_jar.py` (the one operation allowed to delete lines).
+
+One-time repair: `venv/bin/python tools/normalize_cookie_jar.py ig` took the IG
+jar from 30 → 11 cookies (duplicates collapsed to the freshest values, foreign
+domains dropped, `sessionid` intact, `0o444` preserved). The other primary jars
+were inspected but left alone — their duplicates are identical-value and the
+refresher no longer adds foreign cookies, so they self-heal on the next write.
