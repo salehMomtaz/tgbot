@@ -69,13 +69,21 @@ bot's write-back had been preserving (and half-updating) it ever since.
    bug the 2026-09-04 gate was added to prevent, regressed by ordering.
 
 ### NOT the cause
-Instagram did **not** corrupt the jar, and the session was **not** actually
-dead. The 12:34 `ig_session_dead` (`FriendMedia/IG`, "archives paused:
+Instagram did **not** corrupt the jar as a *sharable identity* (the `sessionid`
+fingerprint is byte-identical before/after the repair), and `login_by_sessionid`
+only ever consumes the `sessionid` **string** — so the jar cleanup cannot affect
+login. The session death itself is Instagram-side, the same class as
+2026-09-05: the 12:34 `ig_session_dead` (`FriendMedia/IG`, "archives paused:
 login_required") came from a single `403` on `POST feed/reels_media/`
-(`highlight_info_v1`) mid-archive; the SAME client kept getting `200`s on
-`users/…/info`, `feed/user/…/story` and `feed/user/…` immediately after. So
-that was instagrapi's `LoginRequired` classification of a transient/rate 403 —
-the conservative friend-media breaker tripped for 60 min on a live session.
+(`highlight_info_v1`) mid-archive, with the SAME client still getting `200`s on
+`users/…/info`, `feed/user/…/story` and `feed/user/…` immediately after (so that
+particular trip was a transient/rate 403 on a live session). But by the
+post-restart login at 14:26 the `sessionid` itself was rejected outright
+("Exceeded 30 redirects.", this codebase's dead-sessionid signature) and both
+consumers (DirectForward/IG, FriendMedia/IG) reported it. Conclusion: the
+structural corruption was **ours** and is fixed; the **sessionid death is
+Instagram's** and can only be recovered by the operator uploading a fresh
+`igcookies.txt` (Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace).
 
 ### Fixes
 - `cookie_manager._parse_cookie_lines` now **deduplicates by the full
@@ -143,4 +151,8 @@ throttling.
 - Logger unit check: thread count bounded to base+WORKERS under 2000 rapid
   emits with a saturated queue.
 - Live: bot restarted; IG jar reads back as 11 clean `.instagram.com` cookies;
-  DM relays (IG/X/TikTok) resume after the restart.
+  the headless refresher then ran under the new code and wrote only the 11
+  allowlisted Instagram cookies (13 context cookies seen, foreign ones skipped),
+  confirming the allowlist. DM relays resumed (X polling, TikTok WS connected,
+  IG retrying) — **IG is down only because its `sessionid` is dead and needs a
+  fresh operator upload; that is not code-fixable.**
