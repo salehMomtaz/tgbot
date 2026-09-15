@@ -1,75 +1,21 @@
 # utils/logger/telegram.py
-import html
-import logging
-import threading
-import time
-import requests
+"""
+Main Telegram log-channel handler (``LOG_CHANNEL_ID``).
 
-class TelegramChannelHandler(logging.Handler):
-    """
-    Telegram log channel handler.
-    Intercepts root logger outputs and pipes them to your private Telegram channel
-    (LOG_CHANNEL_ID) in real-time via https://api.telegram.org/bot<token>/sendRichMessage.
-    Falls back to sendMessage. Async daemon thread, redacted, truncated, HTML-escaped.
-    """
-    def __init__(self, bot_token: str, channel_id: int):
-        super().__init__()
-        self.bot_token = bot_token
-        self.channel_id = channel_id
-        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        self.api_rich_url = f"https://api.telegram.org/bot{bot_token}/sendRichMessage"
+Formatting + POST plumbing lives in :class:`~utils.logger.queued_channel.QueuedChannelHandler`
+so the channel can never exhaust process threads (see that module's docstring
+for the 2026-09-15 "can't start new thread" incident). This class only pins the
+public name and the main-channel worker budget.
+"""
 
-    def emit(self, record):
-        try:
-            log_entry = self.format(record)
-            try:
-                from utils.security import redact_token as _redact
-                log_entry = _redact(log_entry)
-            except Exception:
-                pass
-            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record.created))
-            level = record.levelname
-            module = record.module
-            emoji = "📝"
-            if level == "WARNING":
-                emoji = "⚠️"
-            elif level in ["ERROR", "CRITICAL"]:
-                emoji = "🚨"
-            escaped_entry = html.escape(log_entry)
-            # Rich messages via sendRichMessage allow 32768 UTF-8 chars (vs 4096 for sendMessage).
-            # Previous 3500 was overly conservative and caused premature [TRUNCATED] on detailed
-            # admin console dumps (your 17003 example). Keep ~100 chars overhead for wrapper.
-            if len(escaped_entry) > 31500:
-                escaped_entry = escaped_entry[:31500] + "\n... [TRUNCATED at 32768 rich limit] ..."
-            rich_html = (
-                f"{emoji} <b>[{level}]</b> <code>[{timestamp}]</code> <i>({module})</i>\n"
-                f"<pre>{escaped_entry}</pre>"
-            )
-            payload_rich = {
-                "chat_id": self.channel_id,
-                "rich_message": {"html": rich_html},
-            }
-            payload_plain = {
-                "chat_id": self.channel_id,
-                "text": rich_html,
-                "parse_mode": "HTML",
-            }
+from .queued_channel import QueuedChannelHandler
 
-            def execute_post():
-                try:
-                    import config
-                    proxies = (
-                        {"http": config.REQUESTS_PROXY, "https": config.REQUESTS_PROXY}
-                        if getattr(config, "REQUESTS_PROXY", None) else None
-                    )
-                    resp = requests.post(self.api_rich_url, json=payload_rich, timeout=5, proxies=proxies)
-                    ok = resp.status_code == 200 and resp.json().get("ok", False)
-                    if not ok:
-                        requests.post(self.api_url, json=payload_plain, timeout=5, proxies=proxies)
-                except Exception:
-                    pass
 
-            threading.Thread(target=execute_post, daemon=True).start()
+class TelegramChannelHandler(QueuedChannelHandler):
+    """Pipes root-logger records to ``LOG_CHANNEL_ID`` via sendRichMessage
+    (sendMessage fallback), formatted/redacted/truncated/HTML-escaped, drained
+    by a small fixed pool of daemon threads fed from a bounded queue."""
 
-        except Exception:
-            pass
+    # Main channel is the busy one (pyrogram + direct-forward + downloader).
+    WORKERS = 2
+    MAX_QUEUE = 1000
