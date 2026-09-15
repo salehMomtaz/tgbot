@@ -14,7 +14,7 @@ import re
 import time
 
 import config
-from utils.shared import _should_stop
+from utils.shared import wait_if_stopped, mark_worker_alive
 
 from .state import (
     _load_state, _state_save_owned,
@@ -356,6 +356,10 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
         logger.info("[DirectForward/TT] WS connected + cmd-1001 sent — listening for pushes.")
         prime_deadline = time.time() + _TT_PRIME_WINDOW if prime else None
         while True:
+            # Refresh the liveness heartbeat each iteration so a healthy-but-
+            # idle socket doesn't look "silent" to the watchdog (a stuck/dead
+            # one stops refreshing and does alert).
+            mark_worker_alive("tiktok")
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=35)
             except asyncio.TimeoutError:
@@ -412,9 +416,8 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
     logger.info(f"[DirectForward/TT] listening for TikTok self-DM pushes "
                 f"(reconnect jittered ±{config.TIKTOK_DIRECT_POLL_JITTER_PCT}%).")
     while True:
-        if _should_stop():
-            logger.info("[DirectForward/TT] stop flag set — exiting worker loop")
-            return
+        mark_worker_alive("tiktok")
+        await wait_if_stopped()
         try:
             await _tt_run_ws(bot_client, premium_client, chat_id, queue, seen)
         except Exception as e:

@@ -14,7 +14,7 @@ import time
 import config
 from utils import cookie_history
 from utils import ig_anti_detect
-from utils.shared import _should_stop
+from utils.shared import wait_if_stopped, mark_worker_alive
 
 from .state import (
     _load_state, _state_save_owned, _get_pair,
@@ -730,6 +730,21 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             else:
                 logger.warning(f"[DirectForward/IG] login retry {login_attempt} failed: {e} "
                                f"(next retry in ~{backoff / 3600:.1f}h).")
+            # Startup login failures used to only log — the operator never saw
+            # that the relay was down until they noticed missing items. Alert
+            # once per failure streak (mirrors the mid-poll re-login alert).
+            if login_attempt == 2:
+                try:
+                    await _post_ig_alert(
+                        bot_client, chat_id,
+                        (f"💀 **Instagram session is dead** (login failed twice on start-up)\n\n"
+                         f"The IG cookie jar's `sessionid` was rejected (`{e}`).\n\n"
+                         f"DM relaying and Friend Media archives stay broken until you upload a "
+                         f"fresh `igcookies.txt`:\n**Admin Console → 🍪 Cookie Jars → "
+                         f"Instagram → ✏️ Replace**.\n\n"
+                         f"Recent jar changes: Admin Console → 🍪 Cookie Jars → Instagram → 📜 History."))
+                except Exception as alert_err:
+                    logger.warning(f"[DirectForward/IG] startup login alert failed: {alert_err}")
             cl = _make_client()
             await asyncio.sleep(backoff)
 
@@ -977,6 +992,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         pair_username = pair.get("username", "")
 
                     for m in new_msgs:
+                        # A long gap-fetch backfill can run 30+ min; refresh the
+                        # watchdog heartbeat per item so it isn't mistaken for a
+                        # stalled worker.
+                        mark_worker_alive("ig")
                         consumed = False
                         success = False
                         try:
@@ -1092,14 +1111,11 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 logger.error(f"[DirectForward/IG] poll error: {e}")
                 await asyncio.sleep(min(600, _poll_interval()))
 
-            # Honor the global "Abort Operations" flag set by the admin console.
-            # Cooperative cancel: we don't kill the in-flight `cl.*` HTTP call —
-            # we let the current poll finish naturally, then break out of the
-            # main loop. The systemd-supervised process keeps running; the
-            # flag is reset by the next admin_restart or bot startup.
-            if _should_stop():
-                logger.info("[DirectForward/IG] stop flag set — exiting worker loop")
-                return
+            # A completed poll cycle = the worker is alive (watchdog heartbeat).
+            # A set abort flag PAUSES here until it self-clears, instead of
+            # exiting the loop (see utils/shared.wait_if_stopped).
+            mark_worker_alive("ig")
+            await wait_if_stopped()
             await asyncio.sleep(_poll_interval())
     finally:
         # Cancel the hybrid MQTT listener on ANY exit (stop flag, cancel,

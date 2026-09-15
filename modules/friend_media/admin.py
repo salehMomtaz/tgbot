@@ -1344,11 +1344,10 @@ def start_friend_media_task(app, premium_app):
         logging.info("[FriendMedia] no user account; watcher idle until configured.")
 
     async def _loop():
-        from utils.shared import _should_stop
+        from utils.shared import wait_if_stopped, mark_worker_alive
         while True:
-            if _should_stop():
-                logging.info("[FriendMedia] stop flag set — exiting auto-check loop")
-                return
+            mark_worker_alive("friend_media")
+            await wait_if_stopped()
             try:
                 mins = int(getattr(config, "FRIEND_MEDIA_SCHEDULE_MINUTES", 0) or 0)
                 run_now = (_enabled() and mins > 0

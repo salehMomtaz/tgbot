@@ -145,6 +145,14 @@ def setup_system_logger():
                         return False
                     if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
                         return False
+                    # Throttle transfer-retry spam. When the route to
+                    # api.telegram.org degrades, pyrogram emits up to 10
+                    # "Retrying upload.SaveFilePart …" WARNINGs per file. The
+                    # local file mirror keeps them; the channel only needs the
+                    # single terminal "Failed to invoke … after 10 retries"
+                    # ERROR. (This is what flooded the channel on 2026-09-15.)
+                    if "retrying" in msg_l and "upload." in msg_l:
+                        return False
                     return True
                 handler.addFilter(_tg_filter)
                 logging.getLogger().addHandler(handler)
@@ -361,8 +369,8 @@ async def auto_clean_cache_directory():
     The direct-forward platform state lives at the repo root
     (``direct_forward_state.json``), outside ``cache/``, so it is already safe.
     """
-    from utils.shared import RUNTIME_SETTINGS
-    protected_files = {"xchat_bridge_state.json", "xchat_inbox.jsonl", "friend_media_state.json"}
+    from utils.shared import RUNTIME_SETTINGS, PROTECTED_CACHE_FILES
+    protected_files = PROTECTED_CACHE_FILES
     while True:
         print("[Cleaner] Running periodic cache sweep...")
         cache_dir = "cache"

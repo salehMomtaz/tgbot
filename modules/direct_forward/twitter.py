@@ -14,7 +14,7 @@ import uuid
 from typing import Any
 
 import config
-from utils.shared import DOWNLOAD_CACHE, _should_stop
+from utils.shared import DOWNLOAD_CACHE, wait_if_stopped, mark_worker_alive
 
 from .state import (
     _load_state, _state_save_owned, _cursor,
@@ -806,13 +806,32 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
             # poll only when the bridge has never produced a file.
             bridge_lines = _x_read_inbox(last_seen)
             if bridge_lines:
+                # At-least-once: do NOT advance the cursor past a relay that
+                # raised, so the next poll retries it (the old code bumped
+                # unconditionally and silently dropped failed sends). A 3-strike
+                # cap prevents one permanently-bad message from blocking the
+                # whole self-DM queue forever.
+                fail_counts = state.setdefault("x", {}).setdefault("fail_counts", {})
                 for line in bridge_lines:
+                    lid = line.get("_id")
                     try:
                         await _x_process_bridge_line(line, client, queue, chat_id,
                                                      bot_client, premium_client, uid)
+                        fail_counts.pop(str(lid), None)
+                        _bump_cursor(state, "x", lid)
                     except Exception as e:
-                        logger.error(f"[DirectForward/X] bridge message {line.get('id')} failed: {e}")
-                    _bump_cursor(state, "x", line["_id"])
+                        n = int(fail_counts.get(str(lid), 0)) + 1
+                        fail_counts[str(lid)] = n
+                        logger.error(f"[DirectForward/X] bridge message {line.get('id')} "
+                                     f"failed (attempt {n}): {e}")
+                        if n >= 3:
+                            logger.warning(f"[DirectForward/X] bridge message {line.get('id')} "
+                                           f"failed 3x — skipping to unblock the queue "
+                                           f"(cursor advanced).")
+                            fail_counts.pop(str(lid), None)
+                            _bump_cursor(state, "x", lid)
+                        else:
+                            break  # leave this and the rest for the next poll
                 await _state_save_owned(state, {"x"})
                 await asyncio.sleep(_poll_interval())
                 continue
@@ -822,18 +841,27 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                 (m for m in msgs if int(m.get("id") or 0) > last_seen),
                 key=lambda m: int(m["id"]),
             )
+            fail_counts = state.setdefault("x", {}).setdefault("fail_counts", {})
             for m in new_msgs:
+                mid = str(m["id"])
                 try:
                     await _x_process_message(client, m, queue, chat_id, bot_client, premium_client, uid)
+                    fail_counts.pop(mid, None)
                 except Exception as e:
-                    logger.error(f"[DirectForward/X] message {m['id']} failed: {e}")
+                    n = int(fail_counts.get(mid, 0)) + 1
+                    fail_counts[mid] = n
+                    logger.error(f"[DirectForward/X] message {m['id']} failed (attempt {n}): {e}")
+                    if n < 3:
+                        break  # do not advance past it — retried next poll
+                    logger.warning(f"[DirectForward/X] message {m['id']} failed 3x — skipping "
+                                   f"to unblock the queue (cursor advanced).")
+                    fail_counts.pop(mid, None)
                 _bump_cursor(state, "x", int(m["id"]))
                 await _state_save_owned(state, {"x"})  # merge-only: never clobber IG/TikTok cursors
         except Exception as e:
             logger.error(f"[DirectForward/X] poll error: {e}")
             await asyncio.sleep(min(600, _poll_interval()))
 
-        if _should_stop():
-            logger.info("[DirectForward/X] stop flag set — exiting worker loop")
-            return
+        mark_worker_alive("x")
+        await wait_if_stopped()
         await asyncio.sleep(_poll_interval())

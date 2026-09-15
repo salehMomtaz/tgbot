@@ -6,6 +6,7 @@ Mirrors the original modules/admin.py _admin_callback_dispatch exactly.
 
 import os
 import shutil
+import asyncio
 import logging
 import config
 from pyrogram import Client
@@ -16,7 +17,9 @@ from pyrogram.types import (
 )
 from dotenv import set_key
 from main import log_event, schedule_self_restart, _mark_restart_pending
-from utils.shared import queue, signal_all_stop, reset_stop_flag
+from utils.shared import (
+    queue, signal_all_stop, reset_stop_flag, ABORT_AUTO_CLEAR_SECONDS,
+)
 from utils.gate import (
     load_database,
     toggle_document_mode,
@@ -79,23 +82,43 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         queue._pending.clear()
         queue._active = False
 
-        # Stop every long-running background loop. Each worker (IG/X/TikTok
-        # direct-forward, friend-media archiver, cookie-refresher) checks
-        # _should_stop() at the top of its iteration and breaks out cleanly.
-        # The flag is reset by the next admin_restart or bot startup.
+        # Stop every long-running background loop for a short grace period.
+        # The flag is a *transient pause* (self-clears after
+        # ABORT_AUTO_CLEAR_SECONDS) and the loops use `wait_if_stopped`, so
+        # this cancels current work WITHOUT permanently disabling the DM
+        # relays (the 2026-09-15 11 h outage was the old permanent-exit
+        # behaviour).
         signal_all_stop()
-        # Wipe any in-flight download cache so the next bot run starts clean.
+        try:
+            asyncio.get_event_loop().call_later(
+                ABORT_AUTO_CLEAR_SECONDS, reset_stop_flag)
+        except Exception:
+            reset_stop_flag()
+        # Purge the cache but KEEP the persistent state files the relays and
+        # the XChat bridge depend on — a full rmtree here deleted
+        # cache/xchat_bridge_state.json, which made the bridge re-prime
+        # last_seq to newest and silently skip the whole X backlog.
         if os.path.exists("cache"):
             try:
-                shutil.rmtree("cache")
+                from utils.shared import PROTECTED_CACHE_FILES
+                for entry in os.scandir("cache"):
+                    if entry.name in PROTECTED_CACHE_FILES:
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            shutil.rmtree(entry.path)
+                        else:
+                            os.remove(entry.path)
+                    except Exception:
+                        pass
                 os.makedirs("cache", exist_ok=True)
             except Exception:
                 pass
 
-        await callback_query.answer("💥 All operations aborted: queue cleared, cache purged, "
-                                    "background workers exiting.", show_alert=True)
+        await callback_query.answer("💥 Operations aborted: queue cleared, cache purged "
+                                    "(relays pause ~30s then resume).", show_alert=True)
         await log_event(f"💥 **Admin Action:** Abort Operations — {queue_len} pending jobs "
-                         f"cleared, cache purged, stop flag set for all workers.")
+                         f"cleared, cache purged, workers paused for ~{ABORT_AUTO_CLEAR_SECONDS}s.")
 
     elif data == "admin_toggle_doc":
         state = toggle_document_mode(user_id)

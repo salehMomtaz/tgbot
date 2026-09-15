@@ -381,12 +381,12 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
 
 async def refresh_all_cookies_sequential():
     """Refresh each primary jar one after another (sequential, 1 browser at a time)."""
-    from utils.shared import _should_stop
+    from utils.shared import wait_if_stopped
     logger.info("[CookieRefresh] starting sequential refresh (4 sites, 1 browser at a time, ~5 min total)")
     for cookie_path, url, hint, allowed in _SITES:
-        if _should_stop():
-            logger.info("[CookieRefresh] stop flag set — exiting cycle early")
-            return
+        # A set abort flag pauses (self-clears in ~30s) rather than aborting the
+        # whole 24h refresh cycle.
+        await wait_if_stopped()
         try:
             ok = await _refresh_one(cookie_path, url, hint, allowed)
             # Small pause between sites to avoid hammering and to let swap settle
