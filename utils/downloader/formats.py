@@ -5,6 +5,7 @@ Mirrors the original utils/downloader.py extract_formats function exactly.
 """
 
 import os
+import logging
 import utils.shared as shared
 from .cookies import _resolve_jar_path
 from .url_normalize import normalize_url, _is_youtube, _apply_pot_options
@@ -20,6 +21,8 @@ from .errors import _is_live_or_storyboard_only, _storyboard_error, _classify_yt
 from utils import cookie_manager
 import yt_dlp
 import config
+
+logger = logging.getLogger(__name__)
 
 
 def extract_formats(url: str) -> dict:
@@ -110,10 +113,37 @@ def extract_formats(url: str) -> dict:
                                       error_text=str(last_error) if last_error else None)
             continue
 
+        # A multi-video tweet (and some other non-YouTube URLs) comes back from
+        # yt-dlp as a PLAYLIST even with noplaylist=True — `noplaylist` only
+        # collapses YouTube `?list=` groupings, not a tweet that carries several
+        # videos. A playlist dict has no top-level `formats`, so the storyboard
+        # check below used to misfire and report a bogus YouTube sign-in error
+        # for the X link. Unwrap to the first entry that actually has real
+        # media, keeping the tweet's title.
+        if isinstance(info, dict) and info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if isinstance(e, dict)]
+            if entries:
+                entry = next((e for e in entries if not _is_live_or_storyboard_only(e)),
+                             entries[0])
+                logger.info("[formats] %s returned a %d-entry playlist; using the "
+                            "first playable entry (%s)", url, len(entries),
+                            entry.get("id") or entry.get("url") or "?")
+                entry = dict(entry)
+                entry.setdefault("title", info.get("title"))
+                entry.setdefault("thumbnail", info.get("thumbnail"))
+                info = entry
+
         if _is_live_or_storyboard_only(info):
-            # Cookies were accepted but YouTube is withholding real formats.
-            # Treat this as a failure and fall back to the next strategy.
-            last_error = _storyboard_error(cookie_path if label != "no-auth" else None)
+            # Storyboards are a YouTube concept; keep the YouTube-worded hint
+            # only there. For every other site an empty format list just means
+            # "no downloadable media found" — don't blame YouTube cookies.
+            if _is_youtube(url):
+                last_error = _storyboard_error(cookie_path if label != "no-auth" else None)
+            else:
+                last_error = RuntimeError(
+                    "No downloadable video/audio formats were found for this link "
+                    "(it may contain only images or text, or the session cannot "
+                    "access it).")
             info = None
             if snap_path:
                 cookie_manager.commit(snap_path, success=False, error_text=str(last_error))
