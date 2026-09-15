@@ -320,6 +320,13 @@ FRIEND_MEDIA_MAX_PHOTOS = get_env_int("FRIEND_MEDIA_MAX_PHOTOS", 2000)
 FRIEND_MEDIA_MAX_STORIES = get_env_int("FRIEND_MEDIA_MAX_STORIES", 100)
 # Max IG feed posts delivered per check (new-posts-only; watermark primed on link).
 FRIEND_MEDIA_MAX_POSTS_PER_RUN = get_env_int("FRIEND_MEDIA_MAX_POSTS_PER_RUN", 10)
+# Fetch IG highlight reels during a full archive. Instagram only serves
+# highlight MEDIA (feed/reels_media) for accounts the bot follows — for an
+# unfollowed/private account it returns 403 login_required, which used to abort
+# the whole archive. Highlights are now skipped gracefully on that 403, but this
+# toggle lets the operator skip the (proven session-risky) highlights phase
+# entirely. Set false to archive profile pic + posts only.
+FRIEND_MEDIA_IG_HIGHLIGHTS = os.getenv("FRIEND_MEDIA_IG_HIGHLIGHTS", "true").lower() in ("true", "1", "yes")
 # Optional auto-archive loop (minutes). 0 = manual only. Default 60 (one hour,
 # shared across both Telegram and Instagram checks).
 FRIEND_MEDIA_SCHEDULE_MINUTES = get_env_int("FRIEND_MEDIA_SCHEDULE_MINUTES", 60)

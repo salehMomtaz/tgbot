@@ -90,6 +90,7 @@ def _menu_keyboard():
         [InlineKeyboardButton("📋 List Friends", callback_data="fm_list_choose")],
         [InlineKeyboardButton("📇 Telegram Contacts", callback_data="fm_contacts"),
          InlineKeyboardButton("🚀 Check All", callback_data="fm_archive_all")],
+        [InlineKeyboardButton("🗂 Archive IG username (no add)", callback_data="fm_ig_archive_user")],
         [InlineKeyboardButton("⏱ Set check interval (min)", callback_data="fm_sched")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="fm_menu"),
          InlineKeyboardButton("◀️ Back to Console", callback_data="admin_main")],
@@ -348,6 +349,22 @@ async def fm_callback_dispatch(client, callback_query):
             "  • Phone number → `contacts.ImportContacts` returns the real id\n\n"
             "A one-time full profile-pic backfill starts automatically. Only YOU "
             "receive their media.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
+        await callback_query.answer()
+        return
+    if data == "fm_ig_archive_user":
+        USER_STATES[user_id] = "waiting_for_ig_archive_username"
+        await callback_query.message.edit_text(
+            "🗂 **Archive an Instagram username (no friend added)**\n\n"
+            "Send one or more Instagram usernames (`nature_lover` or "
+            "`@nature_lover`; a full profile link works too — one per line).\n\n"
+            "The bot will grab a one-shot zip (profile pic + posts/reels + "
+            "highlights) and deliver it here. Nothing is added to your IG "
+            "friends list and nothing is ever sent to them.\n\n"
+            "Note: Instagram only serves **highlights** for accounts you "
+            "follow — for an unfollowed account the zip still contains the "
+            "profile pic and posts, with highlights skipped.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("◀️ Cancel", callback_data="fm_menu")]]))
         await callback_query.answer()
@@ -1054,6 +1071,35 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         # the IG cookies warning if the session is stale).
         for key in keys:
             asyncio.create_task(_ig_add_archive(app, key))
+        return
+
+    if state == "waiting_for_ig_archive_username":
+        lines = [l.strip() for l in txt.splitlines() if l.strip()]
+        USER_STATES.pop(user_id, None)
+        await _clear_prompt()
+        users, failed = [], []
+        for raw in lines:
+            ig = fm_common.extract_ig_username(raw)
+            if ig:
+                users.append(ig)
+            else:
+                failed.append(raw)
+        if not users:
+            await message.reply_text("❌ No valid Instagram username found.",
+                                     reply_markup=back_markup)
+            return
+        note = ""
+        if failed:
+            note = "\n\n❌ Ignored: " + ", ".join(failed)
+        await message.reply_text(
+            "🗂 Archiving (no friend added): " + ", ".join(f"`@{u}`" for u in users) +
+            ".\nEach zip is delivered here when ready." + note,
+            reply_markup=back_markup)
+        for u in users:
+            # Synthetic friend record: the archive path only needs an
+            # ig_username, and nothing is persisted to the friends list.
+            friend = {"platform": "instagram", "ig_username": u, "first_name": u}
+            asyncio.create_task(_run_ig_archive(client, message, f"adhoc:{u}", friend))
         return
 
     if state == "waiting_for_friend_search":

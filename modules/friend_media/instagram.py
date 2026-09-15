@@ -831,15 +831,27 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                 await status_cb(f"posts {idx}/{len(posts)}")
             await _jitter(item_lo, item_hi)
 
-        # 3. Highlights (each story media inside).
-        def _highlights():
-            pk = cl.user_id_from_username(ig_user)
-            return cl.user_highlights_v1(pk, amount=0) or []
-        highlights = await loop.run_in_executor(None, _highlights)
-        await _jitter(lo, hi)
-        if status_cb:
-            await status_cb(f"highlights: {len(highlights or [])}")
+        # 3. Highlights (each story media inside). Optional: Instagram only
+        # serves highlight MEDIA for accounts the bot follows, so this phase
+        # 403s for unfollowed accounts (see the graceful skip below).
+        # FRIEND_MEDIA_IG_HIGHLIGHTS=false skips it entirely.
         consecutive_failures = 0
+        highlights_skipped = False
+        highlights = []
+        if getattr(config, "FRIEND_MEDIA_IG_HIGHLIGHTS", True):
+            def _highlights():
+                pk = cl.user_id_from_username(ig_user)
+                return cl.user_highlights_v1(pk, amount=0) or []
+            highlights = await loop.run_in_executor(None, _highlights)
+            await _jitter(lo, hi)
+            if status_cb:
+                await status_cb(f"highlights: {len(highlights or [])}")
+        else:
+            highlights_skipped = True
+            logger.info("[FriendMedia:ig:archive] highlights disabled by "
+                        "FRIEND_MEDIA_IG_HIGHLIGHTS=false — profile + posts only")
+            if status_cb:
+                await status_cb("highlights disabled (config)")
         for hi_idx, hl in enumerate(highlights or [], start=1):
             try:
                 full = await loop.run_in_executor(None, cl.highlight_info_v1, str(hl.pk))
@@ -852,12 +864,21 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
                 consecutive_failures = 0
             except Exception as e:
                 if _ig_auth_failure(e):
-                    # 2026-09-05 02:55: highlight 1 returned 403 login_required
-                    # and highlights 2-8 were STILL fetched back-to-back — the
-                    # exact burst that ended the session for good. Abort now.
-                    _ig_breaker_trip(str(e))
-                    raise IGUnavailable(
-                        f"session died mid-archive at highlight {hi_idx}: {e}")
+                    # feed/reels_media 403s for accounts the bot doesn't follow
+                    # (IG happily serves highlights_tray but not the reel media)
+                    # — this is NOT a dead session. We only get here AFTER the
+                    # profile+posts steps succeeded, which already proves the
+                    # session works. So do NOT trip the breaker or fail the
+                    # archive: skip the remaining highlights, deliver what we
+                    # have (profile + posts), and move on. This is exactly the
+                    # samin_mshk failure (2026-09-15 16:51) where one highlight
+                    # 403 aborted the whole archive.
+                    logger.warning(
+                        f"[FriendMedia:ig:archive] highlights not accessible for "
+                        f"@{ig_user} (highlight {hi_idx}: {str(e)[:100]}) — skipping "
+                        f"highlights; profile + posts still archived.")
+                    highlights_skipped = True
+                    break
                 # Instagram also kills a dying session with bare
                 # {"message":"","status":"fail"} (no login_required marker) —
                 # the exact payload highlights 2-8 returned AFTER the first
@@ -896,6 +917,8 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
         bot_c = bot or common.bot_client()
         dest = common.resolve_destination()
         caption = f"🗂 IG archive · @{ig_user} ({counted} items)"
+        if highlights_skipped:
+            caption += " · highlights skipped (not accessible without following)"
         ok = await common._safe_deliver_raw(bot_c, dest, zip_path, "document",
                                             caption=caption)
         if not ok:
