@@ -28,13 +28,25 @@ from utils import cookie_manager
 logger = logging.getLogger(__name__)
 
 # Sites to refresh, in order. One at a time.
+# The 4th element is the DOMAIN ALLOWLIST for that jar: the headless browser's
+# context also collects cookies for whatever else it encounters (the VPS's ISP
+# injects internet.tci.ir cookies; instagram embeds google.com scripts), and
+# the old code overlaid *every* context cookie into the jar. That is how the IG
+# jar ended up carrying `.google.com __Secure-ENID` and `internet.tci.ir`
+# entries it has no business holding. Only these domains are ever written back.
+# YouTube is the one site that genuinely needs google.com cookies too.
 _SITES = [
-    # (cookie_path, homepage_url, wait_selector_hint)
-    (config.IG_COOKIES, "https://www.instagram.com/", "nav"),
-    (config.X_COOKIES, "https://x.com/home", "body"),
-    (config.TT_COOKIES, "https://www.tiktok.com/", "body"),
-    (config.YT_COOKIES, "https://www.youtube.com/", "ytd-app"),
+    # (cookie_path, homepage_url, wait_selector_hint, allowed_domains)
+    (config.IG_COOKIES, "https://www.instagram.com/", "nav", ("instagram.com",)),
+    (config.X_COOKIES, "https://x.com/home", "body", ("x.com", "twitter.com")),
+    (config.TT_COOKIES, "https://www.tiktok.com/", "body", ("tiktok.com",)),
+    (config.YT_COOKIES, "https://www.youtube.com/", "ytd-app", ("youtube.com", "google.com")),
 ]
+
+def _domain_allowed(domain: str, allowed: tuple) -> bool:
+    """Thin alias for :func:`utils.cookie_manager.domain_matches` (kept so the
+    call sites read naturally)."""
+    return cookie_manager.domain_matches(domain, allowed)
 
 def _parse_netscape_to_playwright(path: str) -> List[dict]:
     """Read Netscape jar and return playwright cookie dicts."""
@@ -74,8 +86,14 @@ def _parse_netscape_to_playwright(path: str) -> List[dict]:
         logger.warning(f"[CookieRefresh] parse {path} failed: {e}")
     return cookies
 
-async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> bool:
-    """Refresh a single jar via headless Chromium. Returns True if cookies changed and were written."""
+async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
+                       allowed_domains: tuple = ()) -> bool:
+    """Refresh a single jar via headless Chromium. Returns True if cookies changed and were written.
+
+    *allowed_domains* is the site's domain allowlist (see ``_SITES``): only
+    cookies on those domains are overlaid back, so foreign cookies the browser
+    happened to collect never leak into the jar.
+    """
     if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
         logger.info(f"[CookieRefresh] skip {cookie_path} — missing/empty")
         return False
@@ -214,19 +232,30 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
             except Exception as e:
                 logger.warning(f"[CookieRefresh] goto {url} failed: {e} — still trying to extract cookies")
 
-            # Extract all cookies from the context (including rotated ones) and
-            # capture the FINAL url — a redirect to /accounts/login (or a
-            # sessionid that vanished) means Instagram did NOT accept our
-            # session (dead sessionid / challenge / bot wall) and the context
-            # now holds an ANONYMOUS cookie set. Writing that over the real jar
-            # is exactly how the jar got "corrupted" on 2026-09-03 16:49 — the
-            # operator's fresh upload was replaced with a logged-out cookie set
-            # and every later consumer saw "no account cookies".
+            # Capture the final URL and (for IG) whether the anonymous login
+            # form is present — MUST happen while the page/context are still
+            # open. The old code called page.content() AFTER context.close(),
+            # which always raised and silently disabled the strongest part of
+            # the logged-in gate (IG serves its anonymous home from the SAME
+            # url with a fresh anonymous sessionid, so the form is the only
+            # unambiguous tell). See the 2026-09-03 16:49 jar wipe this gate
+            # was added to prevent.
             final_url = ""
             try:
                 final_url = page.url
             except Exception:
                 pass
+            anonymous_login_form = False
+            if is_ig:
+                try:
+                    html = await page.content()
+                    anonymous_login_form = (
+                        'action="/accounts/login/ajax/"' in html
+                        or ('name="username"' in html and 'name="password"' in html)
+                    )
+                except Exception:
+                    pass  # DOM check failed — fall back to the URL/sessionid gate
+
             new_cookies = await context.cookies()
             await context.close()
             await browser.close()
@@ -238,34 +267,35 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                                       note=f"no cookies extracted (url={final_url or '?'})")
                 return False
 
-            new_map = {(c["name"], c["domain"]): c["value"] for c in new_cookies}
+            # Normalise domains (the browser returns a leading dot for domain
+            # cookies; the parsed jar stripped it) and drop anything outside
+            # the site's allowlist so foreign cookies never leak into the jar.
+            def _norm_domain(d: str) -> str:
+                return (d or "").lower().lstrip(".")
+
+            new_map = {(_norm_domain(c["domain"]), c["name"]): c["value"]
+                       for c in new_cookies}
+            old_map = {(_norm_domain(c["domain"]), c["name"]): c["value"]
+                       for c in playwright_cookies}
+            if allowed_domains:
+                allowed_map = {(d, n): v for (d, n), v in new_map.items()
+                               if _domain_allowed(d, allowed_domains)}
+            else:
+                allowed_map = dict(new_map)
+            dropped = len(new_map) - len(allowed_map)
+            if dropped:
+                logger.info(f"[CookieRefresh] ignoring {dropped} cookie(s) outside "
+                            f"{allowed_domains} for {os.path.basename(cookie_path)}")
 
             # --- Logged-in gate: NEVER write a jar the site logged out of. ---
             def _has_cookie(name: str, domain_hint: str) -> bool:
-                return any(
-                    n == name and domain_hint in d.lower()
-                    for (n, d) in new_map
-                )
+                return any(n == name and domain_hint in d
+                           for (d, n) in allowed_map)
 
             visited_login_page = any(
                 marker in (final_url or "").lower()
                 for marker in ("/accounts/login", "/login", "/signin", "/auth")
             )
-            # Instagram's anonymous home keeps the SAME url and issues a fresh
-            # ANONYMOUS sessionid — so for IG the presence of a sessionid alone
-            # proves nothing. The unambiguous tell is the login form itself
-            # (form action="/accounts/login/ajax/" with username+password
-            # inputs); a logged-in home never renders it.
-            anonymous_login_form = False
-            if is_ig:
-                try:
-                    html = await page.content()
-                    anonymous_login_form = (
-                        'action="/accounts/login/ajax/"' in html
-                        or ('name="username"' in html and 'name="password"' in html)
-                    )
-                except Exception:
-                    pass  # DOM check failed — fall back to the URL/sessionid gate
             if is_ig:
                 logged_in = (_has_cookie("sessionid", "instagram")
                              and not visited_login_page
@@ -288,9 +318,8 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
                                       note=f"{reason} — jar NOT overwritten")
                 return False
 
-            # Compare: did any cookie value/expires change?
-            old_map = {(c["name"], c["domain"]): c["value"] for c in playwright_cookies}
-            changed = sum(1 for k, v in new_map.items() if old_map.get(k) != v)
+            # Compare only the allowlisted cookies: did anything rotate?
+            changed = sum(1 for k, v in allowed_map.items() if old_map.get(k) != v)
             if changed == 0:
                 logger.info(f"[CookieRefresh] {os.path.basename(cookie_path)} — no rotation detected (still fresh)")
                 # Still touch mtime via meta to avoid re-checking too soon
@@ -304,11 +333,9 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None) -> boo
             # applied. The old full-replace shrank the jar on every cycle
             # (24 lines → 14) and dropped cookies the browser context never
             # touched — an overlay keeps everything the operator uploaded.
+            # ONLY the site's allowlisted domains are considered (see _SITES).
             updates: dict[tuple[str, str], str] = {}
-            for c in new_cookies:
-                domain = (c.get("domain") or "").lstrip(".")
-                name = c.get("name") or ""
-                value = c.get("value")
+            for (domain, name), value in allowed_map.items():
                 if domain and name and value is not None:
                     updates[(f".{domain}", name)] = value
             if not updates:
@@ -356,12 +383,12 @@ async def refresh_all_cookies_sequential():
     """Refresh each primary jar one after another (sequential, 1 browser at a time)."""
     from utils.shared import _should_stop
     logger.info("[CookieRefresh] starting sequential refresh (4 sites, 1 browser at a time, ~5 min total)")
-    for cookie_path, url, hint in _SITES:
+    for cookie_path, url, hint, allowed in _SITES:
         if _should_stop():
             logger.info("[CookieRefresh] stop flag set — exiting cycle early")
             return
         try:
-            ok = await _refresh_one(cookie_path, url, hint)
+            ok = await _refresh_one(cookie_path, url, hint, allowed)
             # Small pause between sites to avoid hammering and to let swap settle
             await asyncio.sleep(5)
             # Log result is already in _refresh_one
@@ -373,7 +400,7 @@ async def refresh_all_cookies_sequential():
 async def auto_refresh_cookies_loop():
     """Background loop: every 24h, refresh all jars sequentially. Enabled via config."""
     # Respect flag: only run if at least one primary jar exists
-    if not any(os.path.exists(p) for p, _, _ in _SITES):
+    if not any(os.path.exists(p) for p, _, _, _ in _SITES):
         logger.info("[CookieRefresh] no primary jars found — loop disabled")
         return
     # Stagger first run by 5-10 min after boot to avoid competing with DM warmup

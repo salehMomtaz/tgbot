@@ -187,39 +187,49 @@ def freshness_warnings(warn_after_days: int = 21, jar_paths: list[str] | None = 
 # =========================================================================
 
 def _parse_cookie_lines(path: str) -> "list[tuple[tuple[str, str, str], str]]":
-    """Return an ORDERED list of ``(key, raw_line)`` for every valid cookie line.
+    """Return an ORDERED, DEDUPLICATED list of ``(key, raw_line)``.
 
-    Why an ordered list, not a dict: real-world exports (Chrome DevTools
-    "Copy as Netscape" and some mobile-app exports) emit the same cookie
-    twice when the same key exists with different paths or HTTP-only
-    variants. The previous dict-based parser keyed by
-    ``(domain, path, name)`` silently dropped the duplicates on write-back,
-    losing cookies like ``ps_l``/``ps_n`` that Instagram's web auth needs.
-    See the operator's report after uploading a 2 KB jar: only 1 KB survived
-    a headless refresh cycle because the dict overwrote 13 of 26 lines.
+    Key is the full ``(domain, path, name)`` triple — the identity an HTTP
+    cookie jar actually uses. No jar can hold two cookies for the same triple,
+    so real-world exports that emit the same block twice (Chrome DevTools
+    "Copy as Netscape", mobile exporters, the operator's IG jar) are collapsed
+    to ONE entry per triple, keeping the **last** (freshest) line's value at
+    the first occurrence's position. Distinct variants — same name on a
+    different path, or on a different domain — are different keys and all
+    survive.
 
-    The list preserves the order and the duplicate count of the source. The
-    overlay code walks the list, applies updates per-key, and writes
-    everything back in the same order — so a future headless refresh sees
-    the SAME cookies (in the same order) the operator uploaded.
+    Why this matters (2026-09 corruption): the parser used to keep every
+    duplicate while :func:`overlay_cookies` updated only the *last* copy, so a
+    jar whose export repeated the whole block ended up with a frozen
+    "uploaded" half beside a rotating live half whose ``csrf mid rur`` values
+    silently diverged (observed 2026-09-13..15). Collapsing on read is the
+    correct jar semantics and makes the divergence impossible.
+
+    ``#HttpOnly_``-prefixed lines (Netscape's HttpOnly encoding) are parsed
+    with the prefix stripped, but the stored raw line keeps the prefix so it
+    round-trips byte-for-byte.
     """
-    out: "list[tuple[tuple[str, str, str], str]]" = []
+    by_key: "dict[tuple[str, str, str], str]" = {}
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
                 line = raw.rstrip("\n").rstrip("\r")
                 if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
+                    if line.startswith("#HttpOnly_"):
+                        work = line[len("#HttpOnly_"):]
+                    else:
+                        continue
+                else:
+                    work = line
+                parts = work.split("\t")
                 if len(parts) < 7:
                     continue
-                # (domain, path, name) — same triple as before; duplicates
-                # with the same triple are kept in the list (most recent
-                # wins in the overlay step; the rest stay for completeness).
-                out.append(((parts[0], parts[2], parts[5]), line))
+                # Reassigning an existing key updates the value but keeps its
+                # original position — last-write-wins, stable order.
+                by_key[(parts[0], parts[2], parts[5])] = line
     except Exception:
         pass
-    return out
+    return list(by_key.items())
 
 
 def has_real_cookie_lines(path_or_content: str, *, is_content: bool = False) -> bool:
@@ -233,7 +243,11 @@ def has_real_cookie_lines(path_or_content: str, *, is_content: bool = False) -> 
             return False
     for raw in content.splitlines():
         line = raw.rstrip("\r")
-        if not line or line.startswith("#"):
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#"):
             continue
         if len(line.split("\t")) >= 7:
             return True
@@ -373,29 +387,38 @@ def _merge_snapshot_into(original_path: str, snapshot_path: str) -> int:
             return -1  # real jar unparseable but non-empty: don't guess
 
         # Build a (domain, path, name) -> latest-line dict from the real
-        # jar so we can apply snapshot overrides. The list form preserves
-        # the source order + duplicates; the dict form is the lookup
-        # table we apply updates against.
+        # jar so we can apply snapshot overrides. Both sides are already
+        # deduplicated by that triple (see _parse_cookie_lines), so one entry
+        # per key is the whole story.
         real_by_key: dict[tuple[str, str, str], str] = {}
         for key, line in real_entries:
-            real_by_key[key] = line  # last-write wins per key, but the LIST keeps all entries
+            real_by_key[key] = line
 
         changed = 0
         changed_names: list[str] = []
+        appended: "list[tuple[tuple[str, str, str], str]]" = []
         for key, line in snap_entries:
-            if real_by_key.get(key) != line:
+            if key in real_by_key:
+                if real_by_key[key] != line:
+                    real_by_key[key] = line
+                    changed += 1
+                    changed_names.append(key[2])
+            else:
+                # A cookie the site added on this run (e.g. a new __Secure-*
+                # token). Overlay semantics are additive, so keep it.
                 real_by_key[key] = line
+                appended.append((key, line))
                 changed += 1
                 changed_names.append(key[2])
         if changed == 0:
             return 0
 
-        # Walk the real_entries list in source order. For each entry, use
-        # the (possibly-updated) real_by_key value. This preserves the
-        # source order AND the count of duplicate entries (so a jar that
-        # had NID twice stays NID twice after the overlay).
+        # Walk the real_entries list in source order, then append any keys the
+        # snapshot introduced. This keeps the operator's ordering and never
+        # deletes a line from the real jar.
         prev_mode = get_jar_mode(original_path)
-        lines = [real_by_key.get(key, line) for key, line in real_entries]
+        lines = [real_by_key[key] for key, _line in real_entries]
+        lines += [line for _key, line in appended]
         content = _NETSCAPE_HEADER + "\n" + "\n".join(lines) + "\n"
         _atomic_write(original_path, content, mode=prev_mode)
         # History: record which cookies the site rotated during this run.
@@ -420,6 +443,47 @@ def purge_snapshots(original_path: str | None = None) -> None:
                 pass
 
 
+def domain_matches(domain: str, allowed: "tuple[str, ...] | list[str]") -> bool:
+    """True when *domain* equals or is a subdomain of any allowed registrable
+    domain. The leading dot and case are ignored (``.instagram.com`` and
+    ``www.instagram.com`` both match ``instagram.com``)."""
+    d = (domain or "").lower().lstrip(".")
+    return any(d == a or d.endswith("." + a) for a in allowed)
+
+
+def normalize_jar(cookie_path: str, allowed_domains: "tuple[str, ...] | None" = None,
+                  actor: str = "normalize") -> int:
+    """Rewrite a jar deduplicated by ``(domain, path, name)`` (the parser already
+    does this on read) and optionally restricted to *allowed_domains*.
+
+    Domain pruning is the ONE operation that removes lines from a jar — it is a
+    deliberate repair for jars the old refresher polluted by overlaying every
+    cookie in the browser context (foreign ``google.com`` / ISP-injected
+    cookies ended up in the Instagram jar; see docs/memory). Returns the number
+    of lines dropped, 0 when nothing changed, or -1 when missing/unreadable.
+    """
+    if not cookie_path or not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
+        return -1
+    entries = _parse_cookie_lines(cookie_path)
+    if not entries:
+        return -1
+    kept: list[str] = []
+    for (domain, _path, _name), line in entries:
+        if allowed_domains and not domain_matches(domain, allowed_domains):
+            continue
+        kept.append(line)
+    dropped = len(entries) - len(kept)
+    if dropped <= 0:
+        return 0
+    with _LOCK:
+        prev_mode = get_jar_mode(cookie_path)
+        content = _NETSCAPE_HEADER + "\n" + "\n".join(kept) + "\n"
+        _atomic_write(cookie_path, content, mode=prev_mode)
+    cookie_history.record(cookie_path, "normalize", actor=actor,
+                          note=f"dropped {dropped} line(s)")
+    return dropped
+
+
 def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str],
                     actor: str = "unknown") -> int:
     """Overlay specific cookie value updates into a Netscape jar, atomically.
@@ -438,31 +502,34 @@ def overlay_cookies(cookie_path: str, updates: dict[tuple[str, str], str],
     entries = _parse_cookie_lines(cookie_path)
     if not entries:
         return -1
-    # Build a lookup of the latest (domain, name) -> line index so we can
-    # update in place while preserving the source order and duplicate count
-    # of the original jar.
-    latest_idx: dict[tuple[str, str], int] = {}
-    for i, (key, line) in enumerate(entries):
-        latest_idx[(key[0], key[2])] = i  # last-write wins per (domain, name)
+    # Index (domain, name) -> list of entry positions. A cookie can legitimately
+    # exist on several paths (e.g. "/" and "/some/dir"); every matching line is
+    # rewritten so the jar can never hold one fresh copy beside a stale one.
+    # Domain comparison ignores the leading dot (browsers/jars disagree on it).
+    idx_map: dict[tuple[str, str], list[int]] = {}
+    for i, (key, _line) in enumerate(entries):
+        idx_map.setdefault((key[0].lstrip(".").lower(), key[2]), []).append(i)
     changed = 0
     changed_names: list[str] = []
     new_entries: "list[tuple[tuple[str, str, str], str]]" = list(entries)
     for (domain, name), value in updates.items():
-        idx = latest_idx.get((domain, name))
-        if idx is not None:
-            key, line = new_entries[idx]
-            parts = line.split("\t")
-            if len(parts) >= 7 and parts[6] != value:
-                parts[6] = value
-                new_entries[idx] = (key, "\t".join(parts))
-                changed += 1
-                changed_names.append(name)
+        positions = idx_map.get((domain.lstrip(".").lower(), name))
+        if positions:
+            for idx in positions:
+                key, line = new_entries[idx]
+                parts = line.split("\t")
+                if len(parts) >= 7 and parts[6] != value:
+                    parts[6] = value
+                    new_entries[idx] = (key, "\t".join(parts))
+                    changed += 1
+                    if name not in changed_names:
+                        changed_names.append(name)
         else:
             # Cookie absent from the jar: append a new entry (session cookie form).
             new_key = (domain, "/", name)
             new_line = f"{domain}\tTRUE\t/\tTRUE\t0\t{name}\t{value}"
             new_entries.append((new_key, new_line))
-            latest_idx[(domain, name)] = len(new_entries) - 1
+            idx_map[(domain.lstrip(".").lower(), name)] = [len(new_entries) - 1]
             changed += 1
             changed_names.append(name)
     if changed == 0:
