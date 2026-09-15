@@ -278,6 +278,13 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    path keep `noplaylist=True` — do **not** remove it: a single video that
    happens to carry a stray `&list=` must stay a single video. A bad playlist
    entry is **skipped, not fatal** — keep the per-video try/except.
+   **Non-YouTube playlists must be unwrapped (2026-09-15):** a multi-video
+   tweet comes back from yt-dlp as `_type == "playlist"` even with
+   `noplaylist=True` (that flag only collapses YouTube `?list=`). `extract_formats`
+   therefore picks the **first playable entry** (keeping the tweet title) before
+   the live/storyboard check — without that, `formats` is empty and the bot
+   raised a bogus "YouTube is requiring sign-in" error for an X link. The
+   YouTube-worded storyboard hint is now applied **only** to youtube.com URLs.
 
 9. **Video button sizes already include the merged audio track.** In
    `extract_formats`, each video option's `bytes` is `video_stream + best_audio`
@@ -565,6 +572,17 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     workers refresh it per poll and per backfill item. **X is at-least-once**:
     the cursor is not advanced past a failed relay (3-strike cap unblocks a
     poison message) — do not restore the old unconditional `_bump_cursor`.
+
+    **IG reactions + X linking (2026-09-15).** The IG worker reacts to each DM it
+    receives from the paired contact with `config.IG_DIRECT_REACT_EMOJI` (default
+    👍, empty disables) via instagrapi's `direct_send_reaction` — an IG private
+    API call, **no headless browser needed**; `thread_id` is threaded into
+    `_ig_process_message` at both call sites. "✅" is NOT a valid IG DM reaction,
+    so it must not be the default. X has a mirror of the IG pairing handshake
+    (`state["x"]["paired"]`, consumed by `_x_pairing_scan` in both the twikit and
+    bridge-line processors; Admin → Direct-Forward → 🔗 Link X). Because X uses
+    self-DM, **one X account per bot session** — the link only verifies/displays
+    the account whose session is in `xcookies.txt`.
 
  14. **Interactive responses quote the user's link message.** The format
      keyboard, playlist menus, skip warnings and **every uploaded file part**

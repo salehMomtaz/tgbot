@@ -13,6 +13,7 @@ These are consolidated, repo-local copies of the project's long-term memory (ori
 | [Balebot integration](BALEBOT.md) | Bale.ai experiment → optional frontend inside tgbot, ported extras, hardening | `tgbot-balebot-integration`, `tgbot-balebot-merge-2026-08-13`, `tgbot-balebot-hardening-2026-08-13` |
 | [IG session death 2026-09-05](tgbot-2026-09-05-ig-session-death-incident.md) | private-API session killed mid-archive (jar NOT corrupted — verdict via history fingerprints), friend-media IG circuit breaker + probe-noise log filter + PhotoExtInvalid magic-bytes fix | session analysis of `cookies/history.jsonl` + 12h log audit |
 | [Log + cookie audit 2026-09-15](tgbot-2026-09-15-log-and-cookie-audit.md) | 10-day log scan; thread-exhaustion cascade (`can't start new thread`) from per-record logger threads → bounded log queue; IG jar corruption (overlay updated only the last duplicate + refresher injected foreign-domain cookies + broken logged-in gate) → dedupe-by-triple, allowlists, repaired jar | log channel + `cookies/history.jsonl` |
+| [DM linking + downloader fixes 2026-09-15](tgbot-2026-09-15-dm-forwarder-linking-and-downloader.md) | multi-video-tweet playlist misrouted to the YouTube storyboard error (fixed); IG DM emoji reactions via instagrapi; X linking handshake (IG pairing verified working); TikTok history verdict | operator report |
 
 Other consolidated docs live one level up:
 
