@@ -441,6 +441,19 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     twikit session file — `direct_x_cookies.json` no longer exists; jar
     write-back keeps the session warm. `X_DIRECT_USERNAME`/`X_DIRECT_PASSWORD`/
     `X_DIRECT_EMAIL`/`X_DIRECT_FROM_USER_ID` are gone from config (removed).
+    **Other X accounts can also be linked (2026-09-16).** The Deno bridge
+    (`xchat_bridge.mjs`) now enumerates the bot account's DIRECT conversations
+    (`client.xchat.conversations()`) and emits each new message with `sender`
+    (peer user id) and `conv` (conversation id); the self-DM path is unchanged.
+    The worker relays a peer conversation ONLY when its sender is in
+    `state.x.peers`, populated by the linking handshake (Admin → Direct-Forward
+    → 🔗 Link X account → send the code from the account to link). Sequence ids
+    are PER-CONVERSATION, so the worker keeps `state.x.cursors[conv]` and the
+    self-DM keeps `state.x.last_id` — never collapse them into one cursor. On a
+    newly-seen conversation the bridge primes to `latest-1` (via
+    `client.xchat.read(peerId)` when the inbox's `latest_message_sequence_id`
+    is 0) so history isn't dumped but a just-sent linking code is still seen.
+    Groups are skipped.
     Tweet links/shares pick the HIGHEST quality automatically
     (`_x_deliver_tweet`: `extract_formats` → `videos[0]`, ceiling 2 GB bot /
     4 GB Premium; over-ceiling posts the format-selection keyboard, not a

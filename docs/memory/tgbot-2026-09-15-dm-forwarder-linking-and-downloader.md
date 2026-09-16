@@ -74,3 +74,37 @@ Push notifications remain the primary path and are unaffected.
   `_x_pairing_scan` consumes the code and ignores non-matching text;
   `_ig_react_to` calls `direct_send_reaction` with the right args and skips
   non-numeric ids.
+
+## Follow-up: linking OTHER X accounts (XChat E2EE) — 2026-09-16
+
+The operator confirmed the accounts they want to relay use **XChat E2EE** and
+that the first "Link X" only verified the self-DM account (a DM from another
+account is a separate conversation the worker never read). That UI text was
+misleading and has been reworded; the feature is now real.
+
+**How it works now:** `xchat_bridge.mjs` additionally enumerates the bot
+account's **direct conversations** (`client.xchat.conversations()`, emusks'
+inbox-page helper) and emits each new message with `sender` (peer user id) and
+`conv` (conversation id) added to the canonical line. The self-DM path is
+unchanged. The Python worker relays a peer conversation only when its sender is
+in `state.x.peers`; the code handshake links the **sender**.
+
+Key correctness details:
+- **Per-conversation cursors.** XChat sequence ids are per-conversation, so a
+  single scalar would collide across peers. The bridge keeps `state.convs[cid]`
+  (persisted in `cache/xchat_bridge_state.json`); the worker keeps
+  `state.x.cursors[cid]` for peers and `state.x.last_id` for the self-DM.
+- **Priming.** A newly-seen conversation is primed to `latest-1` so history
+  isn't dumped but the just-sent linking code is still seen. The inbox's
+  `latest_message_sequence_id` came back **0** for existing threads, so the
+  bridge falls back to `client.xchat.read(peerId)` to find the true newest seq.
+  (The state file had to be reset to `convs:{}` once so the bad 0-cursors were
+  re-primed correctly.)
+- **Groups skipped**; only `type == "direct"` conversations are scanned.
+- Admin: **🔗 Link X account** / **💔 Unlink all X**; the status line shows
+  "self-DM + N linked account(s)".
+
+Verified: `deno check xchat_bridge.mjs`, `py_compile`, and unit tests for
+`_x_read_inbox` per-conversation filtering and `_x_pairing_scan`→`peers`.
+Live: the bridge logged 4 direct conversations primed to their real newest seqs
+and is watching for new messages.
