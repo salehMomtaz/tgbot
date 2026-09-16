@@ -272,9 +272,19 @@ async function main() {
             // Newly-seen conversation: prime so its history isn't dumped, but
             // leave the NEWEST message eligible (latest-1) — a linking code is
             // usually the message that first surfaces the conversation, and we
-            // must not skip it.
+            // must not skip it. `latest_message_sequence_id` is sometimes 0 in
+            // the inbox payload, so fall back to reading the conversation to
+            // find the true newest seq.
             let latest = 0n;
             try { latest = BigInt(conv.latestSequenceId ?? "0"); } catch { latest = 0n; }
+            if (latest <= 0n) {
+              try {
+                const { messages } = await client.xchat.read(peerId);
+                if (messages.length) latest = BigInt(messages[0].sequenceId);
+              } catch (e) {
+                console.error(`[xchat_bridge] prime read(${peerId}) failed: ${e?.message ?? e}`);
+              }
+            }
             convCursors[cid] = String(latest > 0n ? latest - 1n : 0n);
             saveState({ last_seq: since, convs: convCursors });
             console.log(`[xchat_bridge] new direct conversation with ${peerId} — cursor primed to ${convCursors[cid]}`);
