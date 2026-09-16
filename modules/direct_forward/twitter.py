@@ -372,15 +372,17 @@ async def _x_pairing_scan(text: str, sender_uid: str, state: dict,
     return True
 
 
-async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premium_client, self_uid: str) -> None:
+async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premium_client, self_uid: str,
+                             state: dict | None = None) -> None:
     """Process one raw self-DM message (dict from _x_fetch_self_messages)."""
+    state = state if state is not None else _load_state()
     self_label = f"x-user `{self_uid}`"
     msg_id = m.get("id", "?")
 
     # Linking handshake: a pending code sent to the self-DM is consumed here
     # instead of being relayed.
     if await _x_pairing_scan(m.get("text", "") or "", self_uid,
-                             _load_state(), bot_client, chat_id):
+                             state, bot_client, chat_id):
         return
 
     # 1) Tweet shared via DM → route through the yt-dlp pipeline, auto-picking
@@ -433,7 +435,8 @@ async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premiu
         logger.info(f"[DirectForward/X] msg {msg_id}: no relayable media — skipped")
 
 
-async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client, premium_client, self_uid: str) -> None:
+async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client, premium_client, self_uid: str,
+                                 state: dict | None = None) -> None:
     """Process one canonical line from the XChat bridge's inbox file.
 
     Schema (see xchat_bridge.mjs):
@@ -443,7 +446,13 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
     Lines from another account's conversation also carry ``sender`` (their user
     id) and ``conv``. The self-DM (no ``sender``) is always relayed; a peer
     conversation is relayed only when that sender is linked (``state.x.peers``).
-    Cursors are per-conversation (see ``_x_read_inbox``)."""
+    Cursors are per-conversation (see ``_x_read_inbox``).
+
+    *state* MUST be the worker's live state dict (not a throwaway ``_load_state()``):
+    the pairing handshake adds ``peers`` to it, and the worker saves that same
+    dict at the end of the poll — a separate dict would be clobbered (that bug
+    made every linked account's messages show as 'unlinked … ignored')."""
+    state = state if state is not None else _load_state()
     sender = str(line.get("sender") or "")
     is_self = (not sender) or (sender == str(self_uid))
     self_label = f"x-user `{self_uid}`" if is_self else f"x-user `{sender}`"
@@ -452,15 +461,13 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
 
     # The linking code may arrive from the account being linked.
     if await _x_pairing_scan(line.get("text", "") or "", sender or self_uid,
-                             _load_state(), bot_client, chat_id):
+                             state, bot_client, chat_id):
         return
 
     # Relay gating: ignore conversations with accounts that aren't linked.
-    if not is_self:
-        st = _load_state()
-        if str(sender) not in _get_peers(st, "x"):
-            logger.info(f"[DirectForward/X] msg {msg_id} from unlinked {sender} — ignored")
-            return
+    if not is_self and str(sender) not in _get_peers(state, "x"):
+        logger.info(f"[DirectForward/X] msg {msg_id} from unlinked {sender} — ignored")
+        return
 
     if kind == "tweet":
         url = line.get("url", "")
@@ -894,7 +901,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                     lid = line.get("_id")
                     try:
                         await _x_process_bridge_line(line, client, queue, chat_id,
-                                                     bot_client, premium_client, uid)
+                                                     bot_client, premium_client, uid, state)
                         fail_counts.pop(str(lid), None)
                         _advance(line)
                     except Exception as e:
@@ -923,7 +930,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
             for m in new_msgs:
                 mid = str(m["id"])
                 try:
-                    await _x_process_message(client, m, queue, chat_id, bot_client, premium_client, uid)
+                    await _x_process_message(client, m, queue, chat_id, bot_client, premium_client, uid, state)
                     fail_counts.pop(mid, None)
                 except Exception as e:
                     n = int(fail_counts.get(mid, 0)) + 1
