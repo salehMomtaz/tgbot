@@ -682,17 +682,21 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
     elif data == "admin_direct_pair_x":
         code = direct_forward.request_pair_code("x", requested_by=user_id)
         await callback_query.message.edit_text(
-            "🔗 **X / Twitter linking handshake**\n\n"
+            "🔗 **X / Twitter — verify the linked account**\n\n"
             f"Your one-time code: **`{code}`**\n\n"
-            f"1. Open X and go to your self-DM (**Message Yourself**).\n"
-            f"2. Send this code (just the 6 digits) to yourself.\n"
-            f"3. Within ~2 poll intervals the bot will confirm here which X "
-            f"account is linked.\n\n"
-            "The code expires in 10 minutes. The self-DM method relays message "
-            "media from the one X account whose session is in `xcookies.txt`.",
+            "⚠️ X uses the **self-DM** method: it relays media sent to the X "
+            "account whose session is in `xcookies.txt`, by messaging that same "
+            "account (Message Yourself). Sending this code from a *different* "
+            "X account will **not** link that account — other-account DMs are "
+            "not read yet.\n\n"
+            "To verify the linked account:\n"
+            f"1. Open X as the account in `xcookies.txt`.\n"
+            f"2. Go to **Message Yourself** and send the code `{code}`.\n"
+            f"3. Within ~2 poll intervals the bot confirms the link here.\n\n"
+            "The code expires in 10 minutes.",
             reply_markup=get_direct_menu_keyboard()
         )
-        await log_event(f"📨 **Admin Action:** X linking code issued (user {user_id}).")
+        await log_event(f"📨 **Admin Action:** X link verification code issued (user {user_id}).")
         await callback_query.answer()
 
     elif data == "admin_direct_unpair_x":

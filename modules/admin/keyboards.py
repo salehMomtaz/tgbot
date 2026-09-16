@@ -90,7 +90,7 @@ def get_direct_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💔 Unpair IG", callback_data="admin_direct_unpair_ig")],
         [InlineKeyboardButton(x_label, callback_data="admin_direct_toggle_x"),
          InlineKeyboardButton("🧪 Test X Cookies", callback_data="admin_direct_test_x")],
-        [InlineKeyboardButton("🔗 Link X", callback_data="admin_direct_pair_x"),
+        [InlineKeyboardButton("🔗 Verify X account", callback_data="admin_direct_pair_x"),
          InlineKeyboardButton("💔 Unlink X", callback_data="admin_direct_unpair_x")],
         [InlineKeyboardButton(tt_label, callback_data="admin_direct_toggle_tiktok"),
          InlineKeyboardButton("🧪 Test TikTok", callback_data="admin_direct_test_tiktok")],
