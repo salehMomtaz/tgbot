@@ -213,34 +213,84 @@ async function main() {
   console.log(`[xchat_bridge] logged in as @${me.username} (${me.id}); XChat identity recovered.`);
 
   const state = loadState();
+  const convCursors = (state.convs && typeof state.convs === "object") ? { ...state.convs } : {};
   let since = state.last_seq;
-  const convId = `${me.id}:${me.id}`;
+  const selfConvId = `${me.id}:${me.id}`;
 
-  const { messages } = await client.xchat.read(me.id);
-  const newest = messages.length ? String(messages[0].sequenceId) : "0";
-  if (!since) {
-    since = newest;
-    saveState({ last_seq: since });
-    console.log(`[xchat_bridge] first run — cursor primed to ${since}, backlog skipped.`);
+  // Prime the self-DM cursor on first run (skip backlog).
+  try {
+    const { messages } = await client.xchat.read(me.id);
+    const newest = messages.length ? String(messages[0].sequenceId) : "0";
+    if (!since) {
+      since = newest;
+      console.log(`[xchat_bridge] first run — self-DM cursor primed to ${since}, backlog skipped.`);
+    }
+  } catch (e) {
+    if (!since) since = "0";
+    console.error(`[xchat_bridge] self-DM prime failed: ${e?.message ?? e}`);
   }
-  console.log(`[xchat_bridge] polling self-DM ${convId} on a random ${POLL_MIN_S}-${POLL_MAX_S}s window from seq ${since}`);
+  saveState({ last_seq: since, convs: convCursors });
+  console.log(`[xchat_bridge] watching self-DM ${selfConvId} + other direct conversations on a random ${POLL_MIN_S}-${POLL_MAX_S}s window from seq ${since}`);
+
+  function emitLines(lines) {
+    if (!lines.length) return;
+    const tmp = `${INBOX}.tmp`;
+    for (const line of lines) appendFileSync(tmp, JSON.stringify(line) + "\n");
+    try {
+      appendFileSync(INBOX, readFileSync(tmp, "utf8"));
+    } finally {
+      try { Deno.remove(tmp); } catch {}
+    }
+  }
 
   while (true) {
     try {
-      const fresh = await fetchNewMessages(client, convId, since, client._xchat);
-      if (fresh.length) {
-        const tmp = `${INBOX}.tmp`;
-        for (const line of fresh) {
-          appendFileSync(tmp, JSON.stringify(line) + "\n");
+      // 1) Self-DM conversation (unchanged path).
+      const selfFresh = await fetchNewMessages(client, selfConvId, since, client._xchat);
+      if (selfFresh.length) {
+        emitLines(selfFresh);
+        since = selfFresh[selfFresh.length - 1].id;
+        saveState({ last_seq: since, convs: convCursors });
+        console.log(`[xchat_bridge] emitted ${selfFresh.length} new self-DM message(s) up to ${since}`);
+      }
+
+      // 2) Other DIRECT conversations, including XChat-encrypted ones. The
+      //    inbox page gives each conversation + its latest seq; we keep a
+      //    per-conversation cursor so a newly-seen peer is primed (its history
+      //    isn't dumped) and only later messages are emitted. Each emitted line
+      //    carries `sender` (the peer's user id) and `conv`, so the bot can
+      //    relay only from explicitly linked accounts.
+      try {
+        const convos = await client.xchat.conversations();
+        for (const conv of convos) {
+          if (conv.type !== "direct") continue;               // skip groups
+          const peerId = (conv.participants || []).find((p) => String(p) !== String(me.id));
+          if (!peerId) continue;                              // self-DM handled above
+          const cid = conv.conversationId;
+          if (!cid) continue;
+          if (convCursors[cid] === undefined) {
+            // Newly-seen conversation: prime so its history isn't dumped, but
+            // leave the NEWEST message eligible (latest-1) — a linking code is
+            // usually the message that first surfaces the conversation, and we
+            // must not skip it.
+            let latest = 0n;
+            try { latest = BigInt(conv.latestSequenceId ?? "0"); } catch { latest = 0n; }
+            convCursors[cid] = String(latest > 0n ? latest - 1n : 0n);
+            saveState({ last_seq: since, convs: convCursors });
+            console.log(`[xchat_bridge] new direct conversation with ${peerId} — cursor primed to ${convCursors[cid]}`);
+            continue;
+          }
+          const fresh = await fetchNewMessages(client, cid, convCursors[cid], client._xchat);
+          if (fresh.length) {
+            for (const ln of fresh) { ln.sender = String(peerId); ln.conv = cid; }
+            emitLines(fresh);
+            convCursors[cid] = fresh[fresh.length - 1].id;
+            saveState({ last_seq: since, convs: convCursors });
+            console.log(`[xchat_bridge] emitted ${fresh.length} message(s) from ${peerId}`);
+          }
         }
-        try {
-          appendFileSync(INBOX, readFileSync(tmp, "utf8"));
-        } finally {
-          try { Deno.remove(tmp); } catch {}
-        }
-        since = fresh[fresh.length - 1].id;
-        saveState({ last_seq: since });
-        console.log(`[xchat_bridge] emitted ${fresh.length} new message(s) up to ${since}`);
+      } catch (e) {
+        console.error(`[xchat_bridge] conversation scan failed: ${e?.message ?? e}`);
       }
     } catch (e) {
       console.error(`[xchat_bridge] poll error: ${e?.message ?? e}`);

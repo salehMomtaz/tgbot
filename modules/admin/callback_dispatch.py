@@ -682,21 +682,18 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
     elif data == "admin_direct_pair_x":
         code = direct_forward.request_pair_code("x", requested_by=user_id)
         await callback_query.message.edit_text(
-            "🔗 **X / Twitter — verify the linked account**\n\n"
+            "🔗 **Link an X / Twitter account**\n\n"
             f"Your one-time code: **`{code}`**\n\n"
-            "⚠️ X uses the **self-DM** method: it relays media sent to the X "
-            "account whose session is in `xcookies.txt`, by messaging that same "
-            "account (Message Yourself). Sending this code from a *different* "
-            "X account will **not** link that account — other-account DMs are "
-            "not read yet.\n\n"
-            "To verify the linked account:\n"
-            f"1. Open X as the account in `xcookies.txt`.\n"
-            f"2. Go to **Message Yourself** and send the code `{code}`.\n"
-            f"3. Within ~2 poll intervals the bot confirms the link here.\n\n"
+            "1. From the X account you want to relay, DM the bot's X account "
+            f"(the one in `xcookies.txt`) and send the code `{code}`.\n"
+            "2. Within ~2 poll intervals the bot links that sender here.\n\n"
+            "After linking, media that account DMs to the bot's X account is "
+            "relayed — including XChat E2EE. The bot's own self-DM (Message "
+            "Yourself) keeps working as always; you can link several accounts. "
             "The code expires in 10 minutes.",
             reply_markup=get_direct_menu_keyboard()
         )
-        await log_event(f"📨 **Admin Action:** X link verification code issued (user {user_id}).")
+        await log_event(f"📨 **Admin Action:** X account-link code issued (user {user_id}).")
         await callback_query.answer()
 
     elif data == "admin_direct_unpair_x":

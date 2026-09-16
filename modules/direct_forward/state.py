@@ -112,6 +112,24 @@ def _set_pair(state: dict, platform: str, user_id: str | int, username: str = ""
     }
 
 
+def _get_peers(state: dict, platform: str) -> dict:
+    """Extra linked accounts for *platform* (a dict keyed by user id).
+
+    X needs this: besides the self-DM, the bot relays XChat-encrypted DMs from
+    other accounts that explicitly linked via the code handshake. Instagram
+    keeps using the single ``paired`` contact."""
+    peers = state.get(platform, {}).get("peers")
+    return peers if isinstance(peers, dict) else {}
+
+
+def _set_peer(state: dict, platform: str, user_id: str | int, username: str = "") -> None:
+    peers = state.setdefault(platform, {}).setdefault("peers", {})
+    peers[str(user_id)] = {
+        "username": (username or "").lstrip("@"),
+        "paired_at": time.time(),
+    }
+
+
 def request_pair_code(platform: str, requested_by: int) -> str:
     """Issue a one-time pairing code for *platform*. Called from the admin
     console; the corresponding DM worker picks it up on its next poll."""
@@ -130,17 +148,22 @@ def cancel_pairing(platform: str) -> None:
 
 
 def unpair_platform(platform: str) -> bool:
-    """Forget the paired DM contact for *platform*. Returns True when a pair
-    existed. Also cancels any pending pairing handshake for the platform. The
+    """Forget the paired DM contact(s) for *platform*. Returns True when
+    something was unlinked. Also cancels any pending pairing handshake. The
     worker re-reads the state on its next poll, so unlinking is effective
     within one poll interval without a restart."""
     state = _load_state()
     _pending_pairs.pop(platform, None)
+    removed = False
     if _get_pair(state, platform):
         state.get(platform, {}).pop("paired", None)
+        removed = True
+    if _get_peers(state, platform):
+        state.get(platform, {}).pop("peers", None)
+        removed = True
+    if removed:
         _merge_state_save(state, {platform})
-        return True
-    return False
+    return removed
 
 
 def set_platform_pair(platform: str, user_id: str | int, username: str = "") -> None:
@@ -164,3 +187,24 @@ def pairing_status(platform: str, state: dict) -> str:
     if pair:
         return f"paired with @{pair.get('username', '?')} (id {pair['user_id']}){pending_txt}"
     return f"not paired{pending_txt}"
+
+
+def x_link_status(state: dict) -> str:
+    """Human summary of the X link: the self-DM account (always relayed) plus
+    any extra linked accounts."""
+    peers = _get_peers(state, "x")
+    pending = _pending_pairs.get("x")
+    pending_txt = ""
+    if pending:
+        if pending["expires_at"] > time.time():
+            pending_txt = f" · code `{pending['code']}` pending ({int(pending['expires_at'] - time.time())}s)"
+        else:
+            _pending_pairs.pop("x", None)
+    n = len(peers)
+    if n:
+        names = ", ".join(
+            f"@{p.get('username')}" if p.get("username") else f"id {uid}"
+            for uid, p in list(peers.items())[:5]
+        )
+        return f"self-DM + {n} linked account(s): {names}{pending_txt}"
+    return f"self-DM only (no extra accounts linked){pending_txt}"

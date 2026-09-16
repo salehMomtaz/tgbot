@@ -21,6 +21,7 @@ from .state import (
     unpair_platform,
     set_platform_pair,
     pairing_status,
+    x_link_status,
 )
 
 from .common import (
@@ -127,6 +128,7 @@ __all__ = [
     "unpair_platform",
     "set_platform_pair",
     "pairing_status",
+    "x_link_status",
     # common
     "URL_RE",
     "IG_POST_RE",

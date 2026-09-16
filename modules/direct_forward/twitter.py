@@ -18,7 +18,7 @@ from utils.shared import DOWNLOAD_CACHE, wait_if_stopped, mark_worker_alive
 
 from .state import (
     _load_state, _state_save_owned, _cursor,
-    _bump_cursor, _pending_pairs, _set_pair,
+    _bump_cursor, _pending_pairs, _set_pair, _set_peer, _get_peers,
 )
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
@@ -336,15 +336,14 @@ async def _x_fallback_photos(client, url: str) -> list[str]:
     return out
 
 
-async def _x_pairing_scan(text: str, self_uid: str, state: dict,
+async def _x_pairing_scan(text: str, sender_uid: str, state: dict,
                           bot_client, chat_id: int) -> bool:
-    """Consume an X linking code sent to the self-DM; on match, record the link
-    and confirm in Telegram. Returns True when the message was the code.
+    """Consume an X linking code; on match, link the SENDER and confirm.
 
-    X uses the SELF-DM method (the bot account messages itself), so the linked
-    account is always the account whose session is in ``xcookies.txt`` — this
-    handshake just verifies the operator controls it and gives the console a
-    "linked account" to display (mirrors the Instagram pairing)."""
+    X relays the self-DM account automatically; this handshake adds *another*
+    account: the operator sends the code from that account to the bot account,
+    the Deno bridge sees it in that XChat conversation, and the worker links the
+    sender's user id so its media is relayed too (XChat E2EE included)."""
     pending = _pending_pairs.get("x")
     if not pending:
         return False
@@ -353,19 +352,23 @@ async def _x_pairing_scan(text: str, self_uid: str, state: dict,
         return False
     if pending["code"] not in (text or ""):
         return False
-    _set_pair(state, "x", self_uid)
+    if not sender_uid:
+        return False
+    _set_pair(state, "x", sender_uid)
+    _set_peer(state, "x", sender_uid)
     await _state_save_owned(state, {"x"})
     _pending_pairs.pop("x", None)
     try:
         await bot_client.send_message(
             chat_id=chat_id,
-            text=(f"✅ **X / Twitter linked!**\n\n"
-                  f"The bot will relay message media sent to the X self-DM "
-                  f"(**Message Yourself**) of the linked account `{self_uid}`."),
+            text=(f"✅ **X / Twitter account linked!**\n\n"
+                  f"Sender id `{sender_uid}` is now linked: media it DMs to the "
+                  f"bot's X account (including XChat-encrypted) will be relayed. "
+                  f"The self-DM account keeps working as before."),
         )
     except Exception as e:
         logger.warning(f"[DirectForward/X] linking confirmation failed: {e}")
-    logger.info(f"[DirectForward/X] linked to self-DM account {self_uid} via handshake code")
+    logger.info(f"[DirectForward/X] linked sender {sender_uid} via handshake code")
     return True
 
 
@@ -437,15 +440,27 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
       {"id": seq, "at": ms, "kind": "tweet", "url": "...", "text": ""}
       {"id": seq, "at": ms, "kind": "media", "media_url": "...", "is_photo": true, "text": ""}
       {"id": seq, "at": ms, "kind": "text", "text": "..."}
-    The XChat sequence id IS the legacy DM id (same id space), so the cursor in
-    direct_forward_state.json applies unchanged — nothing double-relays."""
-    self_label = f"x-user `{self_uid}`"
+    Lines from another account's conversation also carry ``sender`` (their user
+    id) and ``conv``. The self-DM (no ``sender``) is always relayed; a peer
+    conversation is relayed only when that sender is linked (``state.x.peers``).
+    Cursors are per-conversation (see ``_x_read_inbox``)."""
+    sender = str(line.get("sender") or "")
+    is_self = (not sender) or (sender == str(self_uid))
+    self_label = f"x-user `{self_uid}`" if is_self else f"x-user `{sender}`"
     msg_id = line.get("id", "?")
     kind = line.get("kind")
 
-    if await _x_pairing_scan(line.get("text", "") or "", self_uid,
+    # The linking code may arrive from the account being linked.
+    if await _x_pairing_scan(line.get("text", "") or "", sender or self_uid,
                              _load_state(), bot_client, chat_id):
         return
+
+    # Relay gating: ignore conversations with accounts that aren't linked.
+    if not is_self:
+        st = _load_state()
+        if str(sender) not in _get_peers(st, "x"):
+            logger.info(f"[DirectForward/X] msg {msg_id} from unlinked {sender} — ignored")
+            return
 
     if kind == "tweet":
         url = line.get("url", "")
@@ -490,17 +505,24 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
     logger.info(f"[DirectForward/X] msg {msg_id}: bridge line kind {kind!r} not relayable — skipped")
 
 
-def _x_read_inbox(cursor: int) -> list[dict]:
+def _x_read_inbox(state: dict) -> list[dict]:
     """Parse cache/xchat_inbox.jsonl (created by the Deno XChat bridge). Returns
-    lines whose id is strictly above *cursor*, ascending by id. Missing file →
-    []. Corrupt lines are skipped — a partially written line must not poison the
-    whole batch."""
+    lines not yet processed, ascending by timestamp.
+
+    Cursor model — per conversation: XChat sequence ids are PER-CONVERSATION, so
+    a single scalar cursor would collide across peers. The self-DM uses
+    ``state["x"]["last_id"]`` (its ids are the legacy DM id space); each peer
+    conversation the bridge emits carries ``conv`` and its own cursor under
+    ``state["x"]["cursors"][conv]``. Missing file → []. Corrupt lines skipped."""
     inbox = getattr(config, "XCHAT_INBOX", "cache/xchat_inbox.jsonl")
     try:
         with open(inbox, "r", encoding="utf-8") as f:
             raw = f.readlines()
     except OSError:
         return []
+    x = state.get("x", {}) if isinstance(state, dict) else {}
+    self_cursor = int(x.get("last_id") or 0)
+    cursors = x.get("cursors") or {}
     out = []
     for rl in raw:
         rl = rl.strip()
@@ -514,11 +536,17 @@ def _x_read_inbox(cursor: int) -> list[dict]:
             lid = int(line.get("id") or 0)
         except (TypeError, ValueError):
             continue
-        if lid > cursor:
+        conv = str(line.get("conv") or "")
+        cur = int(cursors.get(conv, 0)) if conv else self_cursor
+        if lid > cur:
             line["_id"] = lid
             out.append(line)
-    out.sort(key=lambda x: x["_id"])
+    out.sort(key=lambda ln: (int(ln.get("at") or 0), ln["_id"]))
     return out
+
+
+def _bump_conv_cursor(state: dict, conv: str, lid) -> None:
+    state.setdefault("x", {}).setdefault("cursors", {})[str(conv)] = str(lid)
 
 
 async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
@@ -847,21 +875,28 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
             # cannot; its sequence ids live in the same id space as the legacy
             # DM ids, so the shared cursor dedupes. Fall back to the twikit
             # poll only when the bridge has never produced a file.
-            bridge_lines = _x_read_inbox(last_seen)
+            bridge_lines = _x_read_inbox(state)
             if bridge_lines:
                 # At-least-once: do NOT advance the cursor past a relay that
                 # raised, so the next poll retries it (the old code bumped
                 # unconditionally and silently dropped failed sends). A 3-strike
                 # cap prevents one permanently-bad message from blocking the
-                # whole self-DM queue forever.
+                # whole queue forever. Cursor is per-conversation.
                 fail_counts = state.setdefault("x", {}).setdefault("fail_counts", {})
+
+                def _advance(line):
+                    if line.get("conv"):
+                        _bump_conv_cursor(state, line["conv"], line["_id"])
+                    else:
+                        _bump_cursor(state, "x", line["_id"])
+
                 for line in bridge_lines:
                     lid = line.get("_id")
                     try:
                         await _x_process_bridge_line(line, client, queue, chat_id,
                                                      bot_client, premium_client, uid)
                         fail_counts.pop(str(lid), None)
-                        _bump_cursor(state, "x", lid)
+                        _advance(line)
                     except Exception as e:
                         n = int(fail_counts.get(str(lid), 0)) + 1
                         fail_counts[str(lid)] = n
@@ -872,7 +907,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                                            f"failed 3x — skipping to unblock the queue "
                                            f"(cursor advanced).")
                             fail_counts.pop(str(lid), None)
-                            _bump_cursor(state, "x", lid)
+                            _advance(line)
                         else:
                             break  # leave this and the rest for the next poll
                 await _state_save_owned(state, {"x"})
