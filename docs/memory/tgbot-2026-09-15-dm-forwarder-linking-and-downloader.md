@@ -108,3 +108,19 @@ Verified: `deno check xchat_bridge.mjs`, `py_compile`, and unit tests for
 `_x_read_inbox` per-conversation filtering and `_x_pairing_scan`→`peers`.
 Live: the bridge logged 4 direct conversations primed to their real newest seqs
 and is watching for new messages.
+
+## Bug: linked X account's messages showed as "unlinked — ignored" (2026-09-16)
+
+After linking `2095053127040876548` the bot confirmed, but every message from it
+logged `from unlinked … — ignored` and `state.x.peers` was absent from
+`direct_forward_state.json`. Root cause: `_merge_state_save` replaces the
+platform section wholesale (`disk["x"] = state["x"]`), and the linker set
+`peers` on a throwaway `_load_state()` dict — the worker's end-of-poll save
+from its own (pre-link) in-memory `state` then erased `peers`. Fixed by
+threading the worker's live `state` dict through
+`_x_process_bridge_line` / `_x_process_message` / `_x_pairing_scan` so the peer
+is written to the same dict the worker persists. Verified live: the 8 queued
+tweets from that sender relayed (`✅ relayed tweet … -> 7429671248`).
+
+Reminder: peer writes must always target the worker's live state dict, never a
+fresh `_load_state()`.

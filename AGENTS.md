@@ -454,6 +454,13 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `client.xchat.read(peerId)` when the inbox's `latest_message_sequence_id`
     is 0) so history isn't dumped but a just-sent linking code is still seen.
     Groups are skipped.
+    **Pairing MUST write the worker's LIVE state dict (2026-09-16).** `_merge_state_save`
+    replaces a platform section wholesale (`disk[plat] = state[plat]`), so if the
+    handshake sets `peers` on a throwaway `_load_state()` dict, the worker's
+    end-of-poll save from its own (pre-link) in-memory state wipes it and every
+    message then logs `from unlinked … — ignored`. `_x_process_bridge_line` /
+    `_x_process_message` / `_x_pairing_scan` therefore all take the caller's
+    `state` and mutate that one dict.
     Tweet links/shares pick the HIGHEST quality automatically
     (`_x_deliver_tweet`: `extract_formats` → `videos[0]`, ceiling 2 GB bot /
     4 GB Premium; over-ceiling posts the format-selection keyboard, not a
