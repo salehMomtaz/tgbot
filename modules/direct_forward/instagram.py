@@ -195,16 +195,9 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
         # raises LoginRequired and the story is silently lost. Re-login once from
         # the freshest jar sessionid and retry before giving up.
         if type(e).__name__ == "LoginRequired":
-            logger.info(f"[DirectForward/IG] media_info for {pk} hit LoginRequired; "
-                        f"re-logging once and retrying.")
-            try:
-                await loop.run_in_executor(None, lambda: _ig_login(cl))
-                async with _ig_api_lock:
-                    media = await loop.run_in_executor(None, cl.media_info, pk)
-            except Exception as e2:
-                logger.warning(f"[DirectForward/IG] story/pk {pk} re-login retry failed "
-                               f"({type(e2).__name__}: {e2}); giving up.")
-                raise
+            logger.warning(f"[DirectForward/IG] media_info for {pk} hit LoginRequired — "
+                           f"session dead, NOT re-logging (by design). Skipping item.")
+            raise
         else:
             raise
 
@@ -614,6 +607,50 @@ async def _post_ig_alert(bot_client, chat_id: int, text: str) -> None:
         logger.warning(f"[IG direct-forward] failed to post IG alert to chat: {e}")
 
 
+def _ig_auth_failure(exc: Exception) -> bool:
+    """True when the exception means Instagram rejected the session (dead
+    sessionid / login wall / checkpoint), as opposed to a transient
+    network/timeout error that should just be retried."""
+    if type(exc).__name__ in ("LoginRequired", "ChallengeRequired"):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "login_required", "exceeded 30 redirects", "login_by_sessionid",
+        "no sessionid", "checkpoint", "login wall",
+    ))
+
+
+def _ig_jar_mtime() -> float:
+    """Return the mtime of the IG cookie jar, or 0 if missing."""
+    try:
+        return os.path.getmtime(config.IG_COOKIES)
+    except Exception:
+        return 0
+
+
+async def _ig_wait_for_fresh_jar(cl, loop) -> None:
+    """Block until the IG cookie jar file changes (fresh upload) or the abort
+    flag is set. When the session is dead, the worker must NOT attempt an
+    automated re-login — it waits for the operator to upload a fresh jar."""
+    last_mtime = _ig_jar_mtime()
+    logger.info("[DirectForward/IG] waiting for fresh igcookies.txt upload "
+                "(jar mtime change detected)...")
+    while True:
+        await asyncio.sleep(60)
+        mtime = _ig_jar_mtime()
+        if mtime and mtime != last_mtime:
+            logger.info(f"[DirectForward/IG] igcookies.txt changed (mtime {last_mtime} -> {mtime}) — "
+                        f"attempting fresh login.")
+            try:
+                await loop.run_in_executor(None, lambda: _ig_login(cl))
+                cl.dump_settings("direct_ig_session.json")
+                logger.info("[DirectForward/IG] fresh login succeeded after jar upload.")
+                return
+            except Exception as e:
+                logger.error(f"[DirectForward/IG] fresh login failed: {e} — continuing to wait.")
+                last_mtime = mtime
+
+
 async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> None:
     try:
         from instagrapi import Client as IGClient
@@ -742,35 +779,31 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             cl = _make_client()
         except Exception as e:
             login_attempt += 1
-            # Exponential backoff: a transient login failure (e.g. 429) must not
-            # be retried on a fixed ~3h cadence forever — that cold-starts the
-            # account's rate-limit every cycle and is what produced the sustained
-            # 429 flood over 2026-08-24..26. Back off 2^n * base (capped at 24h).
-            backoff = min(_poll_interval() * (2 ** (login_attempt - 1)), 24 * 3600)
-            if login_attempt == 1:
-                logger.error(f"[DirectForward/IG] login failed: {e}. "
-                             f"Retrying in ~{backoff / 60:.0f}m (exponential backoff) — a fresh "
-                             f"igcookies.txt upload will be picked up automatically.")
-            else:
-                logger.warning(f"[DirectForward/IG] login retry {login_attempt} failed: {e} "
-                               f"(next retry in ~{backoff / 3600:.1f}h).")
-            # Startup login failures used to only log — the operator never saw
-            # that the relay was down until they noticed missing items. Alert
-            # once per failure streak (mirrors the mid-poll re-login alert).
-            if login_attempt == 2:
-                try:
-                    await _post_ig_alert(
-                        bot_client, chat_id,
-                        (f"💀 **Instagram session is dead** (login failed twice on start-up)\n\n"
-                         f"The IG cookie jar's `sessionid` was rejected (`{e}`).\n\n"
-                         f"DM relaying and Friend Media archives stay broken until you upload a "
-                         f"fresh `igcookies.txt`:\n**Admin Console → 🍪 Cookie Jars → "
-                         f"Instagram → ✏️ Replace**.\n\n"
-                         f"Recent jar changes: Admin Console → 🍪 Cookie Jars → Instagram → 📜 History."))
-                except Exception as alert_err:
-                    logger.warning(f"[DirectForward/IG] startup login alert failed: {alert_err}")
             cl = _make_client()
-            await asyncio.sleep(backoff)
+            if _ig_auth_failure(e):
+                # Session rejected → NO automated re-login (operator requirement).
+                logger.error(f"[DirectForward/IG] login failed (session rejected): {e}. "
+                             f"NO automated re-login (by design) — waiting for fresh igcookies.txt upload.")
+                if login_attempt == 1:
+                    try:
+                        await _post_ig_alert(
+                            bot_client, chat_id,
+                            (f"💀 **Instagram session is dead**\n\n"
+                             f"The IG cookie jar's `sessionid` was rejected (`{e}`).\n\n"
+                             f"DM relaying and Friend Media archives are paused. "
+                             f"Upload a fresh `igcookies.txt` to resume:\n"
+                             f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
+                             f"Recent jar changes: Admin Console → 🍪 Cookie Jars → Instagram → 📜 History."))
+                    except Exception as alert_err:
+                        logger.warning(f"[DirectForward/IG] startup login alert failed: {alert_err}")
+                await _ig_wait_for_fresh_jar(cl, loop)
+            else:
+                # Transient (network/timeout/429) — bounded backoff, do NOT
+                # demand a jar re-upload for a blip.
+                backoff = min(_poll_interval() * (2 ** (min(login_attempt, 5) - 1)), 3600)
+                logger.warning(f"[DirectForward/IG] login failed transiently: {e}. "
+                               f"Retrying in ~{backoff / 60:.0f}m.")
+                await asyncio.sleep(backoff)
 
     state = _load_state()
 
@@ -1098,40 +1131,24 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
                 await asyncio.sleep(freeze)
             except LoginRequired:
-                logger.warning("[DirectForward/IG] session expired — attempting re-login.")
                 relogin_failures += 1
                 cookie_history.record(None, "ig_session_dead", platform="instagram",
                                       actor="DirectForward/IG",
                                       note=f"poll hit LoginRequired (attempt {relogin_failures})")
-                try:
-                    await loop.run_in_executor(None, lambda: _ig_login(cl))
-                    cl.dump_settings("direct_ig_session.json")
-                    relogin_failures = 0
-                    try:
-                        await loop.run_in_executor(None, lambda: ig_anti_detect.warmup(cl))
-                    except Exception as e:
-                        logger.warning(f"[DirectForward/IG] warmup skipped: {e}")
-                except Exception as e:
-                    logger.error(f"[DirectForward/IG] re-login failed: {e}. Sleeping 1h.")
-                    cookie_history.record(None, "ig_relogin_failed", platform="instagram",
-                                          actor="DirectForward/IG",
-                                          note=f"{e} — the jar's sessionid is dead; upload a fresh igcookies.txt")
-                    # Tell the operator AFTER two consecutive dead cycles (~2h of
-                    # failing reels): "reels arriving as images" is the symptom;
-                    # a jar re-upload is the fix. Alert once per failure streak.
-                    if relogin_failures == 2:
-                        await _post_ig_alert(
-                            bot_client, chat_id,
-                            (f"💀 **Instagram session is dead** (re-login failed twice)\n\n"
-                             f"The IG cookie jar's `sessionid` is no longer accepted "
-                             f"({e}).\n\n"
-                             f"Reels will keep arriving as preview images and DM "
-                             f"relaying will stay broken until you upload a fresh "
-                             f"`igcookies.txt`:\n**Admin Console → 🍪 Cookie Jars → "
-                             f"Instagram → ✏️ Replace**.\n\n"
-                             f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "
-                             f"Instagram → 📜 History."))
-                    await asyncio.sleep(3600)
+                logger.error(f"[DirectForward/IG] session expired — NO automated re-login (by design). "
+                             f"Waiting for fresh igcookies.txt upload. (failure #{relogin_failures})")
+                if relogin_failures == 1:
+                    await _post_ig_alert(
+                        bot_client, chat_id,
+                        (f"💀 **Instagram session is dead**\n\n"
+                         f"The IG cookie jar's `sessionid` is no longer accepted.\n\n"
+                         f"DM relaying and Friend Media archives are paused. "
+                         f"Upload a fresh `igcookies.txt` to resume:\n"
+                         f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
+                         f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "
+                         f"Instagram → 📜 History."))
+                await _ig_wait_for_fresh_jar(cl, loop)
+                relogin_failures = 0  # fresh session — re-arm the one-shot alert
             except Exception as e:
                 logger.error(f"[DirectForward/IG] poll error: {e}")
                 await asyncio.sleep(min(600, _poll_interval()))
