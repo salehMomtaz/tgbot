@@ -43,6 +43,24 @@ _SITES = [
     (config.YT_COOKIES, "https://www.youtube.com/", "ytd-app", ("youtube.com", "google.com")),
 ]
 
+# Device-identity cookies that bind a session to a device fingerprint. Instagram
+# ties the `sessionid` to the device `mid` (and `ig_did`/`datr`); when the
+# headless Chromium visits with a fresh profile it is seen as a NEW device and
+# Instagram issues a different `mid`. Overlaying that new mid while keeping the
+# operator's original `sessionid` makes the session self-invalidating —
+# Instagram answers the private API with `login_required` / "Exceeded 30
+# redirects" within a day. This was the root cause of the repeated IG session
+# deaths (the mid rotated on every refresher run while the sessionid stayed
+# constant; first rotation 2026-09-30 08:11 coincided with the death).
+# These cookies are therefore NEVER written back from the headless context —
+# the operator's uploaded values are authoritative.
+_DEVICE_IDENTITY = {
+    "igcookies.txt": {"mid", "ig_did", "datr"},
+    "ttcookies.txt": {"ttwid"},
+    "xcookies.txt": set(),
+    "ytcookies.txt": set(),
+}
+
 def _domain_allowed(domain: str, allowed: tuple) -> bool:
     """Thin alias for :func:`utils.cookie_manager.domain_matches` (kept so the
     call sites read naturally)."""
@@ -318,8 +336,18 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
                                       note=f"{reason} — jar NOT overwritten")
                 return False
 
-            # Compare only the allowlisted cookies: did anything rotate?
-            changed = sum(1 for k, v in allowed_map.items() if old_map.get(k) != v)
+            # Never overlay device-identity cookies: the headless profile is a
+            # different device to Instagram, so its `mid`/`ig_did`/`datr` must
+            # not replace the ones the operator's sessionid is bound to (see
+            # _DEVICE_IDENTITY). Preserve the jar's original values.
+            device_identity = _DEVICE_IDENTITY.get(os.path.basename(cookie_path), set())
+
+            # Compare only the allowlisted, non-device-identity cookies: did
+            # anything actually rotate? Device-identity changes are ignored —
+            # they are expected (the headless profile is a different device)
+            # and must never be written back.
+            changed = sum(1 for (d, n), v in allowed_map.items()
+                          if n not in device_identity and old_map.get((d, n)) != v)
             if changed == 0:
                 logger.info(f"[CookieRefresh] {os.path.basename(cookie_path)} — no rotation detected (still fresh)")
                 # Still touch mtime via meta to avoid re-checking too soon
@@ -336,6 +364,8 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
             # ONLY the site's allowlisted domains are considered (see _SITES).
             updates: dict[tuple[str, str], str] = {}
             for (domain, name), value in allowed_map.items():
+                if name in device_identity:
+                    continue
                 if domain and name and value is not None:
                     updates[(f".{domain}", name)] = value
             if not updates:
