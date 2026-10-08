@@ -164,6 +164,12 @@ Classify what you find:
 - `[DirectForward/IG] session expired — attempting re-login` / `login retry N
   failed … next retry in ~Nh` → the OLD retry-storm behavior; if seen, the
   no-relogin patch regressed.
+- `Instagram relay is enabled but IG_AUTH_ENABLED is false (IG paused)` +
+  `FriendMedia … Instagram is paused` → **expected** when the operator paused
+  IG via **Admin → 🔐 IG Auth** (account suspended/appealing). No IG worker,
+  no login, no IG API calls. Re-enable the same button after a fresh jar.
+- If an IG health check is needed while paused, do NOT flip the pause off
+  blindly — the account may still be suspended; ask the operator first.
 - XChat bridge `OnDemandFileUrlResolutionError` or `Failed to initialize
   CycleTLS` → bump `x-client-transaction-id` / `emusks` (see package.json pins);
   the sidecar crash-loops and X relays nothing until fixed.

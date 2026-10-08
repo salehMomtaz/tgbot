@@ -448,6 +448,18 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     2026-09-05 (nothing ever read them post-removal; stale values in a local
     `.env` are inert — delete them at will). The sessionid is either valid or
     it isn't; the ONLY recovery is the operator uploading a fresh jar.
+    **`IG_AUTH_ENABLED` is the master pause for ALL authenticated IG features
+    (2026-10-08).** While the account is suspended/appealing or the sessionid
+    is dead, the operator can pause every IG feature from the console
+    (Admin → 🔐 IG Auth, callback `admin_toggle_ig_auth`, persisted to `.env`).
+    When false: the supervisor does NOT start the IG worker (no login is ever
+    attempted), `_ig_client()` in `modules/friend_media/instagram.py` raises
+    `IGUnavailable("Instagram is paused…")` so all Friend Media IG work is
+    skipped, `_run_archives` treats IG as `ig_paused` (no per-friend calls or
+    inter-friend pauses), and `utils/cookie_refresher.py` does not visit
+    instagram.com. The relay watchdog ignores `ig` while paused. Turning it
+    back ON restarts the bot to start the worker. Default true (fresh installs
+    unchanged); this box's `.env` is currently false pending a fresh jar.
     Each platform runs in its own
     contained loop (`try/except` per poll; IG `LoginRequired` → wait for a fresh
     jar, never an automated re-login).

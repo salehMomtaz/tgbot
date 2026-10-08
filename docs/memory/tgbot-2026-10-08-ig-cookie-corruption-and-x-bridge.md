@@ -134,11 +134,38 @@ worker had no messages to relay. (After the 0.3.2 bump the crash became
   It was correctly firing `>=80%` CPU warnings — the load is the OpenCode agent
   session itself (2 vCPU box), not the bot; it clears when the agent exits.
 
+## 6. New master pause: `IG_AUTH_ENABLED` (Admin → 🔐 IG Auth)
+
+Added a console toggle (`admin_toggle_ig_auth`, button on the main console)
+that pauses EVERY Instagram feature needing an authenticated session, so the
+account can sit untouched while an appeal/suspension is pending or the
+sessionid is dead. Persisted to `.env`; default true.
+
+When `IG_AUTH_ENABLED=false`:
+- The direct-forward supervisor does **not** start the IG worker → no login is
+  ever attempted (this is what the operator wanted).
+- `modules/friend_media/instagram.py::_ig_client()` raises
+  `IGUnavailable("Instagram is paused…")`; `_run_archives` treats IG as
+  `ig_paused` so no per-friend IG calls or inter-friend pauses happen.
+- `utils/cookie_refresher.py` does not visit instagram.com at all.
+- The relay watchdog ignores `ig` (no false "stalled" alert).
+- Turning it back ON restarts the bot to start the worker.
+
+The Direct-Forward and Friend Media menus show the paused state. This box's
+`.env` was set to `IG_AUTH_ENABLED=false` at the end of this session (the
+account was mid-appeal and the sessionid was dead), so the IG worker is not
+running and no login is being attempted.
+
 ## Operator follow-ups
 
+- **When the appeal resolves and you have fresh cookies:** upload the new
+  `igcookies.txt` (Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace), then tap
+  **Admin → 🔐 IG Auth** to turn Instagram back ON (the bot restarts and the IG
+  worker logs in once).
 - **Upload a fresh `igcookies.txt`** (Admin → 🍪 Cookie Jars → Instagram →
-  ✏️ Replace). The worker is parked in `_ig_wait_for_fresh_jar` and will log in
-  automatically the moment the jar's mtime changes — no restart needed.
+  ✏️ Replace). With `IG_AUTH_ENABLED=true`, the worker (if parked in
+  `_ig_wait_for_fresh_jar`) logs in automatically the moment the jar's mtime
+  changes — no restart needed. (Currently paused, so re-enable first.)
 - Keep the new `x-client-transaction-id` / `emusks` pins; re-bump only if X
   changes its homepage runtime again (the crash signature is
   `OnDemandFileUrlResolutionError`).
