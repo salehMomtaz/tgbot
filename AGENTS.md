@@ -211,6 +211,23 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    `allow_clips=True`) actually delivers the clip video from the app API
    instead of no-oping to the preview image.
 
+   **The headless refresher must NEVER overlay DEVICE-IDENTITY cookies
+   (2026-10-08 fix).** Instagram binds a `sessionid` to the device `mid` (and
+   `ig_did`/`datr`). The headless Chromium launches with a fresh profile, so
+   Instagram sees a *new device* and issues a different `mid`; the old
+   refresher overlaid that new mid back into the jar while keeping the
+   operator's original `sessionid`, making the session self-invalidating —
+   Instagram answered the private API with `login_required` / "Exceeded 30
+   redirects" within a day. This was the root cause of the recurring IG session
+   deaths (proven from `cookies/history_snapshots/`: `mid`/`ig_did` rotated on
+   every refresher run Sep 30–Oct 7 while the `sessionid` stayed constant; the
+   first rotation 2026-09-30 08:11 coincides with the death streak). The
+   `_DEVICE_IDENTITY` dict in `utils/cookie_refresher.py` (IG → `{mid, ig_did,
+   datr}`, TikTok → `{ttwid}`) is now excluded from BOTH the rotation-diff and
+   the overlay — the operator's uploaded device identity is authoritative.
+   `ig_anti_detect.write_back_session` still overlays the `mid` issued to the
+   authenticated instagrapi session (consistent with the sessionid) — leave it.
+
 5. **Keep `[default,curl-cffi]` on yt-dlp upgrades AND pin `curl_cffi<0.14`.**
    `utils/updater.py` runs `pip install -U --pre "yt-dlp[default,curl-cffi]"
    "curl_cffi<0.14"` — plain `yt-dlp` would silently strip the certifi/curllib
@@ -404,11 +421,19 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     instagrapi and the class patches stop matching, the module logs loud
     warnings — verify `_configure_private_session_retry` / `base_headers` /
     `get_settings` patch points still exist.
-    **The IG worker NEVER dies on a login failure** — it retries on the poll
-    cadence with a fresh client per attempt, so a mid-run `igcookies.txt`
-    re-upload is picked up without a bot restart; only real challenge errors
-    trigger the multi-hour freeze. `_ig_login` validates the persisted session
-    via `account_info()` (not `login()`, which demands a password).
+    **The IG worker NEVER auto-re-logins on a dead session (2026-10-08, operator
+    requirement).** A login failure (startup OR mid-poll `LoginRequired`) logs
+    once, DMs the operator once, then calls `_ig_wait_for_fresh_jar(cl, loop)` —
+    a loop that polls the jar's mtime every 60 s and attempts a login ONLY after
+    the operator uploads a new `igcookies.txt` (mtime change). There is NO
+    exponential-backoff retry storm and NO hourly mid-poll re-login: the operator
+    explicitly forbade automated login attempts when the cookie is invalidated
+    (the old behavior logged 8 retries in a day and hammered the dead session).
+    `relogin_failures` resets after a successful fresh login so a later death
+    re-alerts. Only real challenge errors (`ChallengeRequired` /
+    `PleaseWaitFewMinutes`) still trigger the multi-hour freeze. `_ig_login`
+    validates the persisted session via `account_info()` (not `login()`, which
+    demands a password).
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links
@@ -424,7 +449,8 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `.env` are inert — delete them at will). The sessionid is either valid or
     it isn't; the ONLY recovery is the operator uploading a fresh jar.
     Each platform runs in its own
-    contained loop (`try/except` per poll; LoginRequired → re-login once).
+    contained loop (`try/except` per poll; IG `LoginRequired` → wait for a fresh
+    jar, never an automated re-login).
     **No third-party APIs.** Downloads route through the normal yt-dlp
     pipeline (with cookie jars — write-back keeps them warm) and enqueue on
     the shared single-worker queue behind interactive downloads (invariant
