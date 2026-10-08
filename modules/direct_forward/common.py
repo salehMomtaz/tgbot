@@ -250,12 +250,74 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 pass
 
 
-def _enqueue_relay(queue, user_chat_id: int, corofn_factory) -> None:
-    """Fire-and-forget enqueue of one relay job on the shared download queue."""
+# Strong references to the in-flight submit tasks: asyncio only keeps a weak
+# reference to a bare create_task() result, so without this the loop could GC
+# the task before the queue picks the job up.
+_relay_submit_tasks: set = set()
+
+
+def _enqueue_relay(queue, user_chat_id: int, corofn_factory) -> "asyncio.Future":
+    """Enqueue one relay job on the shared download queue; return a Future that
+    resolves only once the job has actually RUN (or raised).
+
+    Callers MUST await the returned future (directly or via ``_await_relays``)
+    before advancing their dedup cursor. The old fire-and-forget form returned
+    as soon as the job was *queued*, so a queued-but-unrun relay was dropped on
+    any restart while the cursor had already moved past its source message —
+    the per-conversation backlog gap observed 2026-10-08: a 136-message XChat
+    burst was enqueued within seconds, the bot restarted mid-drain, and every
+    not-yet-run relay was lost permanently (the cursor was already ahead of
+    them). Awaiting restores the at-least-once contract the cursor logic
+    claims."""
+    loop = asyncio.get_running_loop()
+    done: "asyncio.Future" = loop.create_future()
+
+    async def _run():
+        try:
+            await corofn_factory()
+        except asyncio.CancelledError:
+            if not done.done():
+                done.cancel()
+            raise
+        except Exception as e:
+            if not done.done():
+                done.set_exception(e)
+            raise
+        else:
+            if not done.done():
+                done.set_result(None)
+
     async def _submit():
-        await queue.add_task(user_id=user_chat_id, message=_NullStatusMessage(),
-                             coroutine=corofn_factory)
-    asyncio.create_task(_submit())
+        try:
+            await queue.add_task(user_id=user_chat_id,
+                                 message=_NullStatusMessage(), coroutine=_run)
+        except asyncio.CancelledError:
+            if not done.done():
+                done.cancel()
+            raise
+        except Exception as e:
+            if not done.done():
+                done.set_exception(e)
+
+    task = asyncio.create_task(_submit())
+    _relay_submit_tasks.add(task)
+    task.add_done_callback(_relay_submit_tasks.discard)
+    return done
+
+
+async def _await_relays(futures) -> None:
+    """Await a batch of relay futures, then re-raise the first failure.
+
+    ``return_exceptions=True`` guarantees every future is observed (a failed
+    relay can never surface as an "exception was never retrieved" warning) while
+    the caller's at-least-once retry still fires on genuine failures."""
+    pending = [f for f in (futures or []) if f is not None]
+    if not pending:
+        return
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
 
 
 def _fetch_bytes(url: str, referer: str | None = None) -> bytes:

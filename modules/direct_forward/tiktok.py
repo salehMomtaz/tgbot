@@ -20,7 +20,7 @@ from .state import (
     _load_state, _state_save_owned,
 )
 from .common import (
-    _tt_poll_interval, _download_and_deliver, _enqueue_relay, _header_lines,
+    _tt_poll_interval, _download_and_deliver, _enqueue_relay, _await_relays, _header_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -316,9 +316,27 @@ async def _tt_process_message(m: dict, queue, chat_id, bot_client, premium_clien
     header = _header_lines("TikTok", "your TikTok self-DM", author, item_id, url)
     body = str(content.get("content_name") or "")
     logger.info(f"[DirectForward/TT] share -> {url} (by @{author})")
-    _enqueue_relay(queue, chat_id,
+    # Await the relay so the caller only marks the push id as seen once it has
+    # actually run — otherwise a restart mid-queue drops it forever (see
+    # common._enqueue_relay).
+    await _await_relays([_enqueue_relay(queue, chat_id,
                    lambda u=url, h=header, b=body: _download_and_deliver(
-                       bot_client, premium_client, chat_id, u, h, b))
+                       bot_client, premium_client, chat_id, u, h, b))])
+
+
+async def _tt_persist_seen(seen: set) -> None:
+    """Persist the seen-push-id set (trimmed to 2000) to the shared state file.
+
+    The in-memory set is capped alongside the persisted list: without this it
+    grows one id per push for the life of the process while the disk copy stays
+    trimmed."""
+    if len(seen) > 2000:
+        for old in sorted(seen)[:-2000]:
+            seen.discard(old)
+    state = _load_state()
+    state.setdefault("tiktok", {"seen_msg_ids": []})
+    state["tiktok"]["seen_msg_ids"] = sorted(seen)[-2000:]
+    await _state_save_owned(state, {"tiktok"})
 
 
 async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
@@ -376,24 +394,20 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, seen: set,
             msg_id = m.get("server_message_id") or 0
             if msg_id in seen:
                 continue
-            seen.add(msg_id)
-            # Cap the in-memory set alongside the persisted list (both 2000):
-            # without this the set grows one id per push for the life of the
-            # process while the disk copy stays trimmed.
-            if len(seen) > 2000:
-                for old in sorted(seen)[:-2000]:
-                    seen.discard(old)
-            state = _load_state()
-            state.setdefault("tiktok", {"seen_msg_ids": []})
-            state["tiktok"]["seen_msg_ids"] = sorted(seen)[-2000:]
-            await _state_save_owned(state, {"tiktok"})
             if prime:
+                seen.add(msg_id)
+                await _tt_persist_seen(seen)
                 logger.info(f"[DirectForward/TT] prime: swallowed backlog msg {msg_id}")
                 continue
+            # Only mark the push as seen AFTER its relay has actually run, so a
+            # crash/restart mid-queue cannot silently drop it (at-least-once).
             try:
                 await _tt_process_message(m, queue, chat_id, bot_client, premium_client)
             except Exception as e:
                 logger.error(f"[DirectForward/TT] relay of msg {msg_id} failed: {e}")
+                continue
+            seen.add(msg_id)
+            await _tt_persist_seen(seen)
 
 
 async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> None:

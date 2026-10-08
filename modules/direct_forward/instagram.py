@@ -23,7 +23,7 @@ from .state import (
 )
 from .common import (
     URL_RE, IG_POST_RE, _poll_interval, _compose_caption,
-    _send_followups, _download_and_deliver, _enqueue_relay, _fetch_bytes,
+    _send_followups, _download_and_deliver, _enqueue_relay, _await_relays, _fetch_bytes,
     _video_upload_kwargs, _header_lines,
 )
 
@@ -308,10 +308,11 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
 
 def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                       url: str, header_lines: list[str], body: str,
-                      preview_url: str | None) -> None:
+                      preview_url: str | None):
     """Route one resolved Instagram link: probe the media pk, deliver photos/
     albums/stories natively, reels via yt-dlp (quality merge), preview image
-    or yt-dlp as fallbacks."""
+    or yt-dlp as fallbacks. Returns the relay Future (await it before advancing
+    the IG cursor — see common._enqueue_relay)."""
     async def job():
         is_ig = "instagram.com" in url
         pk = None
@@ -350,7 +351,7 @@ def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                         logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
         await _download_and_deliver(bot_client, premium_client, chat_id, url,
                                     header_lines, body, preview_url)
-    _enqueue_relay(queue, chat_id, job)
+    return _enqueue_relay(queue, chat_id, job)
 
 
 def _ig_resolve_user_id(cl, username: str) -> str | None:
@@ -468,94 +469,101 @@ async def _ig_react_to(cl, loop, thread_id, item_id) -> None:
 async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
                               bot_client, premium_client, paired_username: str,
                               thread_id=None) -> None:
-    """Process one RAW direct_v2 DM item (dict) from the paired contact."""
+    """Process one RAW direct_v2 DM item (dict) from the paired contact.
+
+    Relays are awaited before returning so the caller's IG cursor only advances
+    once the media actually reached the queue worker (see ``_enqueue_relay``)."""
     sender_label = f"@{paired_username}" if paired_username else "paired contact"
     item_id = item.get("item_id", "?")
     item_type = (item.get("item_type") or "").lower()
-    # Acknowledge receipt in the IG thread (👍 by default). Fire first so a
-    # reaction still lands even if this item's relay later fails.
-    await _ig_react_to(cl, loop, thread_id, item_id)
-    resolved = _ig_resolve_raw(item)
-    kind = (resolved or {}).get("kind")
+    futs: list = []
+    try:
+        # Acknowledge receipt in the IG thread (👍 by default). Fire first so a
+        # reaction still lands even if this item's relay later fails.
+        await _ig_react_to(cl, loop, thread_id, item_id)
+        resolved = _ig_resolve_raw(item)
+        kind = (resolved or {}).get("kind")
 
-    if kind == "url":
-        header = _header_lines("Instagram", sender_label,
-                               resolved.get("author"),
-                               _ig_resolve_user_id(cl, resolved.get("author")) if resolved.get("author") else None,
-                               resolved["url"])
-        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> {resolved['url']} (author @{resolved.get('author')})")
-        _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
-                          resolved["url"], header, resolved.get("body") or "",
-                          resolved.get("preview"))
-        return
+        if kind == "url":
+            header = _header_lines("Instagram", sender_label,
+                                   resolved.get("author"),
+                                   _ig_resolve_user_id(cl, resolved.get("author")) if resolved.get("author") else None,
+                                   resolved["url"])
+            logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> {resolved['url']} (author @{resolved.get('author')})")
+            futs.append(_enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                              resolved["url"], header, resolved.get("body") or "",
+                              resolved.get("preview")))
+            return
 
-    if kind == "ig_pk":
-        pk = resolved["pk"]
-        author = resolved.get("author")
-        header = _header_lines("Instagram", sender_label, author,
-                               _ig_resolve_user_id(cl, author) if author else None, None)
-        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> native pk {pk} (author @{author})")
+        if kind == "ig_pk":
+            pk = resolved["pk"]
+            author = resolved.get("author")
+            header = _header_lines("Instagram", sender_label, author,
+                                   _ig_resolve_user_id(cl, author) if author else None, None)
+            logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> native pk {pk} (author @{author})")
 
-        async def job(pk=pk, header=header, preview=resolved.get("preview")):
-            try:
-                ok = await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header, "", None)
-                if ok:
-                    return
-            except Exception as e:
-                logger.warning(f"[DirectForward/IG] native pk {pk} failed: {e}")
-            if preview:
-                data = await asyncio.get_event_loop().run_in_executor(
-                    None, _fetch_bytes, preview, "https://www.instagram.com/")
-                path = f"cache/df_pk_{pk}.jpg"
-                with open(path, "wb") as f:
-                    f.write(data)
-                cap = "⚠️ (full media unavailable)\n" + "\n".join(header) if header else "⚠️ media"
-                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=cap)
+            async def job(pk=pk, header=header, preview=resolved.get("preview")):
                 try:
-                    os.remove(path)
+                    ok = await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header, "", None)
+                    if ok:
+                        return
+                except Exception as e:
+                    logger.warning(f"[DirectForward/IG] native pk {pk} failed: {e}")
+                if preview:
+                    data = await asyncio.get_event_loop().run_in_executor(
+                        None, _fetch_bytes, preview, "https://www.instagram.com/")
+                    path = f"cache/df_pk_{pk}.jpg"
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    cap = "⚠️ (full media unavailable)\n" + "\n".join(header) if header else "⚠️ media"
+                    await bot_client.send_photo(chat_id=chat_id, photo=path, caption=cap)
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+            futs.append(_enqueue_relay(queue, chat_id, job))
+            return
+
+        if kind == "attachment":
+            src, is_photo = resolved["url"], resolved["is_photo"]
+            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+            ext = ".jpg" if is_photo else ".mp4"
+            path = f"cache/df_ig_dm_{item_id}{ext}"
+            os.makedirs("cache", exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            caption, followups = _compose_caption(
+                _header_lines("Instagram", sender_label, None, None, None), "")
+            if is_photo:
+                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
+            else:
+                await bot_client.send_video(chat_id=chat_id, video=path,
+                                            caption=caption, **_video_upload_kwargs(path))
+            await _send_followups(bot_client, chat_id, followups)
+            for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
+                try:
+                    os.remove(candidate)
                 except Exception:
                     pass
-        _enqueue_relay(queue, chat_id, job)
-        return
+            logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> direct attachment delivered")
+            return
 
-    if kind == "attachment":
-        src, is_photo = resolved["url"], resolved["is_photo"]
-        data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
-        ext = ".jpg" if is_photo else ".mp4"
-        path = f"cache/df_ig_dm_{item_id}{ext}"
-        os.makedirs("cache", exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data)
-        caption, followups = _compose_caption(
-            _header_lines("Instagram", sender_label, None, None, None), "")
-        if is_photo:
-            await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
-        else:
-            await bot_client.send_video(chat_id=chat_id, video=path,
-                                        caption=caption, **_video_upload_kwargs(path))
-        await _send_followups(bot_client, chat_id, followups)
-        for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
-            try:
-                os.remove(candidate)
-            except Exception:
-                pass
-        logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> direct attachment delivered")
-        return
+        if kind == "text_urls":
+            for u in resolved["urls"]:
+                header = _header_lines("Instagram", sender_label, None, None, u)
+                logger.info(f"[DirectForward/IG] item {item_id}: text url -> {u}")
+                if "instagram.com" in u:
+                    futs.append(_enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
+                                      u, header, "", None))
+                else:
+                    futs.append(_enqueue_relay(queue, chat_id,
+                                   lambda u=u, h=header: _download_and_deliver(
+                                       bot_client, premium_client, chat_id, u, h, "")))
+            return
 
-    if kind == "text_urls":
-        for u in resolved["urls"]:
-            header = _header_lines("Instagram", sender_label, None, None, u)
-            logger.info(f"[DirectForward/IG] item {item_id}: text url -> {u}")
-            if "instagram.com" in u:
-                _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
-                                  u, header, "", None)
-            else:
-                _enqueue_relay(queue, chat_id,
-                               lambda u=u, h=header: _download_and_deliver(
-                                   bot_client, premium_client, chat_id, u, h, ""))
-        return
-
-    logger.info(f"[DirectForward/IG] item {item_id}: {item_type!r} has no relayable media — skipped")
+        logger.info(f"[DirectForward/IG] item {item_id}: {item_type!r} has no relayable media — skipped")
+    finally:
+        await _await_relays(futs)
 
 
 async def _ig_pairing_scan(item: dict, thread_users: dict, state: dict,

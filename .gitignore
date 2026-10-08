@@ -59,6 +59,9 @@ cookies/ytdlp/*.txt
 direct_ig_session.json
 direct_x_cookies.json
 direct_forward_state.json
+# Timestamped backups written by tools/recover_x_gap.py and the atomic writer
+direct_forward_state.json.*
+*.pre-recover.*
 
 # OpenCode session export in markdown
 session-ses_*.md

@@ -22,7 +22,7 @@ from .state import (
 )
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
-    _enqueue_relay, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
+    _enqueue_relay, _await_relays, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -374,65 +374,71 @@ async def _x_pairing_scan(text: str, sender_uid: str, state: dict,
 
 async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premium_client, self_uid: str,
                              state: dict | None = None) -> None:
-    """Process one raw self-DM message (dict from _x_fetch_self_messages)."""
+    """Process one raw self-DM message (dict from _x_fetch_self_messages).
+
+    All relays are awaited before returning so the caller's cursor only advances
+    once the media actually reached the queue worker (see ``_enqueue_relay``)."""
     state = state if state is not None else _load_state()
     self_label = f"x-user `{self_uid}`"
     msg_id = m.get("id", "?")
+    futs: list = []
+    try:
+        # Linking handshake: a pending code sent to the self-DM is consumed here
+        # instead of being relayed.
+        if await _x_pairing_scan(m.get("text", "") or "", self_uid,
+                                 state, bot_client, chat_id):
+            return
 
-    # Linking handshake: a pending code sent to the self-DM is consumed here
-    # instead of being relayed.
-    if await _x_pairing_scan(m.get("text", "") or "", self_uid,
-                             state, bot_client, chat_id):
-        return
+        # 1) Tweet shared via DM → route through the yt-dlp pipeline, auto-picking
+        #    the highest quality; the format keyboard is posted when the top format
+        #    exceeds the upload ceiling; photo-only tweets deliver natively.
+        tweet_url, tweet_text = _x_deep_find_tweet(m.get("attachment"))
+        if tweet_url:
+            author, author_id = _x_tweet_share_author(m.get("attachment"))
+            media = _x_share_media(m.get("attachment"))
+            header = _header_lines("X", self_label, author, author_id, tweet_url)
+            photos = [mm["url"] for mm in media if mm["type"] == "photo"]
+            has_video = any(mm["type"] == "video" for mm in media)
+            if photos and not has_video:
+                logger.info(f"[DirectForward/X] msg {msg_id}: photo-only tweet share -> {tweet_url}")
+                futs.append(_enqueue_relay(queue, chat_id,
+                               lambda ph=photos, h=header, b=tweet_text: _x_deliver_share_photos(
+                                   client, bot_client, chat_id, ph, h, b)))
+            else:
+                logger.info(f"[DirectForward/X] msg {msg_id}: tweet share -> {tweet_url} (by @{author})")
+                share_video = next((mm["url"] for mm in media if mm["type"] == "video"), None)
+                futs.append(_enqueue_relay(queue, chat_id,
+                               lambda u=tweet_url, h=header, b=tweet_text, sv=share_video:
+                                   _x_deliver_tweet(client, bot_client, premium_client, chat_id, u, h, b, sv)))
+            return
 
-    # 1) Tweet shared via DM → route through the yt-dlp pipeline, auto-picking
-    #    the highest quality; the format keyboard is posted when the top format
-    #    exceeds the upload ceiling; photo-only tweets deliver natively.
-    tweet_url, tweet_text = _x_deep_find_tweet(m.get("attachment"))
-    if tweet_url:
-        author, author_id = _x_tweet_share_author(m.get("attachment"))
-        media = _x_share_media(m.get("attachment"))
-        header = _header_lines("X", self_label, author, author_id, tweet_url)
-        photos = [mm["url"] for mm in media if mm["type"] == "photo"]
-        has_video = any(mm["type"] == "video" for mm in media)
-        if photos and not has_video:
-            logger.info(f"[DirectForward/X] msg {msg_id}: photo-only tweet share -> {tweet_url}")
-            _enqueue_relay(queue, chat_id,
-                           lambda ph=photos, h=header, b=tweet_text: _x_deliver_share_photos(
-                               client, bot_client, chat_id, ph, h, b))
-        else:
-            logger.info(f"[DirectForward/X] msg {msg_id}: tweet share -> {tweet_url} (by @{author})")
-            share_video = next((mm["url"] for mm in media if mm["type"] == "video"), None)
-            _enqueue_relay(queue, chat_id,
-                           lambda u=tweet_url, h=header, b=tweet_text, sv=share_video:
-                               _x_deliver_tweet(client, bot_client, premium_client, chat_id, u, h, b, sv))
-        return
+        # 2) Photo / video DM attachment → authenticated fetch via the twikit session.
+        media_url, is_photo = _x_deep_find_media_url(m.get("attachment"))
+        if media_url:
+            header = _header_lines("X", self_label, None, None, None)
+            futs.append(_enqueue_relay(queue, chat_id,
+                           lambda u=media_url, p=is_photo, h=header: _x_deliver_dm_attachment(
+                               client, bot_client, chat_id, u, p, h)))
+            return
 
-    # 2) Photo / video DM attachment → authenticated fetch via the twikit session.
-    media_url, is_photo = _x_deep_find_media_url(m.get("attachment"))
-    if media_url:
-        header = _header_lines("X", self_label, None, None, None)
-        _enqueue_relay(queue, chat_id,
-                       lambda u=media_url, p=is_photo, h=header: _x_deliver_dm_attachment(
-                           client, bot_client, chat_id, u, p, h))
-        return
-
-    # 3) Plain text with links. Tweet URLs use the highest-quality pipeline;
-    #    other links go through the generic yt-dlp relay.
-    text = m.get("text", "") or ""
-    urls = URL_RE.findall(text)
-    for u in urls:
-        header = _header_lines("X", self_label, None, None, u)
-        if _x_is_tweet_url(u):
-            _enqueue_relay(queue, chat_id,
-                           lambda u=u, h=header: _x_deliver_tweet(
-                               client, bot_client, premium_client, chat_id, u, h, "", None))
-        else:
-            _enqueue_relay(queue, chat_id,
-                           lambda u=u, h=header: _download_and_deliver(
-                               bot_client, premium_client, chat_id, u, h, ""))
-    if not urls:
-        logger.info(f"[DirectForward/X] msg {msg_id}: no relayable media — skipped")
+        # 3) Plain text with links. Tweet URLs use the highest-quality pipeline;
+        #    other links go through the generic yt-dlp relay.
+        text = m.get("text", "") or ""
+        urls = URL_RE.findall(text)
+        for u in urls:
+            header = _header_lines("X", self_label, None, None, u)
+            if _x_is_tweet_url(u):
+                futs.append(_enqueue_relay(queue, chat_id,
+                               lambda u=u, h=header: _x_deliver_tweet(
+                                   client, bot_client, premium_client, chat_id, u, h, "", None)))
+            else:
+                futs.append(_enqueue_relay(queue, chat_id,
+                               lambda u=u, h=header: _download_and_deliver(
+                                   bot_client, premium_client, chat_id, u, h, "")))
+        if not urls:
+            logger.info(f"[DirectForward/X] msg {msg_id}: no relayable media — skipped")
+    finally:
+        await _await_relays(futs)
 
 
 async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client, premium_client, self_uid: str,
@@ -458,58 +464,61 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
     self_label = f"x-user `{self_uid}`" if is_self else f"x-user `{sender}`"
     msg_id = line.get("id", "?")
     kind = line.get("kind")
-
-    # The linking code may arrive from the account being linked.
-    if await _x_pairing_scan(line.get("text", "") or "", sender or self_uid,
-                             state, bot_client, chat_id):
-        return
-
-    # Relay gating: ignore conversations with accounts that aren't linked.
-    if not is_self and str(sender) not in _get_peers(state, "x"):
-        logger.info(f"[DirectForward/X] msg {msg_id} from unlinked {sender} — ignored")
-        return
-
-    if kind == "tweet":
-        url = line.get("url", "")
-        if not url:
+    futs: list = []
+    try:
+        # The linking code may arrive from the account being linked.
+        if await _x_pairing_scan(line.get("text", "") or "", sender or self_uid,
+                                 state, bot_client, chat_id):
             return
-        header = _header_lines("X", self_label, None, None, url)
-        _enqueue_relay(queue, chat_id,
-                       lambda u=url, h=header, b=line.get("text", ""): _x_deliver_tweet(
-                           client, bot_client, premium_client, chat_id, u, h, b, None))
-        return
 
-    if kind == "media":
-        media_url = line.get("media_url", "")
-        if media_url:
-            header = _header_lines("X", self_label, None, None, None)
-            _enqueue_relay(queue, chat_id,
-                           lambda u=media_url, p=bool(line.get("is_photo")), h=header:
-                               _x_deliver_dm_attachment(client, bot_client, chat_id, u, p, h))
-        else:
-            # Encrypted DM media — the URL requires a media key the bridge does
-            # not extract (yet). Log once and skip; never drop silently forever.
-            logger.info(f"[DirectForward/X] msg {msg_id}: encrypted DM media without a URL — skipped")
-        return
+        # Relay gating: ignore conversations with accounts that aren't linked.
+        if not is_self and str(sender) not in _get_peers(state, "x"):
+            logger.info(f"[DirectForward/X] msg {msg_id} from unlinked {sender} — ignored")
+            return
 
-    if kind == "text":
-        text = line.get("text", "") or ""
-        urls = URL_RE.findall(text)
-        for u in urls:
-            header = _header_lines("X", self_label, None, None, u)
-            if _x_is_tweet_url(u):
-                _enqueue_relay(queue, chat_id,
-                               lambda u=u, h=header: _x_deliver_tweet(
-                                   client, bot_client, premium_client, chat_id, u, h, "", None))
+        if kind == "tweet":
+            url = line.get("url", "")
+            if not url:
+                return
+            header = _header_lines("X", self_label, None, None, url)
+            futs.append(_enqueue_relay(queue, chat_id,
+                           lambda u=url, h=header, b=line.get("text", ""): _x_deliver_tweet(
+                               client, bot_client, premium_client, chat_id, u, h, b, None)))
+            return
+
+        if kind == "media":
+            media_url = line.get("media_url", "")
+            if media_url:
+                header = _header_lines("X", self_label, None, None, None)
+                futs.append(_enqueue_relay(queue, chat_id,
+                               lambda u=media_url, p=bool(line.get("is_photo")), h=header:
+                                   _x_deliver_dm_attachment(client, bot_client, chat_id, u, p, h)))
             else:
-                _enqueue_relay(queue, chat_id,
-                               lambda u=u, h=header: _download_and_deliver(
-                                   bot_client, premium_client, chat_id, u, h, ""))
-        if not urls:
-            logger.info(f"[DirectForward/X] msg {msg_id}: bridge text with no links — skipped")
-        return
+                # Encrypted DM media — the URL requires a media key the bridge does
+                # not extract (yet). Log once and skip; never drop silently forever.
+                logger.info(f"[DirectForward/X] msg {msg_id}: encrypted DM media without a URL — skipped")
+            return
 
-    logger.info(f"[DirectForward/X] msg {msg_id}: bridge line kind {kind!r} not relayable — skipped")
+        if kind == "text":
+            text = line.get("text", "") or ""
+            urls = URL_RE.findall(text)
+            for u in urls:
+                header = _header_lines("X", self_label, None, None, u)
+                if _x_is_tweet_url(u):
+                    futs.append(_enqueue_relay(queue, chat_id,
+                                   lambda u=u, h=header: _x_deliver_tweet(
+                                       client, bot_client, premium_client, chat_id, u, h, "", None)))
+                else:
+                    futs.append(_enqueue_relay(queue, chat_id,
+                                   lambda u=u, h=header: _download_and_deliver(
+                                       bot_client, premium_client, chat_id, u, h, "")))
+            if not urls:
+                logger.info(f"[DirectForward/X] msg {msg_id}: bridge text with no links — skipped")
+            return
+
+        logger.info(f"[DirectForward/X] msg {msg_id}: bridge line kind {kind!r} not relayable — skipped")
+    finally:
+        await _await_relays(futs)
 
 
 def _x_read_inbox(state: dict) -> list[dict]:
@@ -931,6 +940,10 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
 
                 for line in bridge_lines:
                     lid = line.get("_id")
+                    # Refresh the watchdog heartbeat per line: a big backlog now
+                    # blocks the worker while each relay actually runs, which can
+                    # exceed the 30-min silence threshold on its own.
+                    mark_worker_alive("x")
                     try:
                         await _x_process_bridge_line(line, client, queue, chat_id,
                                                      bot_client, premium_client, uid, state)
