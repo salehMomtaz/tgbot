@@ -134,6 +134,34 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         except Exception:
             pass
 
+    elif data == "admin_toggle_ig_auth":
+        new_state = not getattr(config, "IG_AUTH_ENABLED", True)
+        set_key(".env", "IG_AUTH_ENABLED", str(new_state).lower())
+        config.IG_AUTH_ENABLED = new_state
+        if new_state:
+            await callback_query.message.edit_text(
+                "🟢 **Instagram authenticated features ENABLED.**\n\n"
+                "The IG DM relay, Friend Media IG archives, and the headless IG "
+                "cookie refresh will resume. Make sure a fresh, valid "
+                "`igcookies.txt` is uploaded first.\n\n"
+                "🔄 **Restarting the bot** to start the IG worker — back in a few seconds.",
+                reply_markup=build_console_keyboard(user_id))
+            await log_event("🔐 **Admin Action:** IG authenticated features enabled. Auto-restarting.")
+            await callback_query.answer()
+            _mark_restart_pending()
+            schedule_self_restart(delay=3.0)
+        else:
+            await callback_query.message.edit_text(
+                "🔴 **Instagram authenticated features PAUSED.**\n\n"
+                "• The IG DM relay worker stops (within ~1 min).\n"
+                "• Friend Media IG archives are skipped.\n"
+                "• The headless IG cookie refresh is disabled.\n"
+                "• No Instagram login is ever attempted.\n\n"
+                "Re-enable this button after uploading a fresh `igcookies.txt`.",
+                reply_markup=build_console_keyboard(user_id))
+            await log_event("🔐 **Admin Action:** IG authenticated features paused.")
+            await callback_query.answer("Instagram paused", show_alert=True)
+
     elif data == "admin_list":
         db = load_database()
         users = db["authorized"]

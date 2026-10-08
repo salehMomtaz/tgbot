@@ -637,6 +637,10 @@ async def _ig_wait_for_fresh_jar(cl, loop) -> None:
                 "(jar mtime change detected)...")
     while True:
         await asyncio.sleep(60)
+        if not getattr(config, "IG_AUTH_ENABLED", True):
+            logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — stopping the "
+                        "wait (IG paused). No login will be attempted.")
+            return
         mtime = _ig_jar_mtime()
         if mtime and mtime != last_mtime:
             logger.info(f"[DirectForward/IG] igcookies.txt changed (mtime {last_mtime} -> {mtime}) — "
@@ -965,6 +969,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
     relogin_failures = 0  # consecutive mid-poll re-login failures (alert gate)
     try:
         while True:
+            if not getattr(config, "IG_AUTH_ENABLED", True):
+                logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — stopping the "
+                            "worker (IG paused). No Instagram API calls will be made.")
+                return
             state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
             state_dirty = False
             try:

@@ -115,6 +115,13 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
     if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
         logger.info(f"[CookieRefresh] skip {cookie_path} — missing/empty")
         return False
+    # IG is paused (IG_AUTH_ENABLED=false, e.g. account suspended/appealing):
+    # do NOT visit instagram.com at all — a headless visit is an authenticated
+    # device touch and the whole point of the pause is to stop those.
+    if cookie_path.endswith("igcookies.txt") and not getattr(config, "IG_AUTH_ENABLED", True):
+        logger.info("[CookieRefresh] skip igcookies.txt — IG_AUTH_ENABLED=false "
+                    "(Instagram paused; not visiting the site)")
+        return False
     # Quick check: if the jar was freshly written via yt-dlp or admin
     # (<24h), skip the OTHER sites to save RAM — but NEVER skip IG here.
     # Instagram's auth is tightly bound to mid/rur/csrftoken rotation, and

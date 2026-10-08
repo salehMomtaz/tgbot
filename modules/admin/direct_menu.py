@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 async def _render_direct_menu(callback_query: CallbackQuery):
     state = direct_forward._load_state()
     ig_enabled = "🟢" if config.IG_DIRECT_ENABLED else "⚪"
+    ig_auth = "🟢 enabled" if getattr(config, "IG_AUTH_ENABLED", True) else "🔴 PAUSED (Admin → 🔐 IG Auth)"
     x_enabled = "🟢" if config.X_DIRECT_ENABLED else "⚪"
     tt_enabled = "🟢" if getattr(config, "TIKTOK_DIRECT_ENABLED", False) else "⚪"
     chat_set = "✅" if getattr(config, "DIRECT_FORWARD_CHAT_ID", 0) else "⚠️ DIRECT_FORWARD_CHAT_ID=0 (relay off)"
@@ -54,6 +55,7 @@ async def _render_direct_menu(callback_query: CallbackQuery):
             f"• Relay chat: {chat_set}\n"
             f"• Poll interval: {config.DIRECT_FORWARD_POLL_SECONDS}s\n\n"
             f"**Instagram**\n"
+            f"• Auth: {ig_auth}\n"
             f"• {ig_enabled} Status: **{direct_forward.pairing_status('ig', state)}**\n\n"
             f"**X / Twitter**\n"
             f"• {x_enabled} Status: **{'enabled' if config.X_DIRECT_ENABLED else 'disabled'}**\n"

@@ -35,6 +35,11 @@ async def _relay_watchdog(bot_client, chat_id: int, platforms: list) -> None:
     while True:
         try:
             for key, label in platforms:
+                # IG intentionally paused (IG_AUTH_ENABLED=false): the worker
+                # stops on purpose, so its silence is NOT a stall — don't alert.
+                if key == "ig" and not getattr(config, "IG_AUTH_ENABLED", True):
+                    alerted.discard(key)
+                    continue
                 silent = worker_silent_seconds(key)
                 if silent is None:
                     continue
@@ -64,10 +69,14 @@ async def _relay_watchdog(bot_client, chat_id: int, platforms: list) -> None:
 async def _direct_forward_supervisor(bot_client, premium_client, chat_id: int) -> None:
     workers = []
     platforms = []
-    if config.IG_DIRECT_ENABLED:
+    if config.IG_DIRECT_ENABLED and getattr(config, "IG_AUTH_ENABLED", True):
         from .instagram import _instagram_worker
         workers.append(_instagram_worker(bot_client, premium_client, chat_id, queue))
         platforms.append(("ig", "Instagram"))
+    elif config.IG_DIRECT_ENABLED:
+        logger.info("[DirectForward] Instagram relay is enabled but IG_AUTH_ENABLED is "
+                    "false (IG paused) — the IG worker will NOT start and no login "
+                    "will be attempted. Re-enable via Admin → 🔐 IG Auth.")
     if config.X_DIRECT_ENABLED:
         from .twitter import _twitter_worker
         workers.append(_twitter_worker(bot_client, premium_client, chat_id, queue))

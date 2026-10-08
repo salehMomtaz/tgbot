@@ -161,6 +161,15 @@ DIRECT_FORWARD_POLL_JITTER_PCT = get_env_int("DIRECT_FORWARD_POLL_JITTER_PCT", 4
 # When unset, falls back to nothing (direct connection).
 DIRECT_FORWARD_PROXY = os.getenv("DIRECT_FORWARD_PROXY", "").strip() or None
 
+# Master switch for EVERY Instagram feature that needs an authenticated session
+# (IG direct-forward DM relay, Friend Media IG archives, and the headless IG
+# cookie refresh). Set it false (Admin → 🔐 IG Auth) while the account is
+# suspended/appealing or the sessionid is dead: the IG worker never starts, no
+# login is ever attempted, and no authenticated IG API call is made. Turn it
+# back on after uploading a fresh igcookies.txt. Defaults to true so a fresh
+# install behaves exactly as before.
+IG_AUTH_ENABLED = os.getenv("IG_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+
 # Instagram direct-forward
 IG_DIRECT_ENABLED = os.getenv("IG_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
 # NOTE (2026-09-05): there is deliberately NO username/password/TOTP login

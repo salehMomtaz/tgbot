@@ -73,6 +73,8 @@ def _dest_label(dest=None):
 
 def _blurb():
     ig = "🟢" if getattr(config, "FRIEND_MEDIA_IG_ENABLED", False) else "🔴"
+    if not getattr(config, "IG_AUTH_ENABLED", True):
+        ig += " (paused — Admin → 🔐 IG Auth)"
     sched = int(getattr(config, "FRIEND_MEDIA_SCHEDULE_MINUTES", 60) or 0)
     sched_label = f"every {sched}m" if sched > 0 else "manual only"
     return (
@@ -655,7 +657,8 @@ async def _archive_one_friend(client, key, friend, status_msg=None, full=False):
             # for this friend without any network call, and _run_archives logs
             # ONE shared "IG archives paused" line per cycle instead of a
             # "⚠️ IG ... skipped" summary per friend.
-            ig_paused = bool(fm_ig._IG_BREAKER["tripped_at"]) and fm_ig._ig_breaker_open()
+            ig_paused = (not getattr(config, "IG_AUTH_ENABLED", True)) or (
+                bool(fm_ig._IG_BREAKER["tripped_at"]) and fm_ig._ig_breaker_open())
             if (friend.get("ig_enabled") and friend.get("ig_username")
                     and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)
                     and not ig_paused):
@@ -749,6 +752,7 @@ async def _run_archives(client, friends, status_msg, full=False):
         # don't need one; the first friend never waits).
         this_has_ig = (friend.get("ig_enabled") and friend.get("ig_username")
                        and getattr(config, "FRIEND_MEDIA_IG_ENABLED", False)
+                       and getattr(config, "IG_AUTH_ENABLED", True)
                        and not (fm_ig._IG_BREAKER["tripped_at"]
                                 and fm_ig._ig_breaker_open()))
         if this_has_ig and prev_had_ig:

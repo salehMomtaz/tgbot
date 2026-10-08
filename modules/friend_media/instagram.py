@@ -175,6 +175,10 @@ async def _ig_client():
     Raises IGUnavailable with the REASON when unavailable — a silent None made
     the admin summary say "0 new IG stories" while the real problem was a dead
     cookie jar."""
+    if not getattr(config, "IG_AUTH_ENABLED", True):
+        raise IGUnavailable(
+            "Instagram is paused (IG_AUTH_ENABLED=false) — re-enable via "
+            "Admin → 🔐 IG Auth after uploading a fresh igcookies.txt")
     if _ig_breaker_open():
         raise IGUnavailable(
             f"IG archives paused (session dead: {_IG_BREAKER['reason'] or 'auth failure'}) "
@@ -280,6 +284,9 @@ async def _ig_client_retry():
     try:
         return await _ig_client()
     except IGUnavailable:
+        # IG intentionally paused (IG_AUTH_ENABLED=false) — never rebuild.
+        if not getattr(config, "IG_AUTH_ENABLED", True):
+            raise
         # Auth-rejected login → the breaker is tripped; rebuilding from the
         # SAME dead jar only doubles the 403s (the 02:55 incident pattern).
         # A rebuild is only worthwhile for a NON-auth failure (network glitch
