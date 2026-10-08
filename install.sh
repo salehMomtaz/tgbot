@@ -191,20 +191,19 @@ fi
 # Deno sidecar xchat_bridge.mjs. That sidecar imports emusks (and its cycletls
 # dep) from the project's local node_modules — so a fresh clone needs
 # `npm install` before the bridge can run. Runtime is Deno; node/npm are only
-# needed to populate node_modules here. Idempotent: skipped when already present.
+# needed to populate node_modules here. `npm install` is idempotent and also
+# applies package.json version bumps (e.g. x-client-transaction-id 0.3.2 /
+# emusks 2.3.15, which fixed the 2026-10-08 XChat bridge crash-loop) on an
+# existing install, so it is run whenever package.json is present.
 if [[ -f "package.json" ]]; then
-    if [[ -d "node_modules/emusks" ]]; then
-        log "XChat bridge npm deps already present (node_modules/emusks)."
+    log "Installing/updating XChat bridge npm deps (npm install → emusks/cycletls)..."
+    if ! have npm; then
+        warn "npm not found — XChat bridge deps skipped (X encrypted self-DM won't work)."
+    elif npm install --no-audit --no-fund >/dev/null 2>&1; then
+        log "XChat bridge npm deps installed/up to date."
+        note "xchat-npm:$PROJECT_DIR/node_modules"
     else
-        log "Installing XChat bridge npm deps (npm install → emusks/cycletls)..."
-        if ! have npm; then
-            warn "npm not found — XChat bridge deps skipped (X encrypted self-DM won't work)."
-        elif npm install --no-audit --no-fund >/dev/null 2>&1; then
-            log "XChat bridge npm deps installed."
-            note "xchat-npm:$PROJECT_DIR/node_modules"
-        else
-            warn "'npm install' failed — XChat bridge deps missing (X encrypted self-DM won't work)."
-        fi
+        warn "'npm install' failed — XChat bridge deps missing (X encrypted self-DM won't work)."
     fi
 fi
 

@@ -156,6 +156,20 @@ Classify what you find:
 - A real `Traceback` → **the phase error**; open the file:line and read the
   code path.
 - `MESSAGE_NOT_MODIFIED` → benign re-tap, already handled silently.
+- `[DirectForward/IG] login failed (session rejected) … waiting for fresh
+  igcookies.txt upload` → **expected, by design** (2026-10-08): the IG worker no
+  longer auto-relogins on a dead session; it parks until the operator uploads a
+  fresh jar (mtime change). Only one such line per dead streak — a *repeated*
+  retry storm is the bug (it should not happen anymore).
+- `[DirectForward/IG] session expired — attempting re-login` / `login retry N
+  failed … next retry in ~Nh` → the OLD retry-storm behavior; if seen, the
+  no-relogin patch regressed.
+- XChat bridge `OnDemandFileUrlResolutionError` or `Failed to initialize
+  CycleTLS` → bump `x-client-transaction-id` / `emusks` (see package.json pins);
+  the sidecar crash-loops and X relays nothing until fixed.
+- `system_monitor … warning sent` for CPU ≥80% while you (the agent) are
+  running → the load is the OpenCode session itself on a 2-vCPU box, not the
+  bot; it clears when the agent exits.
 
 ### Phase 2 — drive (close the loop per feature)
 Pick small test URLs (≈≤50 MB each) and pre-validate liveness offline first:
