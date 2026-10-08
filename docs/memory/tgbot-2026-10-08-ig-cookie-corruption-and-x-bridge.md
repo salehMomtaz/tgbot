@@ -156,8 +156,82 @@ The Direct-Forward and Friend Media menus show the paused state. This box's
 account was mid-appeal and the sessionid was dead), so the IG worker is not
 running and no login is being attempted.
 
+## 7. Second pass — X backlog gap: the cursor advanced on ENQUEUE, not on RELAY (2026-10-08, later)
+
+After the sidecar fix above, the operator reported that a specific X range
+(https://x.com/TV3JP/status/2104818326098886708 … https://x.com/panteradrop50k/status/2107715135133409437,
+inclusive) **still never arrived** in the Telegram chat. The section-3 note
+("45 relays observed within minutes") was the incomplete picture: the worker
+raced through the 136-message burst but only the relays that happened to run
+before the next restart were delivered.
+
+### Root cause
+
+`utils/shared.queue` (`DownloadQueue`) is **in-memory only**; a restart discards
+every not-yet-run job. `_enqueue_relay` (modules/direct_forward/common.py) was
+fire-and-forget — it `create_task`ed the enqueue and returned immediately — and
+the workers advanced their dedup cursor the moment the relay was **queued**:
+
+```
+_X_read_inbox → for line: _x_process_bridge_line()   # only ENQUEUES
+                          _advance(line)              # cursor moves NOW
+```
+
+So the worker advanced the peer-conversation cursor to the last line within
+seconds while the queue was still draining earlier messages. The bot restarted
+several times that morning (the fix session); every relay not yet run was lost,
+and because the cursor was already past those lines, `_x_read_inbox` never
+returned them again. Evidence: the worker's cursor sat at `2108156385708154880`
+(the last line) while the log's last in-gap relay was `…/DomKinggMalcolm/2104888932899205541`
+(seq `2105129464476684288`, 09-30 02:55) — **79 messages** (09-30 tail + the
+10-05, 10-07, 10-08 02:xx batches) were below the cursor yet never relayed.
+
+The same latent bug existed in the IG worker (`_ig_process_message` →
+`_enqueue_ig_relay`) and the TikTok worker (marked the push `seen` *before*
+relaying). The documented "at-least-once" cursor rule was therefore not actually
+enforced for relay failures — it only caught enqueue errors, which never happen.
+
+### Fix
+
+- `modules/direct_forward/common.py::_enqueue_relay` now returns an
+  `asyncio.Future` that resolves once the job has actually RUN (or raised);
+  a module-level `_relay_submit_tasks` set keeps the submit task from being GC'd.
+  New `_await_relays(futures)` awaits a batch with `return_exceptions=True` and
+  re-raises the first failure (so no "exception never retrieved" warning).
+- All three workers now await the relay before advancing their cursor:
+  `_x_process_bridge_line` / `_x_process_message` (try/finally + `_await_relays`),
+  `_ig_process_message` (same), `_tt_process_message` (awaits, and
+  `_tt_run_ws` marks the push `seen` only AFTER a successful relay — new
+  `_tt_persist_seen`). A genuine relay failure now leaves the cursor behind so
+  the next poll retries it.
+- Because a big backlog now blocks the worker while each relay runs,
+  `_twitter_worker` refreshes `mark_worker_alive("x")` per bridge line so the
+  relay watchdog can't false-alarm during a long replay.
+
+### Recovery
+
+The bridge inbox is append-only, so the dropped lines were still on disk. A new
+tool `tools/recover_x_gap.py` rewinds a conversation cursor to the last
+delivered seq and optionally drops already-delivered lines at/above a boundary:
+
+```
+python tools/recover_x_gap.py \
+  --conv 1743868576920928256:2095053127040876548 \
+  --resume 2105129464476684288 --drop-from 2108135431178989568
+```
+
+It backs both files up as `*.pre-recover.<ts>`. Run it with the bot (and the
+bridge) stopped, then start them; the worker replays the gap on its next poll.
+Applied here: **79 messages replayed** and delivered 12:51–12:59 UTC (TV3JP …
+panteradrop, inclusive), 18 already-delivered lines dropped to avoid duplicates.
+
 ## Operator follow-ups
 
+- **If a direct-forward range ever goes missing again:** the fix means a relay
+  failure now retries instead of vanishing, but if a restart still drops
+  something, `tools/recover_x_gap.py` recovers it from `cache/xchat_inbox.jsonl`
+  (stop bot+bridge first). Check `direct_forward_state.json` →
+  `x.cursors[<conv>]` vs the newest inbox line to spot a cursor that ran ahead.
 - **When the appeal resolves and you have fresh cookies:** upload the new
   `igcookies.txt` (Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace), then tap
   **Admin → 🔐 IG Auth** to turn Instagram back ON (the bot restarts and the IG

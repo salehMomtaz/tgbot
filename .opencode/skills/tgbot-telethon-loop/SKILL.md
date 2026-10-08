@@ -173,6 +173,15 @@ Classify what you find:
 - XChat bridge `OnDemandFileUrlResolutionError` or `Failed to initialize
   CycleTLS` → bump `x-client-transaction-id` / `emusks` (see package.json pins);
   the sidecar crash-loops and X relays nothing until fixed.
+- **A specific X direct-forward range never arrives** (bridge log shows
+  `emitted N message(s) from <peer>` but no matching `✅ relayed tweet`): the
+  worker's per-conversation cursor ran ahead of the in-memory queue (fixed
+  2026-10-08 — `_enqueue_relay` now returns a Future the workers await). If it
+  recurs, stop bot+bridge and run
+  `venv/bin/python tools/recover_x_gap.py --conv <uid:peer> --resume <last-delivered-seq> [--drop-from <seq>]`,
+  then restart — the inbox is append-only so nothing is lost. Compare
+  `direct_forward_state.json` → `x.cursors[<conv>]` with the newest
+  `cache/xchat_inbox.jsonl` line for that conv to confirm a runaway cursor.
 - `system_monitor … warning sent` for CPU ≥80% while you (the agent) are
   running → the load is the OpenCode session itself on a 2-vCPU box, not the
   bot; it clears when the agent exits.

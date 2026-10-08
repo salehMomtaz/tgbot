@@ -631,6 +631,25 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     the cursor is not advanced past a failed relay (3-strike cap unblocks a
     poison message) — do not restore the old unconditional `_bump_cursor`.
 
+    **The cursor must advance on RELAY COMPLETION, not on ENQUEUE (2026-10-08).**
+    The single-worker `DownloadQueue` is in-memory: a restart discards every
+    unrun job. `common._enqueue_relay` used to be fire-and-forget (it returned
+    the instant the job was *queued*), so a worker advanced its cursor to the
+    last line within seconds while the queue still held earlier relays; any
+    restart mid-drain dropped those jobs forever and `_x_read_inbox`'s
+    `lid > cursor` filter then skipped them permanently. That is the 2026-10-08
+    X gap (79 messages, TV3JP→panteradrop) that survived the bridge fix.
+    `_enqueue_relay` now **returns an `asyncio.Future`** that resolves once the
+    job has actually run; `_await_relays(futures)` awaits a batch and re-raises
+    the first failure. Every worker MUST await it before advancing: X
+    (`_x_process_bridge_line`/`_x_process_message`, try/finally), IG
+    (`_ig_process_message`, try/finally), TikTok (`_tt_process_message`, with
+    `_tt_run_ws` marking the push `seen` only AFTER the relay via
+    `_tt_persist_seen`). A big backlog now blocks the worker while each relay
+    runs, so `_twitter_worker` refreshes `mark_worker_alive("x")` per bridge
+    line to keep the watchdog quiet. Recovery for a cursor that ran ahead:
+    `tools/recover_x_gap.py` (stop bot+bridge, rewind the conv cursor, replay).
+
     **IG reactions + X linking (2026-09-15).** The IG worker reacts to each DM it
     receives from the paired contact with `config.IG_DIRECT_REACT_EMOJI` (default
     👍, empty disables) via instagrapi's `direct_send_reaction` — an IG private

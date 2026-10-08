@@ -768,3 +768,21 @@ it must be started ad-hoc without systemd, stop the service first and run it
 detached from the repo dir with `./run.sh`. See
 [Cookie protection & monitor](tgbot-cookie-protection-and-monitor.md) and
 [tgbot ↔ balebot integration](tgbot-balebot-integration.md).
+
+---
+
+## 2026-10-08 — X backlog gap: cursor advanced on ENQUEUE, not on RELAY
+
+Operator report: after the XChat bridge was restored, a specific X range
+(`TV3JP/status/2104818326098886708` … `panteradrop50k/status/2107715135133409437`,
+inclusive) still never arrived. Full write-up:
+[IG cookie corruption + X bridge 2026-10-08](tgbot-2026-10-08-ig-cookie-corruption-and-x-bridge.md) §7.
+
+- **Cause:** `common._enqueue_relay` was fire-and-forget and each worker advanced
+  its dedup cursor at enqueue time, so the in-memory `DownloadQueue` losing jobs
+  on restart permanently skipped them (79 messages).
+- **Fix:** `_enqueue_relay` returns an `asyncio.Future`; workers await it
+  (`_await_relays`) before `_advance`. TikTok marks a push `seen` only after the
+  relay (`_tt_persist_seen`). `_twitter_worker` refreshes the heartbeat per line.
+- **Recovery tool:** `tools/recover_x_gap.py` (rewind a conv cursor + optionally
+  drop already-delivered inbox lines). 79 messages replayed live.
