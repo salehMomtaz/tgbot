@@ -720,6 +720,23 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                 top.get("height"), best_audio_id, bool(top.get("muxed")), top.get("bytes"),
             )
             file_path = result["file_path"]
+            # yt-dlp's prepare_filename can report a path that does not match
+            # the file on disk: a long non-ASCII (e.g. Persian) title can be
+            # truncated by the filesystem, and photo entries carry an unknown
+            # ".NA" extension. send_photo/send_video then fall back to treating
+            # the string as a file_id and raise
+            # "does not represent an existing local file". Resolve the real
+            # media file from the per-download task dir (it holds exactly this
+            # download) before probing/sending.
+            if not os.path.exists(file_path):
+                import glob as _glob
+                task_dir = f"cache/{cache_id}"
+                cands = [p for p in _glob.glob(os.path.join(task_dir, "*"))
+                         if not p.endswith((".part", ".ytdl", ".tmp", ".part-Frag"))]
+                if cands:
+                    file_path = max(cands, key=lambda p: os.path.getsize(p))
+                    logger.info(f"[DirectForward/X] resolved on-disk media {file_path!r} "
+                                f"(prepare_filename gave a missing path)")
             width, height, _dur = probe_video_dimensions(file_path)
             # Byte-sniff first: extensions + the 320×320 probe fallback both
             # mislabel photo posts (PHOTO_EXT_INVALID incident, 2026-09-04).
@@ -728,8 +745,23 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                 file_path = normalize_photo_file(file_path)
                 is_photo = True
             else:
-                is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
-                    (".jpg", ".jpeg", ".png", ".webp"))
+                # The 320×320 fallback is only meaningful when the file is a
+                # real video whose probe failed — never for a missing/unknown
+                # file (probe returns 320×320 on ANY error, which used to
+                # misroute a non-existent ".NA" path into send_photo).
+                is_photo = os.path.exists(file_path) and (
+                    (width == 320 and height == 320) or file_path.lower().endswith(
+                        (".jpg", ".jpeg", ".png", ".webp")))
+            if not os.path.exists(file_path):
+                logger.warning(f"[DirectForward/X] tweet {url}: downloaded media missing "
+                               f"({file_path!r}) — falling back")
+                if share_video_url:
+                    return await _x_deliver_dm_attachment(client, bot_client, chat_id,
+                                                          share_video_url, False, header_lines)
+                await bot_client.send_message(
+                    chat_id=chat_id,
+                    text=f"{caption}\n\n⚠️ *Download failed* — the media could not be located on disk.")
+                return
             if is_photo:
                 await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
             else:

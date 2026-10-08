@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "emusks": "^2.3.6"
+    "emusks": "^2.3.15",
+    "x-client-transaction-id": "^0.3.2"
   }
 }
