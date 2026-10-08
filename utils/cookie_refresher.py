@@ -342,6 +342,18 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
             # _DEVICE_IDENTITY). Preserve the jar's original values.
             device_identity = _DEVICE_IDENTITY.get(os.path.basename(cookie_path), set())
 
+            # Visibility: if the headless profile was seen as a DIFFERENT device
+            # (its mid/ig_did/datr differ from the jar's), log it — that visit is
+            # exactly the situation that used to corrupt the jar, and it is a
+            # signal Instagram may have flagged a "new device" on the account.
+            drifted = [n for (d, n), v in allowed_map.items()
+                       if n in device_identity and old_map.get((d, n)) not in (None, v)]
+            if drifted:
+                logger.warning(
+                    f"[CookieRefresh] {os.path.basename(cookie_path)} — headless "
+                    f"profile seen as a NEW device ({', '.join(sorted(drifted))} "
+                    f"differ); keeping the jar's device identity (not overlaid).")
+
             # Compare only the allowlisted, non-device-identity cookies: did
             # anything actually rotate? Device-identity changes are ignored —
             # they are expected (the headless profile is a different device)
