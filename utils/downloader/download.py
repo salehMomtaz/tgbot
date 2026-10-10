@@ -19,6 +19,18 @@ from .thumbnails import (
 from utils import cookie_manager
 
 
+# Hard cap on the byte length of a title's contribution to an on-disk filename.
+# yt-dlp sanitizes illegal characters but does NOT bound the length, so a post
+# whose title is a wall of emoji (each 4 UTF-8 bytes) overflows Linux's 255-byte
+# per-component limit and yt-dlp dies writing `<title>.jpg` / `<title>.mp4` with
+# OSError [Errno 36] File name too long. `%(title).<N>B` is yt-dlp's byte-based
+# truncation (it encodes, slices with `%.<N>s`, then decodes ignoring a partial
+# trailing code point), so the result is guaranteed safe regardless of script.
+# 150 bytes leaves ample room for the extension, yt-dlp's `.fNNN`/`.part`
+# intermediates and our `<stem>_thumb.jpg` sibling, all well under 255.
+_MAX_TITLE_FILENAME_BYTES = 150
+
+
 def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None, muxed: bool = False, expected_size_bytes: int | None = None) -> dict:
     """Download a single media item.
 
@@ -52,7 +64,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     url = normalize_url(url)
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)
-    out_tmpl = f"{task_dir}/%(title)s.%(ext)s"
+    out_tmpl = f"{task_dir}/%(title).{_MAX_TITLE_FILENAME_BYTES}B.%(ext)s"
 
     # Resolve the real jar first; acquire a per-run snapshot only when this
     # attempt will actually authenticate. A header-only jar counts as absent.
