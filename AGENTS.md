@@ -947,6 +947,19 @@ Don't port it to Go.
 
 ## Gotchas
 
+- **On-disk filenames are byte-bounded — yt-dlp sanitizes characters but NOT
+  length.** `download_media` builds its yt-dlp output template as
+  `cache/<id>/%(title).150B.%(ext)s`. The `.150B` conversion is *byte*-based
+  (encode → `%.150s` → decode ignoring a partial trailing code point), so a title
+  that is a wall of emoji (4 UTF-8 bytes each) still yields a component well under
+  Linux's 255-byte `NAME_MAX` — without it, yt-dlp dies writing
+  `<title>.<ext>`/`<title>.jpg` with `OSError [Errno 36] File name too long` and
+  the direct-forward 3-strike cap *drops* the message. Do not revert `outtmpl` to
+  plain `%(title)s`. `utils/security.py::safe_task_filename` carries the same
+  byte/char cap (`_MAX_FILENAME_CHARS = 150`, ASCII-only after sanitization) for
+  the direct-file path (`download_direct_file`) and the interactive display
+  names. Any new code that derives an on-disk name from a remote/user string must
+  bound its length too.
 - **Entrypoint scripts must stay executable — systemd calls `run.sh` directly.**
   `deploy/tgbot.service` has `ExecStart=__PROJECT_DIR__/run.sh`, so `run.sh`
   (plus `install.sh`/`uninstall.sh`, invoked as `./…`) MUST keep the exec bit.

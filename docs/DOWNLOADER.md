@@ -637,3 +637,16 @@ calls; always wrap in `loop.run_in_executor(None, ...)`, or concurrent fetches +
 any running download will freeze the event loop. Documented as invariant #10 in
 `AGENTS.md` (commit `1d2a199` / `5a74b3b`, 2026-07-19). Related:
 [YouTube size fix & IP flag](tgbot-youtube-size-and-ip-flag.md).
+
+## On-disk filename length is byte-bounded (2026-10-10)
+
+`download_media` uses `cache/<id>/%(title).150B.%(ext)s`, not `%(title)s`.
+yt-dlp sanitizes illegal characters but never bounds the length, and a title full
+of emoji (4 bytes each) overflows Linux's 255-byte `NAME_MAX`, making yt-dlp die
+with `OSError [Errno 36] File name too long` while writing the thumbnail — which
+the direct-forward relay then counts as a failure and (after 3 strikes) skips,
+dropping the message. The `%(title).150B` conversion is byte-based, so the
+component is safe for any script. The same cap lives in
+`utils/security.py::safe_task_filename` for the direct-file path. Full writeup:
+[`docs/memory/tgbot-2026-10-10-filename-length-audit.md`](memory/tgbot-2026-10-10-filename-length-audit.md);
+invariant recorded in `AGENTS.md` (Gotchas).
