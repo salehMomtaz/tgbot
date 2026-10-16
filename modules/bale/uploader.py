@@ -2,7 +2,6 @@
 # Ported from balebot operators/uploader.py, stripped to essentials and pointed
 # at the shared core (probe_video_dimensions, splitters) + Bale's 20 MB ceiling.
 import os
-import re
 import asyncio
 import aiohttp
 import config
@@ -10,15 +9,27 @@ from utils.gate import is_document_mode
 
 BALE_API_BASE = "https://tapi.bale.ai"
 
+# Bale filename budget (bytes). The old sanitizer capped the stem at 40
+# characters; a byte budget is what actually keeps the whole component safe.
+BALE_FILENAME_MAX_BYTES = 60
+
 def sanitize_filename_for_bale(filename: str) -> str:
-    base, ext = os.path.splitext(filename)
-    clean_base = re.sub(r'[\\/:*?"<>|\[\]()\'\s]+', '_', base)
-    if len(clean_base) > 40:
-        clean_base = clean_base[:40].strip("_")
-    clean_base = re.sub(r'_+', '_', clean_base).strip("_")
-    if not clean_base:
-        clean_base = "file"
-    return f"{clean_base}{ext}"
+    """Bale filenames must be short, ASCII and markdown-safe.
+
+    Routed through the shared :mod:`utils.filenames` sanitizer (strict-ASCII
+    mode, 40-byte budget) instead of the old ad-hoc regex, which capped
+    *characters* and could leave a stem long enough to overflow NAME_MAX on a
+    non-ASCII name.
+    """
+    from utils.filenames import sanitize_filename
+
+    return sanitize_filename(
+        filename,
+        fallback="file",
+        max_bytes=BALE_FILENAME_MAX_BYTES,
+        ascii_only=True,
+        strip_dirs=True,
+    )
 
 def clean_caption_text(text: str, max_len: int = 150) -> str:
     """Bale markdown is fragile: always strip formatting, truncate."""

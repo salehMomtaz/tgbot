@@ -517,7 +517,10 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 import uuid, os
                 os.makedirs("cache", exist_ok=True)
                 cid = str(uuid.uuid4())[:8]
-                safe = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title)
+                from utils.filenames import sanitize_filename
+                safe = sanitize_filename(
+                    title, fallback=f"web_{cid}", max_bytes=100, ascii_only=True
+                )
                 p = f"cache/{cid}_{safe}.txt"
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(f"🌐 Webpage Markdown\n🔗 Source: {url}\n{'='*40}\n\n{md}")
@@ -843,11 +846,14 @@ def create_bale_dispatcher(bot: Bot) -> Dispatcher:
                 def prog(cur,tot): asyncio.run_coroutine_threadsafe(_bale_progress(cur,tot,callback.message,"Downloading..."), loop)
                 result = await loop.run_in_executor(None, download_media, cache["url"], fmt_id, action, cache_id, prog, None, (fmt.get("height") if action=='v' and fmt else None), (cache.get("best_audio_format_id") if action=='v' else None), bool(fmt.get("muxed")) if action=='v' and fmt else False, (fmt.get("bytes") if fmt else None))
                 fp = result['file_path']; tp = result['thumb_path']; title=result['title']; uploader=result['uploader']
-                # custom filename
+                # custom filename — sanitize through the shared byte-bounded
+                # helper (this path previously trusted the raw user string and
+                # could rename the file to an unbounded / emoji name).
                 ext = os.path.splitext(fp)[1]
                 cn = cache.get("custom_filename")
                 if cn:
-                    clean = cn if cn.endswith(ext) else f"{cn}{ext}"
+                    from utils.security import safe_task_filename
+                    clean = safe_task_filename(cn, os.path.basename(fp), ext)
                     nfp = os.path.join(os.path.dirname(fp), clean)
                     if nfp != fp: os.rename(fp, nfp); fp=nfp
                 await process_split_and_upload_bale(callback.bot, callback.message.chat.id, fp, action, title, uploader, result['duration'], tp, callback.message)

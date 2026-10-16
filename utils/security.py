@@ -49,37 +49,35 @@ def is_safe_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
 
 
-# Maximum length (in characters) of a sanitized filename stem. The sanitizer
-# below maps every non-``[A-Za-z0-9._-]`` byte to ``_``, so the result is pure
-# ASCII (1 byte/char) — a char cap is therefore also a byte cap, keeping
-# ``os.path.join(task_dir, name)`` well under Linux's 255-byte NAME_MAX even
-# after ``ext`` and the uploader's ``_partN`` suffix are appended. A URL path
-# basename or a user-supplied display name can be arbitrarily long; without the
-# cap, ``open()`` dies with OSError [Errno 36] File name too long.
+# Maximum length (in **bytes**) of a sanitized filename. The sanitizer below
+# runs in strict ASCII mode (every non-``[A-Za-z0-9._-]`` char becomes ``_``),
+# so char count == byte count; the cap keeps ``os.path.join(task_dir, name)``
+# well under Linux's 255-byte NAME_MAX even after ``ext`` and the uploader's
+# ``_partN`` suffix are appended. A URL path basename or a user-supplied display
+# name can be arbitrarily long; without the cap, ``open()`` dies with
+# ``OSError [Errno 36] File name too long``. The real logic lives in
+# ``utils/filenames.py`` (byte-accurate, Windows-reserved-name aware); this
+# module keeps the historical name + default for its callers.
 _MAX_FILENAME_CHARS = 150
 
 
 def safe_task_filename(value: str | None, fallback: str, ext: str = "") -> str:
     """Sanitize a user-supplied filename so it can never escape its task dir.
 
-    Strips directories (``../``, absolute paths), collapses unsafe characters,
-    bounds the length, and re-appends *ext* when the name doesn't already carry
-    it. The result is always a bare filename — ``os.path.join(task_dir, result)``
-    stays inside ``task_dir``.
+    Delegates to :func:`utils.filenames.sanitize_filename` in strict-ASCII mode
+    with the legacy 150-byte budget. Strips directories (``../``, absolute
+    paths), collapses unsafe characters, bounds the length in bytes, avoids
+    Windows device names, and re-appends *ext* when the name doesn't already
+    carry it. The result is always a bare filename —
+    ``os.path.join(task_dir, result)`` stays inside ``task_dir``.
     """
-    name = (value or "").strip()
-    # Drop any directory components first (../, /abs/path, C:\\...).
-    import os as _os
-    name = _os.path.basename(name.replace("\\", "/"))
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or fallback
-    if len(name) > _MAX_FILENAME_CHARS:
-        # Preserve a short trailing extension (<= 10 chars) and truncate the stem.
-        stem, dot, tail = name.rpartition(".")
-        if dot and 0 < len(tail) <= 10:
-            keep = max(1, _MAX_FILENAME_CHARS - len(tail) - 1)
-            name = f"{stem[:keep]}.{tail}"
-        else:
-            name = name[:_MAX_FILENAME_CHARS]
-    if ext and not name.lower().endswith(ext.lower()):
-        name = f"{name}{ext}"
-    return name
+    from utils.filenames import sanitize_filename
+
+    return sanitize_filename(
+        value,
+        fallback=fallback,
+        ext=ext,
+        max_bytes=_MAX_FILENAME_CHARS,
+        ascii_only=True,
+        strip_dirs=True,
+    )

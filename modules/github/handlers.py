@@ -86,9 +86,27 @@ REPO_REGEX = re.compile(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/?$")
 SUB_REGEX = re.compile(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/(issues|pull|discussions)/(\d+)/?$")
 GIST_REGEX = re.compile(r"https?://gist\.github\.com/([^/]+)/([a-f0-9]+)/?$")
 
+# Byte budget for a cache filename stem / zip arcname root. Repo and branch
+# names are short in practice, but they are remote-controlled, so bound them.
+GITHUB_SAFE_NAME_BYTES = 120
+
 def safe_cache_filename(value: str, fallback: str = "download") -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._")
-    return cleaned or fallback
+    """A safe single name for cache files / zip roots and arcnames.
+
+    ``strip_dirs=False`` flattens separators to ``_`` instead of taking the
+    basename: callers compose stems like ``f"{repo}_{branch}"`` and a branch
+    may contain ``/`` (``feature/foo``) — taking the basename would silently
+    drop the repo name. Delegates to the shared byte-bounded sanitizer.
+    """
+    from utils.filenames import sanitize_filename
+
+    return sanitize_filename(
+        value,
+        fallback=fallback,
+        max_bytes=GITHUB_SAFE_NAME_BYTES,
+        ascii_only=True,
+        strip_dirs=False,
+    )
 
 def current_branch(meta: dict):
     return meta.get("branch")

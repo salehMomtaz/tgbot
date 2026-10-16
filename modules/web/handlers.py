@@ -31,10 +31,16 @@ def register_web_handlers(app: Client, premium_app: Client | None = None):
                 await status.edit_text("ℹ️ No readable markdown from this page.")
                 stop(message)
                 return
-            sanitized = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title)
+            cid = str(uuid.uuid4())[:8]
+            # The <title> is remote-controlled and unbounded — route it through
+            # the shared sanitizer (byte-bounded, ASCII) so the .txt name can
+            # never overflow NAME_MAX.
+            from utils.filenames import sanitize_filename
+            sanitized = sanitize_filename(
+                title, fallback=f"web_{cid}", max_bytes=100, ascii_only=True
+            )
             if len(md) > 3500:
                 os.makedirs("cache", exist_ok=True)
-                cid = str(uuid.uuid4())[:8]
                 p = f"cache/{cid}_{sanitized}.txt"
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(f"🌐 Webpage Markdown\n🔗 Source: {url}\n{'='*40}\n\n{md}")

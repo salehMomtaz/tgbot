@@ -796,7 +796,11 @@ async def archive_instagram_full(key, friend, bot=None, status_cb=None):
         user = await loop.run_in_executor(None, _user)
         await _jitter(lo, hi)
 
-        zip_path = os.path.join(workdir, f"ig_{ig_user}_archive.zip")
+        from utils.filenames import sanitize_filename
+        safe_user = sanitize_filename(
+            ig_user, fallback="user", max_bytes=60, ascii_only=True
+        )
+        zip_path = os.path.join(workdir, f"ig_{safe_user}_archive.zip")
 
         # 1. Profile picture.
         pp_url = getattr(user, "profile_pic_url_hd", None) or getattr(user, "profile_pic_url", None)

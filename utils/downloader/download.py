@@ -17,6 +17,7 @@ from .thumbnails import (
     embed_metadata_ffmpeg,
 )
 from utils import cookie_manager
+from utils.filenames import MAX_TITLE_BYTES
 
 
 # Hard cap on the byte length of a title's contribution to an on-disk filename.
@@ -26,9 +27,14 @@ from utils import cookie_manager
 # OSError [Errno 36] File name too long. `%(title).<N>B` is yt-dlp's byte-based
 # truncation (it encodes, slices with `%.<N>s`, then decodes ignoring a partial
 # trailing code point), so the result is guaranteed safe regardless of script.
-# 150 bytes leaves ample room for the extension, yt-dlp's `.fNNN`/`.part`
-# intermediates and our `<stem>_thumb.jpg` sibling, all well under 255.
-_MAX_TITLE_FILENAME_BYTES = 150
+# The budget comes from `utils/filenames` so every on-disk name shares one
+# definition of "safe".
+#
+# NOTE: yt-dlp's own `trim_file_name` option is NOT usable here — it truncates
+# the *whole* path (including the `cache/<id>/` prefix) to N characters, which
+# would corrupt the directory. The per-field `%(title).NB` conversion is the
+# correct lever.
+_MAX_TITLE_FILENAME_BYTES = MAX_TITLE_BYTES
 
 
 def download_media(url: str, format_id: str | None = None, format_type: str = 'v', cache_id: str | None = None, progress_fn=None, format_selector: str | None = None, max_height: int | None = None, best_audio_format_id: str | None = None, muxed: bool = False, expected_size_bytes: int | None = None) -> dict:

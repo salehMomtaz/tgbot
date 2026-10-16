@@ -189,7 +189,10 @@ def register_youtube_handlers(app: Client, premium_app: Client | None = None):
                 vtt_path = found[0]
                 await status.edit_text("🧹 Cleaning transcript...")
                 clean_text = await loop.run_in_executor(None, clean_vtt_subtitles, vtt_path)
-                sanitized = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title)
+                from utils.filenames import sanitize_filename
+                sanitized = sanitize_filename(
+                    title, fallback=f"video_{cache_id}", max_bytes=100, ascii_only=True
+                )
                 out_path = f"{task_dir}/{sanitized}_Transcript.txt"
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(f"📖 YouTube Transcript\n📝 Title: {title}\n🔗 URL: {url}\n{'='*40}\n\n{clean_text}")
