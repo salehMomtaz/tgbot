@@ -62,6 +62,10 @@ from .thumbnails import (
     _find_thumbnail_file,
     extract_video_frame_thumb,
     probe_video_dimensions,
+    probe_media_info,
+    probe_video_info,
+    classify_media_file,
+    ensure_photo_path,
 )
 
 from .download import (
@@ -125,6 +129,10 @@ __all__ = [
     "_find_thumbnail_file",
     "extract_video_frame_thumb",
     "probe_video_dimensions",
+    "probe_media_info",
+    "probe_video_info",
+    "classify_media_file",
+    "ensure_photo_path",
     # download
     "download_media",
     # supported_sites

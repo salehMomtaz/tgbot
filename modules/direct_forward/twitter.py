@@ -672,7 +672,7 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
     share's images natively before ever reaching here; if yt-dlp itself fails
     while the share carried a video variant, that mp4 is delivered natively so
     the message is never dropped."""
-    from utils.downloader import extract_formats, download_media, probe_video_dimensions
+    from utils.downloader import extract_formats, download_media
     from utils.uploader_handler import process_split_and_upload, _BOT_HARD, _PREMIUM_HARD
     from modules.downloader_handler import build_format_keyboard
 
@@ -746,21 +746,15 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     file_path = max(cands, key=lambda p: os.path.getsize(p))
                     logger.info(f"[DirectForward/X] resolved on-disk media {file_path!r} "
                                 f"(prepare_filename gave a missing path)")
-            width, height, _dur = probe_video_dimensions(file_path)
-            # Byte-sniff first: extensions + the 320×320 probe fallback both
-            # mislabel photo posts (PHOTO_EXT_INVALID incident, 2026-09-04).
-            from modules.direct_forward.common import sniff_image_extension, normalize_photo_file
-            if sniff_image_extension(file_path):
-                file_path = normalize_photo_file(file_path)
-                is_photo = True
-            else:
-                # The 320×320 fallback is only meaningful when the file is a
-                # real video whose probe failed — never for a missing/unknown
-                # file (probe returns 320×320 on ANY error, which used to
-                # misroute a non-existent ".NA" path into send_photo).
-                is_photo = os.path.exists(file_path) and (
-                    (width == 320 and height == 320) or file_path.lower().endswith(
-                        (".jpg", ".jpeg", ".png", ".webp")))
+            # Classify by CONTENT (ffprobe stream kinds + image magic) instead
+            # of the 320×320 probe sentinel, which is returned both for a real
+            # 320×320 video and for a file with no video stream — that ambiguity
+            # is what put an mp3 into send_photo ([400 PHOTO_EXT_INVALID],
+            # 2026-10-11). Photo posts on X are delivered natively elsewhere;
+            # this branch only sees what yt-dlp produced.
+            from utils.downloader import classify_media_file, ensure_photo_path
+
+            kind = classify_media_file(file_path)
             if not os.path.exists(file_path):
                 logger.warning(f"[DirectForward/X] tweet {url}: downloaded media missing "
                                f"({file_path!r}) — falling back")
@@ -771,18 +765,30 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     chat_id=chat_id,
                     text=f"{caption}\n\n⚠️ *Download failed* — the media could not be located on disk.")
                 return
-            if is_photo:
-                await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
+            if kind == "image":
+                photo_path = ensure_photo_path(file_path)
+                if photo_path:
+                    await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
+                else:
+                    await bot_client.send_document(chat_id=chat_id, document=file_path, caption=caption)
+            elif kind == "audio":
+                await bot_client.send_audio(
+                    chat_id=chat_id, audio=file_path, caption=caption,
+                    title=(result.get("title") or "Media")[:64],
+                    performer=(result.get("uploader") or "")[:64] or None,
+                    thumb=result.get("thumb_path"),
+                    duration=int(result.get("duration") or 0) or None,
+                )
             else:
                 await process_split_and_upload(
                     bot_client=bot_client,
                     premium_client=premium_client,
                     chat_id=chat_id,
                     file_path=file_path,
-                    action="v",
+                    action="v" if kind == "video" else "d",
                     title=result.get("title", "Media"),
                     uploader=result.get("uploader", "Unknown"),
-                    duration=result.get("duration", 0),
+                    duration=result.get("duration", 0) if kind == "video" else 0,
                     thumb_path=result.get("thumb_path"),
                     progress_msg=None,
                     delete_progress_after=True,

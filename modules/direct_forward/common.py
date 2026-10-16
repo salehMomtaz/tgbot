@@ -26,11 +26,14 @@ TELEGRAM_TEXT_LIMIT = 4096
 
 # Magic-byte photo signatures (the same class of check as
 # thumbnails.py::_looks_like_image). Extensions lie: yt-dlp can hand us a
-# photo post whose file has NO .jpg/.png suffix, and
-# probe_video_dimensions()'s "no video stream" fallback (320, 320) then
-# misroutes it into send_photo with a bogus extension → Telegram rejects
-# with [400 PHOTO_EXT_INVALID] (seen 2026-09-04 13:39 on a TikTok photo
-# share). Sniffing the bytes is the only reliable answer.
+# photo post whose file has NO .jpg/.png suffix, and a 320×320 probe result is
+# ambiguous (probe_video_dimensions returns it both for a real 320×320 video
+# and for a file with no video stream at all) → Telegram rejects with
+# [400 PHOTO_EXT_INVALID] (seen 2026-09-04 on a TikTok photo share and again
+# 2026-10-11 when a photo-mode post's soundtrack mp3 was sent as a photo).
+# The relay now classifies by CONTENT via
+# utils.downloader.classify_media_file; these helpers remain for the callers
+# that only need an image-type answer.
 _PHOTO_MAGIC = (
     (b"\xff\xd8\xff", ".jpg"),          # JPEG
     (b"\x89PNG\r\n\x1a\n", ".png"),    # PNG
@@ -181,7 +184,7 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
     When yt-dlp hard-fails and a *preview_url* (from the DM's share payload)
     exists, the preview image is delivered as a fallback so the user still
     sees what the share was, with a note that the full media failed."""
-    from utils.downloader import download_media, probe_video_dimensions
+    from utils.downloader import download_media
     from utils.uploader_handler import process_split_and_upload
     import hashlib
 
@@ -208,22 +211,35 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
             return
 
         file_path = result["file_path"]
-        width, height, _dur = probe_video_dimensions(file_path)
-        # Photo routing: byte-sniff FIRST (extensions and the 320×320 probe
-        # fallback both lie — the PHOTO_EXT_INVALID incident), then fall back
-        # to the extension/probe heuristics for non-image files that
-        # instagrapi/yt-dlp delivered without a usable suffix.
-        sniffed_photo = sniff_image_extension(file_path)
-        if sniffed_photo:
-            file_path = normalize_photo_file(file_path)
-            is_photo = True
-        else:
-            is_photo = (width == 320 and height == 320) or file_path.lower().endswith(
-                (".jpg", ".jpeg", ".png", ".webp"))
+        # Classify by CONTENT (ffprobe stream kinds + image magic), never by a
+        # 320×320 probe result: probe_video_dimensions returns that sentinel
+        # both for a real 320×320 video AND for a file with no video stream, so
+        # a TikTok photo-mode post — whose yt-dlp "best" format is the post's
+        # soundtrack mp3 — was routed into send_photo and Telegram rejected it
+        # with [400 PHOTO_EXT_INVALID] (2026-10-11 13:31, msg 7689851507444845832).
+        from utils.downloader import classify_media_file, ensure_photo_path
 
-        if is_photo:
-            await bot_client.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
-        else:
+        kind = classify_media_file(file_path)
+
+        if kind == "image":
+            photo_path = ensure_photo_path(file_path)
+            if photo_path:
+                await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
+            else:
+                # Unconvertible image (exotic codec): deliver as a document
+                # rather than guessing an extension Telegram will reject.
+                await bot_client.send_document(chat_id=chat_id, document=file_path, caption=caption)
+        elif kind == "audio":
+            await bot_client.send_audio(
+                chat_id=chat_id,
+                audio=file_path,
+                caption=caption,
+                title=(result.get("title") or "Media")[:64],
+                performer=(result.get("uploader") or "")[:64] or None,
+                thumb=result.get("thumb_path"),
+                duration=int(result.get("duration") or 0) or None,
+            )
+        elif kind == "video":
             await process_split_and_upload(
                 bot_client=bot_client,
                 premium_client=premium_client,
@@ -239,8 +255,26 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 caption=caption,
                 premium_allowed=True,
             )
+        else:
+            # Unknown container: send it as a file. Guessing (send_photo) is
+            # what produced the dropped relay.
+            await process_split_and_upload(
+                bot_client=bot_client,
+                premium_client=premium_client,
+                chat_id=chat_id,
+                file_path=file_path,
+                action="d",
+                title=result.get("title", "Media"),
+                uploader=result.get("uploader", "Unknown"),
+                duration=0,
+                thumb_path=None,
+                progress_msg=None,
+                delete_progress_after=True,
+                caption=caption,
+                premium_allowed=True,
+            )
         await _send_followups(bot_client, chat_id, followups)
-        logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id}")
+        logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} ({kind})")
     finally:
         task_dir = f"cache/{cache_id}"
         if os.path.exists(task_dir):
