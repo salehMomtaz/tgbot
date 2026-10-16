@@ -650,3 +650,33 @@ component is safe for any script. The same cap lives in
 `utils/security.py::safe_task_filename` for the direct-file path. Full writeup:
 [`docs/memory/tgbot-2026-10-10-filename-length-audit.md`](memory/tgbot-2026-10-10-filename-length-audit.md);
 invariant recorded in `AGENTS.md` (Gotchas).
+
+## Shared filename sanitizer (2026-10-16)
+
+The cap above is now one function: `utils/filenames.py::sanitize_filename`. It
+takes a **byte** budget (`MAX_COMPONENT_BYTES = 200`, `MAX_TITLE_BYTES = 150`
+for yt-dlp titles), NFKC-normalises, drops control/bidi-override/Windows-illegal
+characters (keeping ZWJ/ZWNJ so emoji sequences and Persian/Arabic text survive),
+collapses whitespace/separator runs, avoids Windows device names and trailing
+dots/spaces, truncates on a character boundary and appends a stable blake2b
+digest so truncated names stay unique. `ascii_only=True` reproduces the legacy
+strict-ASCII behaviour. Every path that derives an on-disk name from remote or
+user text routes through it (direct file, github cache names, Bale filenames and
+custom filename, web→Markdown, YouTube transcript, friend-media archive zip).
+Tests: `tests/test_filenames.py`. Full writeup:
+[`docs/memory/tgbot-2026-10-16-filename-sanitizer-and-media-classification.md`](memory/tgbot-2026-10-16-filename-sanitizer-and-media-classification.md).
+
+## Media classification: never send a non-image as a photo (2026-10-16)
+
+Do **not** infer "this is a photo" from `probe_video_dimensions() == (320, 320)`:
+that sentinel is also returned for any file with **no video stream**, and a
+TikTok photo-mode post exposes the post's *soundtrack mp3* as yt-dlp's "best"
+format — which put an mp3 into `send_photo` and made Telegram answer
+`[400 PHOTO_EXT_INVALID]`, dropping the relay (2026-10-11 13:31). Use
+`utils/downloader/classify_media_file()` (ffprobe stream kinds + image magic;
+`attached_pic` cover art excluded, so an M4A with embedded art is `audio`) and
+route image→`send_photo` via `ensure_photo_path()` (renames to the real magic,
+transposes WebP/GIF/BMP to JPEG because Telegram rejects those extensions),
+audio→`send_audio`, video→the splitter, anything else→`send_document`. Tests:
+`tests/test_downloader_media.py`.
+

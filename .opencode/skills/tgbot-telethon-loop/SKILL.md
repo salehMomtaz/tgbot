@@ -156,6 +156,17 @@ Classify what you find:
 - A real `Traceback` → **the phase error**; open the file:line and read the
   code path.
 - `MESSAGE_NOT_MODIFIED` → benign re-tap, already handled silently.
+- `[400 PHOTO_EXT_INVALID]` from `send_photo` in a relay → **a real bug**: a
+  non-image was routed into `send_photo`. Fixed 2026-10-16 by
+  `utils/downloader/classify_media_file` (image→photo / audio→`send_audio` /
+  video→splitter / other→document) + `ensure_photo_path` (WebP/GIF/BMP → JPEG).
+  If it recurs, the routing regressed to the `probe_video_dimensions`
+  `(320, 320, …)` sentinel, which is returned for files with **no video stream**
+  (a TikTok photo-mode post's soundtrack mp3 is yt-dlp's "best" format).
+- `OSError [Errno 36] File name too long` → an on-disk name escaped the shared
+  byte budget; every untrusted name must go through
+  `utils/filenames.sanitize_filename` (see the "On-disk filenames are
+  byte-bounded" gotcha in AGENTS.md).
 - `[DirectForward/IG] login failed (session rejected) … waiting for fresh
   igcookies.txt upload` → **expected, by design** (2026-10-08): the IG worker no
   longer auto-relogins on a dead session; it parks until the operator uploads a

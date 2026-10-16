@@ -786,3 +786,31 @@ inclusive) still never arrived. Full write-up:
   relay (`_tt_persist_seen`). `_twitter_worker` refreshes the heartbeat per line.
 - **Recovery tool:** `tools/recover_x_gap.py` (rewind a conv cursor + optionally
   drop already-delivered inbox lines). 79 messages replayed live.
+
+## 2026-10-16 — relay routed a soundtrack mp3 into `send_photo`
+
+- **Symptom:** `[DirectForward/TT] relay of msg 7695402480045508148 failed:
+  Telegram says: [400 PHOTO_EXT_INVALID]` (2026-10-11 13:31) — the message was
+  dropped. The same class had been blamed on "photo extension" before
+  (2026-09-04).
+- **Cause:** the share was a TikTok **photo-mode** post. `extract_formats`
+  returns `videos: []` for those, and yt-dlp's "best" format for the post is its
+  **soundtrack** (an mp3, `ID3` magic). `_download_and_deliver` decided
+  `is_photo = (width == 320 and height == 320) or <photo ext>` and
+  `probe_video_dimensions` returns that same `(320, 320, …)` sentinel for **any**
+  file with no video stream — so the mp3 was sent with `send_photo`. The
+  identical heuristic lived in `twitter._x_deliver_tweet`.
+- **Fix:** route on content. `utils/downloader/classify_media_file` (ffprobe
+  stream kinds + image magic; `attached_pic` excluded so an M4A with cover art
+  is `audio`) drives image → `send_photo` via `ensure_photo_path` (real-magic
+  rename; WebP/GIF/BMP transposed to JPEG), audio → `send_audio`, video → the
+  splitter, other → `send_document`. `probe_video_dimensions` keeps its legacy
+  tuple API but is documented as *not* a classification signal.
+- **Verified:** the exact URL now routes to `send_audio` (was `send_photo`);
+  a stubbed-Telegram run of `_download_and_deliver` delivered it with no
+  `send_photo` call. Tests: `tests/test_downloader_media.py`. Full writeup:
+  [`tgbot-2026-10-16-filename-sanitizer-and-media-classification.md`](tgbot-2026-10-16-filename-sanitizer-and-media-classification.md).
+- **Known limitation:** a photo-mode post's *images* are exposed by yt-dlp only as
+  the thumbnail, so the relay delivers the soundtrack (+ cover thumb). A native
+  TikTok photo-post path is a separate feature.
+

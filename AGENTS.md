@@ -75,7 +75,8 @@ invariants** so you don't have to rediscover them.
 | yt-dlp error classification | `utils/downloader/errors.py` |
 | Format extraction & sorting | `utils/downloader/formats.py` |
 | Playlist metadata & tier selectors | `utils/downloader/playlists.py` |
-| Thumbnails, ffmpeg metadata, video probing | `utils/downloader/thumbnails.py` |
+| Thumbnails, ffmpeg metadata, video probing, **media classification** | `utils/downloader/thumbnails.py` (`classify_media_file`, `probe_media_info`, `ensure_photo_path`) |
+| Filename sanitization for ANY untrusted name (title, URL basename, user string) | `utils/filenames.py` (+ `tests/test_filenames.py`) |
 | Single-media download pipeline | `utils/downloader/download.py` |
 | Binary & video splitting generators | `utils/downloader/split.py` |
 | yt-dlp extractor pattern compilation & URL matching | `utils/downloader/supported_sites.py` |
@@ -806,11 +807,15 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
 
 ## Running / testing
 
-There's no Python test suite. Verify changes with:
+There's no pytest dependency, but there ARE two standalone Python test suites
+(`tests/`), runnable directly and pytest-compatible. Verify changes with:
 
 ```bash
 # Python syntax for every module
 python3 -m py_compile $(git ls-files '*.py')
+
+# Python regression tests (plain scripts; no pytest needed)
+for f in tests/test_*.py; do venv/bin/python "$f"; done
 
 # Bash syntax for the scripts
 bash -n install.sh run.sh uninstall.sh
@@ -949,17 +954,30 @@ Don't port it to Go.
 
 - **On-disk filenames are byte-bounded — yt-dlp sanitizes characters but NOT
   length.** `download_media` builds its yt-dlp output template as
-  `cache/<id>/%(title).150B.%(ext)s`. The `.150B` conversion is *byte*-based
-  (encode → `%.150s` → decode ignoring a partial trailing code point), so a title
-  that is a wall of emoji (4 UTF-8 bytes each) still yields a component well under
-  Linux's 255-byte `NAME_MAX` — without it, yt-dlp dies writing
-  `<title>.<ext>`/`<title>.jpg` with `OSError [Errno 36] File name too long` and
-  the direct-forward 3-strike cap *drops* the message. Do not revert `outtmpl` to
-  plain `%(title)s`. `utils/security.py::safe_task_filename` carries the same
-  byte/char cap (`_MAX_FILENAME_CHARS = 150`, ASCII-only after sanitization) for
-  the direct-file path (`download_direct_file`) and the interactive display
-  names. Any new code that derives an on-disk name from a remote/user string must
-  bound its length too.
+  `cache/<id>/%(title).150B.%(ext)s` (`MAX_TITLE_BYTES` in `utils/filenames.py`).
+  The `.150B` conversion is *byte*-based (encode → `%.150s` → decode ignoring a
+  partial trailing code point), so a title that is a wall of emoji (4 UTF-8 bytes
+  each) still yields a component well under Linux's 255-byte `NAME_MAX` — without
+  it, yt-dlp dies writing `<title>.<ext>`/`<title>.jpg` with `OSError [Errno 36]
+  File name too long` and the direct-forward 3-strike cap *drops* the message.
+  Do not revert `outtmpl` to plain `%(title)s`, and do **not** reach for yt-dlp's
+  `trim_file_name` — it truncates the *whole path* (including the `cache/<id>/`
+  prefix) and would corrupt the directory.
+  **Every** on-disk name derived from remote/user text goes through
+  `utils/filenames.py::sanitize_filename` — the single shared definition of a
+  safe component (NFKC; control/bidi/Windows-illegal stripped; ZWJ/ZWNJ kept so
+  emoji + Persian survive; whitespace and separator runs collapsed; Windows
+  device names and trailing dots/spaces avoided; a **byte** budget with
+  character-boundary truncation plus a stable blake2b digest appended when
+  truncating; id-based fallback; `ascii_only=True` = the legacy strict ASCII
+  mode). Callers: `utils/security.safe_task_filename` (direct-file path +
+  interactive display names, 150 B), `modules/github/handlers.safe_cache_filename`
+  (`strip_dirs=False` flattens `/`, because branch names contain it),
+  `modules/bale/uploader.sanitize_filename_for_bale`, the web→Markdown path (both
+  Telegram and Bale), the YouTube transcript name, the Bale custom-filename path,
+  and the friend-media archive zip name. Any new code that derives an on-disk
+  name from a remote/user string MUST route through it too. Tests:
+  `tests/test_filenames.py`.
 - **Entrypoint scripts must stay executable — systemd calls `run.sh` directly.**
   `deploy/tgbot.service` has `ExecStart=__PROJECT_DIR__/run.sh`, so `run.sh`
   (plus `install.sh`/`uninstall.sh`, invoked as `./…`) MUST keep the exec bit.
@@ -1087,13 +1105,27 @@ Don't port it to Go.
   installed from `install_transport`) drops exactly those records so the log
   channel carries OUR single actionable line instead of 158 tracebacks.
   Do NOT remove the breaker or "simplify" it back to per-friend retries.
-  **Direct-forward photo routing is magic-bytes, not extensions**
-  (`sniff_image_extension` / `normalize_photo_file` in
-  modules/direct_forward/common.py, used by `_download_and_deliver` and
-  `_x_deliver_tweet`): yt-dlp photo posts can carry no/bogus extensions, and
-  the old 320×320+extension heuristic misrouted them into `send_photo` →
-  `[400 PHOTO_EXT_INVALID]` (TikTok photo share, 2026-09-04 13:39). Sniff
-  first; rename the file to the sniffed extension before send_photo.
+  **Direct-forward media routing classifies by CONTENT, never by a 320×320
+  probe result** (`utils/downloader/classify_media_file`, used by
+  `common._download_and_deliver` and `twitter._x_deliver_tweet`): image →
+  `send_photo` (via `ensure_photo_path`, which renames to the real magic or
+  transposes WebP/GIF/BMP to JPEG because Telegram rejects those extensions with
+  `[400 PHOTO_EXT_INVALID]`), audio → `send_audio`, video → the splitter,
+  anything else → `send_document`. `probe_video_dimensions` returns the
+  `(320, 320, …)` sentinel BOTH for a real 320×320 video and for a file with no
+  video stream at all, so it must never be used for this decision — a TikTok
+  **photo-mode** post exposes the post's *soundtrack mp3* as yt-dlp's "best"
+  format, and the old `width == 320 and height == 320 → it's a photo` heuristic
+  sent that mp3 to `send_photo`, dropping the relay with
+  `[400 PHOTO_EXT_INVALID]` (2026-10-11 13:31, msg 7689851507444845832; the same
+  class as the 2026-09-04 TikTok photo-share incident). Use
+  `classify_media_file`/`probe_video_info` (never `probe_video_dimensions`) to
+  answer "what is this file?". Note `probe_media_info` excludes `attached_pic`
+  cover-art streams so an M4A with embedded art is `audio`, not `video`. Tests:
+  `tests/test_downloader_media.py`.
+  `sniff_image_extension` / `normalize_photo_file` in
+  modules/direct_forward/common.py remain as the image-only helpers for callers
+  that just need an image-type answer.
   **IG archiver pacing (2026-09-05, operator requirement — do not tighten):**
   the archiver is explicitly NOT time-sensitive. While `archive_instagram_full`
   runs it opens a pacing window (`pace_window_enter`, refcounted, closed in a
