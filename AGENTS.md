@@ -80,6 +80,7 @@ invariants** so you don't have to rediscover them.
 | Single-media download pipeline | `utils/downloader/download.py` |
 | Binary & video splitting generators | `utils/downloader/split.py` |
 | yt-dlp extractor pattern compilation & URL matching | `utils/downloader/supported_sites.py` |
+| Instagram photo posts / carousels (image half of yt-dlp's IG extractor) | `utils/downloader/instagram_post.py` |
 
 ### `modules/admin/` package (replaces `modules/admin.py`)
 
@@ -803,6 +804,40 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `modules/subscription/handlers.py::_raw_precheckout`). Deploy a new
     `on_raw_update` in a shared group with this in mind — prefer an isolated
     group or a raise-on-mismatch.
+
+21. **Instagram `/p|tv/` posts are read with a NAME-SHADOWING yt-dlp subclass —
+    never with your own GraphQL client.** yt-dlp models Instagram media as video
+    only: `InstagramIE._extract_product_media` reads `video_versions` and drops
+    `image_versions2`, so a **photo post** raises `raise_no_formats('There is no
+    video in this post')` and a carousel containing *any* photo fails the whole
+    playlist while yt-dlp processes it (`[Instagram] <entry-id>: No video formats
+    found!`). `extract_formats` surfaced both as "The site changed its layout or
+    the URL is malformed." — Instagram photo posts were unreachable through the
+    bot until 2026-10-18. The fix (`utils/downloader/instagram_post.py`) declares
+    a subclass literally named `InstagramIE` so `ie_key()` stays `"Instagram"`
+    and `YoutubeDL.add_info_extractor` **replaces** the built-in extractor
+    (declaring it under any other name appends a second extractor that never
+    matches — the first version of this fix did exactly that and silently never
+    ran); it only (a) makes `raise_no_formats` a no-op and (b) records the
+    `image_versions2` candidates as `ig_photos`, largest first (`candidates[0]`
+    is the original — Instagram's list is ordered big→small, which is why
+    `thumbnails` is reversed upstream). Everything else — logged-out GraphQL
+    fetch, LSD/CSRF handling, embed fallback, curl_cffi impersonation, cookies —
+    stays upstream's code; **do not** hand-roll a GraphQL client (the `doc_id`
+    rotates and would break silently). `show_format_selection` probes every IG
+    `/p|tv/` URL first via `deliver_instagram_post` (blocking work in the
+    executor, invariant #10) and only falls through to the format keyboard when
+    the post has **no** photo (video-only posts keep quality selection).
+    Delivered photos go through `download_post_photos` (rendition fallback when
+    the original is missing/oversized, magic-byte check, `ensure_photo_path` so
+    WebP/GIF/BMP never hit `[400 PHOTO_EXT_INVALID]`), land in one media group
+    per 10 items, quote-reply to the user's link (invariant #14), and any
+    carousel **video** goes through `download_media` + `process_split_and_upload`
+    so it keeps thumbnails, metadata and the 2 GB/4 GB ceilings. No auth is
+    needed for public posts, so this path is **unaffected by
+    `IG_AUTH_ENABLED=false`**; a login-walled/deleted post fails with the
+    Instagram-specific "did not return this post to an anonymous request" message
+    (`utils/downloader/errors.py`) instead of the misleading layout error.
 
 
 ## Running / testing

@@ -167,6 +167,22 @@ Classify what you find:
   byte budget; every untrusted name must go through
   `utils/filenames.sanitize_filename` (see the "On-disk filenames are
   byte-bounded" gotcha in AGENTS.md).
+- Instagram `/p/` (or `/tv/`) **link sent to the bot** failing with
+  `Extraction Error … The site changed its layout or the URL is malformed` →
+  **fixed 2026-10-18**: yt-dlp's Instagram extractor is video-only, so photo
+  posts / carousels have no formats. `utils/downloader/instagram_post.py`
+  declares a **name-shadowing `InstagramIE` subclass** (only that class name
+  makes `ie_key()` == "Instagram" and REPLACES yt-dlp's extractor — under any
+  other name it is appended and never runs) that adds `ig_photos` and defuses
+  `raise_no_formats`; `show_format_selection` delivers those posts natively
+  (photos → quote-replied media group, carousel videos → splitter/upload).
+  If it recurs, check the shadowing name first, then
+  `ydl._ies['Instagram'].__module__` in a REPL.
+- `Instagram did not return this post to an anonymous request …` → the post is
+  deleted/login-walled or Instagram is anonymously rate-limiting this server
+  (2026-10-18 classification). Not a layout bug: a fresh logged-in
+  `cookies/instagram/igcookies.txt` (Admin → 🍪) is the only fix. `/reel/` links
+  are unaffected (they have videos) and need no session.
 - `[DirectForward/IG] login failed (session rejected) … waiting for fresh
   igcookies.txt upload` → **expected, by design** (2026-10-08): the IG worker no
   longer auto-relogins on a dead session; it parks until the operator uploads a
@@ -214,6 +230,11 @@ Drive every feature (table of `--url` + press chain):
 2. YouTube audio: `--pick a`
 3. YouTube playlist: `--press 'pl:*:whole' --press 'pl:*:vl'`
 4. TikTok / Instagram / X: `--pick v --size-max-mb 50`
+   - Instagram has **two** shapes now: a `/reel/` link shows the format keyboard
+     (`--pick` works), while a `/p/…` photo post/carousel is delivered
+     immediately with **no buttons** — the driver's `RESULT` should show N photo
+     messages (media group) and, for a mixed carousel, one extra video. Verify in
+     the log with `grep "Instagram post delivered" logs/bot.log`.
 5. SoundCloud: `--pick a`
 6. Dailymotion (or other yt-dlp site): `--pick v --size-max-mb 50`
 7. Direct file: `--url <direct.mp4> --timeout 120`

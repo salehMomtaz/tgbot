@@ -680,3 +680,83 @@ transposes WebP/GIF/BMP to JPEG because Telegram rejects those extensions),
 audio→`send_audio`, video→the splitter, anything else→`send_document`. Tests:
 `tests/test_downloader_media.py`.
 
+
+## Instagram photo posts & carousels: the missing image half (2026-10-18)
+
+yt-dlp's Instagram extractor is **video-only by construction**:
+`InstagramIE._extract_product_media` reads `video_versions` and ignores
+`image_versions2`. Consequences seen in the logs for weeks:
+
+- a **photo post** ends in `raise_no_formats('There is no video in this post')`,
+- a **carousel that contains any photo** fails the *whole* playlist while yt-dlp
+  processes the entries (`[Instagram] <entry-id>: No video formats found!`),
+
+and `extract_formats` reported both as "The site changed its layout or the URL is
+malformed." — so Instagram photo posts were simply unreachable through the bot
+(operator report 2026-10-18). Reels were never affected (they have videos).
+
+### The fix — extend yt-dlp instead of forking it
+
+`utils/downloader/instagram_post.py` declares a subclass **literally named
+`InstagramIE`**. That name is load-bearing: `ie_key()` is the class name minus
+`IE`, and `YoutubeDL.add_info_extractor()` keys its registry by `ie_key()`, so
+the subclass **replaces** yt-dlp's built-in Instagram extractor. Under any other
+class name it would be appended as a second extractor that never matches (the
+first version of this fix did exactly that and silently never ran — verify with
+`ydl._ies['Instagram'].__module__`).
+
+The subclass changes exactly two things:
+
+1. `raise_no_formats(...)` is a no-op (a format-less post is a normal photo post),
+2. `_extract_product_media` records the `image_versions2` candidate URLs as
+   `ig_photos`, in the order Instagram sends them — **largest first**
+   (`candidates[0]` is the original; the later entries are `p1080x1080`,
+   `p720x720`, … `s150x150` re-encodes. This is why upstream *reverses* the same
+   list into `thumbnails`, so `thumbnails[0]` is the 150×150 crop — never use it
+   as the photo).
+
+Everything else (logged-out `PolarisLoggedOutDesktopWWWPostRootContentQuery`
+GraphQL call, LSD/CSRF token handling, the webpage/embedded-JSON fallback,
+curl_cffi impersonation, cookies) stays upstream's code, so upstream fixes keep
+reaching the bot. **Do not hand-roll a GraphQL client**: the `doc_id` in that
+query rotates and the code would break silently.
+
+### Flow (interactive link)
+
+`show_format_selection()` probes every `instagram.com/p|tv/` URL **before** the
+yt-dlp format flow:
+
+| post contains | what happens |
+|---|---|
+| ≥1 photo | `deliver_instagram_post()`: photos → one media group per 10 items (single photo → `send_photo`), quote-replying to the user's link; carousel **videos** → `download_media(permalink, format_selector='bestvideo+bestaudio/best')` + `process_split_and_upload` (thumbnails, metadata, 2 GB/4 GB ceilings); task dir removed afterwards |
+| no photo (video-only) | returns `False` → the normal yt-dlp format keyboard (quality choice preserved) |
+| unreadable (deleted, login-walled, anonymous rate-limit) | returns `False` → the yt-dlp flow errors with the Instagram-specific message below |
+
+Auth ladder mirrors `extract_formats`: **no-auth first**, cookie jar as fallback
+for login-walled posts (cookie bookkeeping still goes through
+`cookie_manager.acquire/commit`). Public posts need no session at all, so the
+path works while `IG_AUTH_ENABLED=false`.
+
+`download_post_photos()` is defensive by design: it prefers the original but
+falls back through the smaller renditions when the original 404s, returns an
+HTML interstitial, or is bigger than Telegram's 10 MB `sendPhoto` ceiling
+(`>9.5 MB`); it validates the payload by **magic bytes** (not the URL) and runs
+every survivor through `ensure_photo_path()` so WebP/GIF/BMP are transposed to
+JPEG instead of hitting `[400 PHOTO_EXT_INVALID]`. If only oversized renditions
+exist, the original is delivered as a document rather than dropped.
+
+### Error text
+
+`_classify_ytdl_error()` now recognises Instagram's anonymous refusal
+("Instagram sent an empty media response" / "Failed to parse JSON") and names the
+jar instead of blaming a layout change:
+
+> Instagram did not return this post to an anonymous request (it may be deleted
+> or login-walled, or Instagram is rate-limiting this server anonymously). A
+> logged-in session is needed: send a fresh `cookies/instagram/igcookies.txt` jar
+> via Admin Console → Cookies.
+
+Tests: `tests/test_instagram_post.py` (URL routing, extractor name shadowing,
+item building, rendition/oversize/magic-byte fallbacks, error text). Live
+verification 2026-10-18: a 5-photo post, a mixed 3-photo + 1-video carousel and
+a reel all delivered through `tools/telethon_drive.py`.

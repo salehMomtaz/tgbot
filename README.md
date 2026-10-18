@@ -54,8 +54,8 @@ required). Runs as a `systemd` service that survives reboots.
   Files pipe from Telegram to your browser on the fly via a FastAPI bridge.
 - **🩺 Site-aware errors.** Opaque yt-dlp exceptions become clear messages:
   sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
-- **💳 Subscriptions (Stars/TON/Gram).** Toggleable 3-tier plans (Basic 100/d 100⭐, Plus 500/d 250⭐, Pro 2500/d 500⭐) + free tier (5/d, or join channels). Telegram Stars invoices + TON inbound via memo (`/api/user/status`), daily quota, **multi-channel force-join with a "✅ I joined — verify" live re-check button in the greeting**, priority queue (free last), and a WebApp at `https://tgbot.southpark.ir:8080` (direct TLS, wildcard `*.southpark.ir`): landing `/` auto-redirects (Telegram→role), user portal `/app`, full admin console `/admin` (creator; legacy `/admin/subscription` still works) — fullscreen, `safeAreaInset` aware, native `showPopup` + fallback modal/toast.
-- **🛠 Full admin WebApp (Mini App).** The entire in-chat admin console as a Telegram Mini App at `/admin` (also the 🌐 WebApp Console button in the inline console, and the creator is auto-redirected from `/`). Every console feature is reachable: Users (add/remove/unban), Doc Mode, Cookie Jars (download/replace/test/backup/restore + per-site jars), Premium uploads + in-browser session generation, PO Token provider (start/stop/diagnose/test), Subscriptions (toggle, free tier, force-join channels, grant/revoke/list), Direct-Forward (IG/X/TikTok toggles, IG pairing, X Chat PIN) and System (abort queue, restart). Auth = Telegram initData (creator) or `X-Admin-Token` (HMAC of BOT_TOKEN); every `/admin/api/*` endpoint is creator-gated (403 otherwise).
+- **💳 Subscriptions (Stars/TON/Gram).** Toggleable 3-tier plans (Basic 100/d 100⭐, Plus 500/d 250⭐, Pro 2500/d 500⭐) + free tier (5/d, or join channels). Telegram Stars invoices + TON inbound via memo, daily quota, **multi-channel force-join with a "✅ I joined — verify" live re-check button in the greeting**, priority queue (free last). Managed entirely from the in-chat Admin Console (`/subscription` for users).
+- **🌐 No Mini App / WebApp (removed 2026-08-26).** The Telegram Mini App admin console and the subscription WebApp are gone — every feature lives in the in-chat inline console. The FastAPI/uvicorn server still runs, but only for the `/stream/{token}/{file_name}` zero-disk streaming endpoint.
 - **🐙 GitHub explorer + 🔍 YouTube search + 🈯 Translate + 🌐 Web→Markdown (Telegram + Bale).** Paste any `github.com/owner/repo` → repo panel (ZIP via 20 MB splits on Bale, 2 GB/4 GB on Telegram; branches/tags/releases, issues/PRs, commits, languages, README, file explorer with folder ZIP); `/search <q>`, `/user <u>`, `/trend`; `/yt <q> [n]`, `/ytrecent @chan [n]`, `/ytch @chan <q>`, `/transcript <yt_url>`; `/tr src:dst text`; `/web <url>` (Markdown). All queue through the single worker; Bale uses sanitized 20 MB splits. See `docs/USER_GUIDE.md` for usage table.
 - **🇮🇷 Bale.ai frontend (optional, hardened, same log level).** One `tgbot.service` hosts both `pyrogram` (Telegram) and `aiogram 3.30` (`tapi.bale.ai`). Bale is government-owned, so: **no Bale log channel by default** (Telegram logs stay on Telegram), optional separate `bale_log` **Telegram** private channel (`BALE_LOG_CHANNEL_ID`, same `INFO` level — Bale logs never touch `tapi.bale.ai`); **LIMITED admin** on Bale (users, blacklist, doc mode, size limits `19/20 MB`, abort -- no cookies/premium/POT/direct-forward); **20 MB real hard limit** (docs lie 50, split `19/20`); `getUpdates` drain (Bale `deleteWebhook` is NOOP). When `BALE_TOKEN` empty, zero Bale code runs.
 - **🕸️ Headless cookie refresher (1 tab at a time, 24h).** DM-only jars (IG/X/TT/YT) never get `yt-dlp` write-back, so they go stale. `utils/cookie_refresher.py` visits each site **sequentially** with `Playwright` (one `chromium-1234` `~300 MB` peak, not 4 tabs -> your `4GB+8swap` stays safe) every `24h ±1h`, `add_cookies -> goto -> networkidle -> context.cookies() -> Netscape write` (atomic, `0o444`, `touch meta`, clears `direct_ig_session.json` for IG). Proxy-aware. First run `5-10 min` after boot.
@@ -128,7 +128,7 @@ inline-button console:
 | 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. Add jars for any other site (per-site). |
 | 🔐 PO Token | Start / stop / restart / diagnose the PO-token provider; live status badge. |
 | 📨 Direct-Forward | Pair / unpair the bot's Instagram account for the DM relay. |
-| 💳 Subscriptions | Toggle mode, free tier + multi-channel add/remove, Stars/TON tiers, grant/revoke, WebApp at `https://tgbot.southpark.ir:8080` (`/` landing auto-redirect, `/app` user, `/admin` full console, `/admin/subscription` legacy, fullscreen `safeAreaInset`). Queue priority 0→3. **Telegram only, no Bale free tier.** |
+| 💳 Subscriptions | Toggle mode, free tier + multi-channel add/remove, Stars/TON tiers, grant/revoke (in-chat only — no WebApp/Mini App since 2026-08-26). Queue priority 0→3. **Telegram only, no Bale free tier.** |
 | 🌐 WebApp Console | Full admin console as a Mini App (`/admin`, also the 🌐 button in this console): Users, Cookies, PO Token, Premium, Subscriptions, Direct-Forward, System. Creator auth via initData or `X-Admin-Token`. |
 | 💥 Abort Transfer | Cancel everything in the queue and purge the cache. |
 | 🇮🇷 Bale LIMITED | Same `tgbot.service` but **LIMITED**: `List/Add/Remove`, `Blacklist`, `Doc Mode`, `Size Limits 19/20`, `Abort`, `Close` -- **no** 🍪/👑/🔐/📨/💳. Create private `bale_log` channel, add `angelbalzac` admin, set `BALE_LOG_CHANNEL_ID` for same `INFO` level as Telegram (otherwise Bale logs stay local only). |
@@ -260,7 +260,8 @@ share almost nothing.
 |---|---|---|
 | `youtube.com` / `youtu.be` | yt-dlp → YouTube | yt-dlp · cookies **+ PO token** (only strategy) · format keyboard |
 | `youtube.com/playlist?list=…` (or `watch?v=…&list=…`) | yt-dlp → **YouTube playlist** | flat-extract list → **tier keyboard** (3 video + 3 audio: low/med/high) → download & upload each video |
-| `instagram.com` | yt-dlp → Instagram | yt-dlp · `igcookies.txt` → no-auth fallback · format keyboard |
+| `instagram.com` **`/p/…` or `/tv/…` post** | yt-dlp → Instagram (extended) | **read natively first** (yt-dlp's extractor can't see Instagram *images*): post contains a photo → photos as a quote-replied media group + any carousel video through the splitter/uploader; video-only post → falls through to the yt-dlp format keyboard |
+| `instagram.com` (reel / story / any other path) | yt-dlp → Instagram | yt-dlp · no-auth first → `igcookies.txt` fallback · format keyboard |
 | `tiktok.com` | yt-dlp → TikTok | yt-dlp · `ttcookies.txt` → no-auth fallback · URL rewritten to `/embed/<id>` (yt-dlp#17403 hedge) · format keyboard |
 | `twitter.com` / `x.com` | yt-dlp → X | yt-dlp · `xcookies.txt` → no-auth fallback · format keyboard |
 | `nicovideo.jp`, `pornhub.com`, `clips.twitch.tv`, `vimeo.com`, `soundcloud.com`, `bilibili.com`, `bandcamp.com`, `reddit.com`, … (all other yt-dlp sites) | yt-dlp → that site | yt-dlp · per-site jar `cookies/ytdlp/<site>.txt` (if you added one) or global fallback · format keyboard |
@@ -274,6 +275,14 @@ share almost nothing.
 > no bot-code change). You can also append ` | custom-name.ext` to any link to
 > rename the result. The admin **Cookie Jars** menu can add per-site jars for
 > any extra host.
+>
+> **Instagram photo posts** (`/p/<code>`, single image or carousel) never reach
+> the format keyboard: yt-dlp's Instagram extractor only knows `video_versions`,
+> so an image post has *no formats at all*. The bot reads those posts through an
+> extended copy of the extractor and delivers the media directly — a carousel
+> becomes a media group (≤10 per group), and any video *inside* the carousel
+> goes through the normal downloader/splitter. Video-only Instagram posts (and
+> every `/reel/` link) keep the yt-dlp quality keyboard.
 
 ```mermaid
 flowchart TD
@@ -282,7 +291,14 @@ flowchart TD
     L -- yes --> P["split on the '|' character<br/>url · optional custom name"]
     P --> SOC{"URL matches a yt-dlp extractor?<br/>(1,786 compiled _VALID_URL patterns,<br/>generic excluded)"}
 
-    SOC -- YES · yt-dlp site --> JAR["pick cookie jar by host<br/>(snapshot copy — live jar stays read-only)"]
+    SOC -- YES · yt-dlp site --> IGP{"Instagram /p/ or /tv/ post?"}
+    IGP -- no --> JAR["pick cookie jar by host<br/>(snapshot copy — live jar stays read-only)"]
+    IGP -- yes --> IGN["read the post with yt-dlp's extractor<br/>+ the extended image half"]
+    IGN --> IGQ{"post contains a photo?"}
+    IGQ -- "yes · photo post or carousel" --> IGD["photos → media group (quote-replied)<br/>carousel videos → yt-dlp + splitter + upload"]
+    IGD --> OK4([✅ whole post delivered])
+    IGQ -- "no · video only" --> JAR
+
     JAR --> YL{YouTube?}
     YL -- yes --> YS["cookies + PO token — the ONLY strategy<br/>provider must be running or it errors<br/>(no cookies-only / no-auth fallback)"]
     YL -- no --> OS["cookies first, then fall back to no-auth"]
