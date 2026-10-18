@@ -1,4 +1,4 @@
-# modules/youtube/scraper.py — ported from balebot
+# modules/youtube/scraper.py — YouTube search/scrape helpers
 import os
 import re
 import asyncio

@@ -1,4 +1,4 @@
-# modules/youtube/handlers.py — pyrogram port of balebot youtube module
+# modules/youtube/handlers.py — /yt, /ytrecent, /ytch, /transcript handlers
 import os
 import uuid
 import glob

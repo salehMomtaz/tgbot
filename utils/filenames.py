@@ -32,7 +32,7 @@ Two modes:
   and CJK titles survive intact.
 * ``ascii_only=True`` — strict/legacy: everything outside ``[A-Za-z0-9._-]``
   becomes ``_`` (spaces included). This is the historical
-  ``utils/security.safe_task_filename`` and Bale behaviour, kept byte-for-byte
+  ``utils/security.safe_task_filename`` behaviour, kept byte-for-byte
   compatible for the callers that want a bulletproof ASCII component.
 """
 

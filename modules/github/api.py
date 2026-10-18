@@ -1,4 +1,4 @@
-# modules/github/api.py — GitHub HTTP helpers (ported from balebot)
+# modules/github/api.py — GitHub HTTP helpers
 import aiohttp
 import config
 

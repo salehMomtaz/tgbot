@@ -1,4 +1,4 @@
-# modules/translate/api.py — ported from balebot
+# modules/translate/api.py — Google Translate helper
 import aiohttp
 import config
 

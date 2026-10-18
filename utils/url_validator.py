@@ -1,10 +1,9 @@
 # utils/url_validator.py
-"""Tiny, transport-neutral URL predicates shared by every frontend.
+"""Tiny, transport-neutral URL predicates used by the downloader flow.
 
-Kept deliberately free of pyrogram/aiogram imports so both the Telegram
-(pyrogram) and Bale (aiogram) frontends can use it without a cross-frontend
+Kept deliberately free of pyrogram imports so the predicate has no UI-layer
 dependency. Previously ``is_link`` was duplicated verbatim in
-``modules/downloader_handler.py`` and ``modules/bale/runner.py``.
+``modules/downloader_handler.py``.
 """
 
 

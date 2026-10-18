@@ -366,7 +366,7 @@ def ensure_photo_path(file_path: str) -> str | None:
 def probe_video_dimensions(file_path: str) -> tuple[int, int, int]:
     """Legacy tuple API: ``(width, height, duration)``.
 
-    Kept for the uploader/Bale callers that only ever pass real videos. It still
+    Kept for the uploader callers that only ever pass real videos. It still
     returns the historical ``(320, 320, …)`` sentinel when there is no video
     stream, so **do not** use it to decide whether a file is a photo — use
     :func:`classify_media_file` or :func:`probe_video_info` for that.

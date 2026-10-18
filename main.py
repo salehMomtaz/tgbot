@@ -101,7 +101,7 @@ if config.PREMIUM_STRING_SESSION:
 # =========================================================================
 
 def setup_system_logger():
-    """Binds channel handlers (Telegram + optional Bale) to Python's root logger at same INFO level."""
+    """Binds the channel handlers (local file + Telegram channel) to the root logger at INFO."""
     # Local file is always added (mirrors everything)
     try:
         from utils.logger import ensure_local_log_handler
@@ -118,7 +118,7 @@ def setup_system_logger():
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
 
-    # Telegram log channel (required) — gets Telegram/pyrogram/direct_forward logs, NOT Bale
+    # Telegram log channel (required)
     if config.LOG_CHANNEL_ID != 0:
         try:
             from utils.logger import TelegramChannelHandler
@@ -138,13 +138,6 @@ def setup_system_logger():
                     except Exception:
                         msg = ""
                     msg_l = (msg.lower() if isinstance(msg, str) else "")
-                    # Telegram channel must NOT get Bale logs (strict split per user request)
-                    if "bale" in name:
-                        return False
-                    if name.startswith("aiogram"):
-                        return False
-                    if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
-                        return False
                     # Throttle transfer-retry spam. When the route to
                     # api.telegram.org degrades, pyrogram emits up to 10
                     # "Retrying upload.SaveFilePart …" WARNINGs per file. The
@@ -159,58 +152,6 @@ def setup_system_logger():
                 logging.info("[Logger] Telegram logging linked to LOG_CHANNEL_ID")
         except Exception as e:
             print(f"Warning: Failed to initialize Telegram logger: {e}")
-
-    # Bale log channel: user clarified `bale_log` IS A TELEGRAM CHANNEL (private, angelbalzac admin),
-    # not a Bale channel. Reason: Bale is government-owned, so Bale-side logs containing
-    # sensitive info must NOT go to tapi.bale.ai (security hole). They go to a *separate*
-    # Telegram channel `bale_log` via api.telegram.org with BOT_TOKEN, at the same INFO level
-    # as the main LOG_CHANNEL_ID. Both use Telegram API, just different channel IDs.
-    # Direct forwards (Instagram/X/TikTok via pyrogram) are Telegram-only (balebot was aiogram,
-    # tgbot is pyrogram) — they must NOT appear in bale_log.
-    if getattr(config, "BALE_LOG_CHANNEL_ID", 0) != 0:
-        try:
-            from utils.logger import BaleChannelHandler
-            # Same idempotence rule as the Telegram channel handler above.
-            already_b = any(isinstance(h, BaleChannelHandler)
-                            for h in logging.getLogger().handlers)
-            if not already_b:
-                bale_formatter = logging.Formatter('%(message)s')
-                # Use BOT_TOKEN (Telegram) even though this is "Bale logs" — destination is Telegram channel bale_log
-                b_handler = BaleChannelHandler(config.BOT_TOKEN, config.BALE_LOG_CHANNEL_ID)
-                b_handler.setFormatter(bale_formatter)
-                b_handler.setLevel(logging.INFO)
-                # Standard architecture: split loggers — bale_log gets ONLY Bale-related records
-                # at same INFO level, not the pyrogram/direct_forward spam that belongs to Telegram.
-                def _bale_filter(record):
-                    name = (getattr(record, "name", "") or "").lower()
-                    try:
-                        msg = record.getMessage()
-                    except Exception:
-                        msg = ""
-                    msg_l = msg.lower() if isinstance(msg, str) else ""
-                    # Allow: modules.bale.*, aiogram, and explicit [Bale] tagged logs
-                    if "bale" in name:
-                        return True
-                    if name.startswith("aiogram"):
-                        return True
-                    if "[bale]" in msg_l or "bale_log" in msg_l or "bale logging linked" in msg_l:
-                        return True
-                    if "bale logging" in msg_l:
-                        return True
-                    # Shared logs (utils.*, pot_provider, downloader) are okay to be in both
-                    # per user: "if something is shared then it is okay to be send in both channels"
-                    if name.startswith("utils."):
-                        return True
-                    if "pot" in name or "cookie" in name:
-                        return True
-                    return False
-                b_handler.addFilter(_bale_filter)
-                logging.getLogger().addHandler(b_handler)
-            logging.info(f"[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID {config.BALE_LOG_CHANNEL_ID} (Telegram bale_log) — filtered to bale/aiogram only")
-        except Exception as e:
-            print(f"Warning: Failed to initialize Bale logger: {e}")
-    elif getattr(config, "BALE_TOKEN", ""):
-        logging.info("[Logger] Bale logging disabled (BALE_LOG_CHANNEL_ID=0) — Bale logs stay local only (bale_log is a Telegram channel, set BALE_LOG_CHANNEL_ID to enable)")
 
 async def log_event(text: str):
     """Log an event locally. The standalone root logger handles automatic Telegram routing."""
@@ -542,7 +483,7 @@ async def main_engine():
         register_join_handlers(app)
     except Exception as e:
         logging.warning(f"[Subscription] Could not register handlers: {e}")
-    # balebot-originated extras now on Telegram too (pure HTTP, no Bale dep)
+    # GitHub explorer / YouTube search / Translate / Web→Markdown extras (pure HTTP, no extra deps)
     try:
         from modules.github.handlers import register_github_handlers
         register_github_handlers(app, premium_app)
@@ -694,28 +635,6 @@ async def main_engine():
             tasks.append(fm_task)
     except Exception as e:
         logging.warning(f"[FriendMedia] Could not start: {e}")
-
-    # 9b. Optional Bale.ai frontend (tapi.bale.ai) — same process, shared queue / PO
-    # provider, but LIMITED admin (no cookies/premium/POT/direct) and NO Bale log
-    # channel (government-owned messenger, logs stay on Telegram only). Isolated
-    # task: Bale crash never kills Telegram poller.
-    if getattr(config, "BALE_TOKEN", ""):
-        try:
-            from modules.bale.runner import start_bale_bot
-            # Isolated wrapper so Bale exceptions don't propagate to asyncio.gather
-            async def _bale_wrapper():
-                try:
-                    await start_bale_bot()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logging.exception("[Bale] Poller died unexpectedly — will not auto-restart until next bot restart. Check BALE_TOKEN / network.")
-            tasks.append(_bale_wrapper())
-            logging.info("[Bale] Frontend enabled (bale admin limited, no log channel)")
-        except Exception as e:
-            logging.warning(f"[Bale] Could not start Bale frontend: {e}")
-    else:
-        logging.info("[Bale] BALE_TOKEN empty — Bale frontend disabled")
 
     # 9c. Headless cookie refresher (Playwright, sequential, 1 tab at a time).
     # DM-only jars (IG/X/TT/YT) never get yt-dlp write-back, so they go stale

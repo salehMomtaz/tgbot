@@ -34,8 +34,8 @@ from utils.rich_stream import RichStream
 logger = logging.getLogger(__name__)
 
 
-# Canonical is_link lives in utils.url_validator (transport-neutral, shared
-# with the Bale frontend). Imported by name here because
+# Canonical is_link lives in utils.url_validator (transport-neutral).
+# Imported by name here because
 # modules/admin/register.py does `from modules.downloader_handler import
 # is_link`.
 from utils.url_validator import is_link  # noqa: F401  (re-exported)

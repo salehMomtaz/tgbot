@@ -1,4 +1,4 @@
-# modules/github/keyboards.py — pyrogram keyboards (ported from balebot aiogram version)
+# modules/github/keyboards.py — inline keyboards for the GitHub explorer
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 

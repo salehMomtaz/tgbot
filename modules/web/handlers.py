@@ -1,4 +1,4 @@
-# modules/web/handlers.py — /web webpage → markdown (ported from balebot)
+# modules/web/handlers.py — /web webpage → markdown
 import os
 import uuid
 from pyrogram import Client, filters

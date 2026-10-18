@@ -1,4 +1,4 @@
-# modules/github/handlers.py — pyrogram port of balebot's github explorer
+# modules/github/handlers.py — github.com link → repo explorer panel
 import os
 import re
 import uuid

@@ -1,4 +1,4 @@
-# modules/web/api.py — ported from balebot
+# modules/web/api.py — webpage → markdown conversion helpers
 import urllib.parse
 import aiohttp
 import config

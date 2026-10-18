@@ -1,6 +1,6 @@
 # utils/logger/queued_channel.py
 """
-Shared base for the Telegram-channel log handlers (main log channel + bale_log).
+Shared base for the Telegram-channel log handler.
 
 WHY THIS EXISTS — the 2026-09-15 "can't start new thread" incident
 -----------------------------------------------------------------
