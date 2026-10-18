@@ -347,11 +347,10 @@ tgbot cookie corruption is solved. Two things were wrong and both are fixed
    empty bytes). This was the past "jar replace did not work / overwrote to
    empty" symptom: the failed document handler never wrote the jar at all.
 
-2. **Text-paste truncation** (the real remaining bug vs balebot) — Telegram
-   silently truncates text messages at **4096 chars**, but a YouTube Netscape jar
-   is ~17 KB. tgbot *allowed* pasting the jar as text; balebot blocks this and
-   requires a `.txt` document. Fixed: tgbot now rejects text-paste in the Replace
-   state and requires a document, validates ≥1 real cookie line (≥7 tab-separated
+2. **Text-paste truncation** — Telegram silently truncates text messages at
+   **4096 chars**, but a YouTube Netscape jar is ~17 KB, so a pasted jar arrives
+   silently broken. Fixed: tgbot rejects text-paste in the Replace
+   state and requires a `.txt` document, validates ≥1 real cookie line (≥7 tab-separated
    fields), writes atomically (temp + fsync + `os.replace`), auto-backs up to
    `<file>.autobak`, re-`chmod 444`s ytcookies, and purges snapshots.
 
@@ -374,10 +373,9 @@ container/LXC-style kernel restricts the audit netlink — `auditctl -w` looks
 accepted but `ausearch` returns 0 events on real changes). Don't rely on auditd
 there; use inotifywait. There may be a leftover auditd watch rule; it's harmless.
 
-Both bots coexist on the same test VPS: balebot's POT provider on
-`127.0.0.1:4416`, tgbot's on `127.0.0.1:4417`. See
-[VPS two-bots runtime state](vps-two-bots-runtime-state.md) and
-[tgbot ↔ balebot integration](tgbot-balebot-integration.md).
+Only tgbot runs on this box now (its PO provider is the sole listener on
+`127.0.0.1:4417`); the old two-bots test-VPS state is historical and recorded in
+`docs/memory/`.
 
 ---
 

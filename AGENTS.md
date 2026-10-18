@@ -1,17 +1,23 @@
 # AGENTS.md — notes for contributors & AI agents working on tgbot
 
-This is a pyrogram-based Telegram media downloader/streamer — **tgbot is the
-primary bot and the reference implementation**. The **Bale frontend**
-(`modules/bale/`, aiogram v3, Bale.ai) is NOT an experiment — it is the bot's
-**lifeline during internet shutdowns in Iran**: Bale runs over the National
-Information Network and stays reachable domestically when the global internet
-is cut (2025-26 protests blackout from 8 Jan 2026, renewed blackout from the
-28 Feb 2026 strikes, partial restore only 26 May; permanent "digital
-isolation" plans reported — see `docs/memory/BALEBOT.md` §"WHY this frontend
-exists"). It shares the same download core with tgbot (derived from tgbot's
-design), but tgbot is the source of truth. Design + invariants:
-`docs/memory/BALEBOT.md`. This file captures the **non-obvious
-invariants** so you don't have to rediscover them.
+This is a pyrogram-based Telegram media downloader/streamer — **Telegram only,
+one frontend, one log channel**. Handlers are registered on a pyrogram `Client`
+with ordered groups; there is no aiogram code anywhere in the tree.
+
+> **Bale.ai frontend REMOVED (2026-10-18).** `modules/bale/` (aiogram poller for
+> `tapi.bale.ai`), `utils/logger/bale.py` (`BaleChannelHandler` → a separate
+> `bale_log` Telegram channel), the `aiogram` dependency, every `BALE_*` setting,
+> the 20 MB splitter and the Limited-admin console were deleted at the operator's
+> request. The integration caused more operational problems than it solved — if a
+> Bale bot is ever wanted again it belongs in its own project. **Do not re-add it
+> without an explicit ask.** The original design, threat model and the
+> Iran-shutdown rationale are preserved as history in `docs/memory/BALEBOT.md`
+> (and the timeline entries in `blueprint.md` / `docs/memory/*`), plus the
+> removal note `docs/memory/tgbot-2026-10-18-bale-frontend-removal.md`.
+
+This file captures the **non-obvious invariants** so you don't have to
+rediscover them.
+
 
 ## Orientation
 
@@ -56,13 +62,13 @@ invariants** so you don't have to rediscover them.
 | Change playlist tiers / detection / per-video download | `utils/downloader/playlists.py` (`PLAYLIST_TIERS`), `utils/downloader/url_normalize.py` (`is_playlist_url`), `utils/downloader/playlists.py` (`extract_playlist_meta`), `utils/downloader/download.py` (`download_media(format_selector=...)`) |
 | Change cookie lifecycle (snapshot/merge/freshness) | `utils/cookie_manager.py` (+ call sites in `utils/downloader/cookies.py`, `utils/downloader/download.py`) |
 | Change streaming | `modules/stream_handler.py` / `stream_interceptor.py` |
-| Change logging / log channels / truncation | `utils/logger/` package (`local.py`, `telegram.py`, `bale.py`; re-exports from `utils/logger.py`) |
+| Change logging / log channels / truncation | `utils/logger/` package (`local.py`, `telegram.py`, `queued_channel.py`; re-exports from `utils/logger.py`) |
 | Change subscription / channel-join verification / greeting | `modules/subscription/join.py` (`_greeting_text`, `build_greeting_keyboard`, `register_join_handlers`) + `utils/subscription/access.py` |
 | Change install/provisioning | `install.sh` / `run.sh` / `deploy/tgbot.service` / `deploy/tgbot-monitor.service` / `deploy/tgbot-xchat-bridge.service` |
 | Change system monitoring / health reports | `cmd/tgbot-monitor/` (Go binary → `build/tgbot-monitor` via install.sh) + `utils/system_monitor.py` spawner |
 | Change DM relay (IG/X → Telegram) | `modules/direct_forward/` (see sub-modules below) + `.env` (`DIRECT_FORWARD_*`) + `xchat_bridge.mjs` / `tools/start_xchat_bridge.sh` (XChat E2EE sidecar) |
-| Change GitHub explorer / YouTube search / Translate / Web Markdown (balebot extras) | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers; see `docs/memory/BALEBOT.md`) |
-| Change Bale.ai frontend (government messenger, optional) | `modules/bale/` (`runner.py` aiogram poller `tapi.bale.ai` + `uploader.py` 20MB split + `admin.py` LIMITED console) + `config.py` (`BALE_TOKEN`, `BALE_SYSTEM_CREATOR_ID`, `BALE_HARD_LIMIT_MB`) — see `docs/memory/BALEBOT.md` |
+| Change GitHub explorer / YouTube search / Translate / Web Markdown | `modules/github/`, `modules/youtube/`, `modules/translate/`, `modules/web/` (all pyrogram `group=0/2` handlers) |
+| Change the Bale.ai frontend | REMOVED 2026-10-18 — do not re-add without an explicit ask (history: `docs/memory/BALEBOT.md`) |
 | Change Friend Media Archiver (profile pics/stories/IG archive of friends) | `modules/friend_media/` (`admin.py` console + state persistence, `telegram.py` photos/stories via premium account, `instagram.py` cached instagrapi client, `state.py`, `common.py`) + `.env` (`FRIEND_MEDIA_*`) — see `docs/INFRA.md` |
 
 ### `utils/downloader/` package (replaces `utils/downloader.py`)
@@ -939,8 +945,10 @@ monitor survive reboots unconditionally.
 The logger is a Python package `utils/logger/` (split out of the old `utils/logger.py`
 monolith; re-exports keep `from utils.logger import ...` working):
 `local.py` (`ensure_local_log_handler`), `telegram.py`
-(`TelegramChannelHandler` → `LOG_CHANNEL_ID`), `bale.py`
-(`BaleChannelHandler` → `BALE_LOG_CHANNEL_ID`). All channel handlers send **rich
+(`TelegramChannelHandler` → `LOG_CHANNEL_ID`), plus the shared `queued_channel.py`
+base. There is exactly ONE log channel since the 2026-10-18 Bale removal
+(`bale.py` and its `bale_log` channel are gone — history: `docs/memory/BALEBOT.md`).
+All channel handlers send **rich
 messages** (`sendRichMessage`, `rich_message: {"html": ...}`) with a `sendMessage`
 fallback (byte-compatible with the pre-rich format) and truncate at **32768**
 chars (Rich Bot API limit — NOT 3500/6000/8000; those premature cuts broke log
@@ -955,7 +963,7 @@ mirror is added regardless inside `ensure_local_log_handler`. New code should us
 **Channel handlers MUST stay bounded (`utils/logger/queued_channel.py`,
 2026-09-15).** Both handlers share a `QueuedChannelHandler` base: `emit()`
 formats and `put_nowait`s onto a bounded queue drained by a **fixed** pool of
-daemon workers (main 2, bale 1); a full queue **drops** records (counted,
+daemon workers (main 2); a full queue **drops** records (counted,
 occasional stderr notice). Never go back to
 `threading.Thread(…).start()` per record: during the 2026-09-15 Telegram
 throttling that spawned unbounded 5-10 s POST threads until the process hit
@@ -964,12 +972,12 @@ pyrogram's session restart — then raised `RuntimeError("can't start new thread
 and the bot's sessions crash-looped (38 errors in the channel). Dropping log
 lines under sustained failure is deliberate; the local file mirror is lossless.
 
-**Strict split (`d723798`):** the main `bale_log` Telegram channel gets ONLY
-Bale/aiogram logger lines, while the regular Telegram log channel gets
-pyrogram/direct-forward/queue lines — both at the same INFO level. Don't merge
-the streams. The split lives in `utils/logger/bale.py` (a `bale.`-prefixed child
-logger) and is what lets the Bale frontend be monitored without drowning the
-Telegram channel in duplicate Bale noise.
+**Strict split (`d723798`, now historical):** while the Bale frontend existed,
+the `bale_log` Telegram channel carried ONLY Bale/aiogram lines and the main
+channel carried pyrogram/direct-forward/queue lines (`utils/logger/bale.py`, a
+`bale.`-prefixed child logger). The 2026-10-18 removal deleted both the handler
+and the split; the main channel now carries everything, at the same single INFO
+level. Keep the bounded `QueuedChannelHandler` base regardless.
 
 ### Why the bot's logger is NOT written in Go (unlike the system monitor)
 
@@ -1008,8 +1016,7 @@ Don't port it to Go.
   mode). Callers: `utils/security.safe_task_filename` (direct-file path +
   interactive display names, 150 B), `modules/github/handlers.safe_cache_filename`
   (`strip_dirs=False` flattens `/`, because branch names contain it),
-  `modules/bale/uploader.sanitize_filename_for_bale`, the web→Markdown path (both
-  Telegram and Bale), the YouTube transcript name, the Bale custom-filename path,
+  the web→Markdown path, the YouTube transcript name,
   and the friend-media archive zip name. Any new code that derives an on-disk
   name from a remote/user string MUST route through it too. Tests:
   `tests/test_filenames.py`.
@@ -1081,8 +1088,9 @@ Don't port it to Go.
   reboot the bot entirely from chat.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
-  boundary is picked per-file in the uploader). Do not add Bale's `bale_hard_limit_mb`
-  etc.; they don't apply to Telegram.
+  boundary is picked per-file in the uploader). Do not add any per-frontend size
+  knob (the deleted Bale `bale_hard_limit_mb`/`bale_split_target_mb` had no
+  Telegram meaning); the ceiling is Telegram's alone.
 - **`from main import X` must never re-execute main.py.** Running as a script,
   main.py is `__main__`; a submodule importing `main` would execute a SECOND
   module copy whose pyrogram Clients were never started ("Client has not been
@@ -1092,10 +1100,12 @@ Don't port it to Go.
   `schedule_self_restart` is defined) — a partially-initialized duplicate
   module otherwise breaks `from main import schedule_self_restart` and the bot
   crash-loops on every start (seen: ~31 restarts during friend-media testing).
-- **aiogram's `start_polling` installs its own SIGTERM handler** and would
-  overwrite main.py's `_on_sigterm`, so SIGTERM only stopped Bale polling and
-  the process hung alive (Restart Bot button dead, systemd restarts hung).
-  `modules/bale/runner.py` therefore passes **`handle_signals=False`** — keep it.
+- **A second poller must never take over SIGTERM (historical, Bale).** aiogram's
+  `start_polling` installs its own SIGTERM handler and would overwrite main.py's
+  `_on_sigterm`, so SIGTERM only stopped the Bale poller and the process hung
+  alive (Restart Bot button dead, systemd restarts hung) — the deleted
+  `modules/bale/runner.py` therefore had to pass `handle_signals=False`. There is
+  no second poller any more; if one is ever added, give it the same treatment.
   On this box there is no passwordless sudo; restart via
   `kill -TERM $(systemctl show tgbot --property=MainPID --value)` and let
   `Restart=always` relaunch (~20 s).
@@ -1188,24 +1198,16 @@ Don't port it to Go.
   @username without creating a friend record (synthetic `{"platform":
   "instagram","ig_username":…}` passed to `archive_instagram_full`).
 
-## When porting from balebot
+## The extras are shared modules (historical: ported from balebot)
 
-balebot is a leaner, Bale-only variant of tgbot's own design (not a reference
-ahead of tgbot). Porting *from* it to tgbot is only ever bringing a Bale-only
-feature over, or the reverse — extracting shared core back out. When translating
-aiogram↔pyrogram:
-- aiogram `Router`/`F` filters → pyrogram ordered groups + `filters.*`.
-- `bot.send_message(chat_id=, text=)` → `client.send_message(chat_id=, text=)` or
-  `callback_query.message.edit_text(...)` / `message.reply_text(...)`.
-- `callback_query.answer(text, show_alert=True)` works the same in pyrogram.
-- Blocking yt-dlp work → `asyncio.get_event_loop().run_in_executor(None, fn)`
-  (pyrogram has no `bot.loop`; use the event loop directly).
-- Do **not** port the Bale uploader (direct multipart for a 20 MB limit) —
-  pyrogram's native `send_video`/`send_audio`/`send_document` handle Telegram's
-  2 GB / 4 GB natively. Only port the splitter logic and disk guards.
-- The balebot extras (GitHub explorer, YouTube search/recent/channel/transcript,
-  Google Translate, web→Markdown) are ALREADY ported into this repo as shared,
-  transport-free modules under `modules/github|youtube|translate|web/` — used by
-  the Telegram pyrogram side AND the Bale `modules/bale/runner.py`. Do not
-  duplicate an extra on the Telegram side; extend the shared module and let both
-  endpoints keep one copy.
+The GitHub explorer, YouTube search/recent/channel/transcript, Google Translate
+and web→Markdown extras live as **transport-free modules** under
+`modules/github|youtube|translate|web/` — pure HTTP helpers with pyrogram
+handlers, no UI-framework dependency. They used to be shared with the (now
+removed) Bale aiogram frontend; the aiogram↔pyrogram translation rules
+(`Router`/`F` filters → ordered groups, `callback_query.answer(...)` semantics,
+blocking yt-dlp work → `loop.run_in_executor`) and the reasoning behind the
+shared-module layout are recorded in `docs/memory/BALEBOT.md`.
+
+Rule that outlives the removal: **do not duplicate an extra's logic** — extend
+the shared module in place so there is always exactly one copy of it.

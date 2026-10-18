@@ -11,13 +11,13 @@ the user-facing overview is [`README.md`](README.md).
 
 ---
 
-## 🎯 Design principles (ported from the sibling Bale project)
+## 🎯 Design principles
 
 1. **No Docker reliance.** Docker is still *supported* (legacy `Dockerfile` /
    `docker-compose.yml`) but is no longer the supported path. The supported path
    is a bare-metal install via `./install.sh` + `./run.sh` or a `systemd` unit —
-   exactly like the Bale bot. One language stack, one process tree, one log
-   stream, no container overhead on a 1 GB VPS.
+   one language stack, one process tree, one log stream, no container
+   overhead on a 1 GB VPS.
 2. **YouTube = cookies + PO token, no fallback.** YouTube now requires a
    proof-of-origin (PO) token. The bot runs a local `bgutil-ytdlp-pot-provider`
    Deno server that mints them; every YouTube extraction uses cookies + PO token.
@@ -229,10 +229,10 @@ tgbot/
 │   ├── tgbot.service         # systemd unit TEMPLATE (rendered by install.sh with real user + RAM)
 │   ├── tgbot-monitor.service # System monitor (standalone Go binary, detached)
 │   └── tgbot-xchat-bridge.service # XChat E2EE sidecar (Deno, resident supervisor)
-├── .env.example              # Copy to .env and fill in tokens (Telegram + optional Bale)
-├── requirements.txt          # pyrogram + aiogram (Bale) + yt-dlp[default,curl-cffi] + bgutil PO plugin
-├── config.py                 # Reads .env via python-dotenv; all settings live here (BALE_*, GITHUB_TOKEN, etc.)
-├── main.py                   # Bootloader: logger (dual Telegram+Bale), cookie init+lock, PO provider, FastAPI, SIGTERM
+├── .env.example              # Copy to .env and fill in tokens
+├── requirements.txt          # pyrogram + yt-dlp[default,curl-cffi] + bgutil PO plugin + playwright
+├── config.py                 # Reads .env via python-dotenv; all settings live here (GITHUB_TOKEN, etc.)
+├── main.py                   # Bootloader: logger, cookie init+lock, PO provider, FastAPI, SIGTERM
 ├── database.json             # Whitelisted / blacklisted / settings registries (runtime)
 ├── cookies/                  # Live jars (read-only at rest, write-back via snapshots)
 │   ├── youtube/ytcookies.txt # YouTube (plus .backup)
@@ -266,13 +266,12 @@ tgbot/
 │   │   ├── __init__.py       # Re-exports (from utils.logger import ...)
 │   │   ├── local.py          # ensure_local_log_handler (logs/bot.log, 5 MB x3)
 │   │   ├── telegram.py       # TelegramChannelHandler (Rich 32768 limit, LOG_CHANNEL_ID)
-│   │   └── bale.py           # BaleChannelHandler (bale. child logger, BALE_LOG_CHANNEL_ID)
 │   ├── propagation.py        # stop()/continue_() — re-raise real StopPropagation/ContinuePropagation
 │   ├── updater.py            # 6-hour yt-dlp nightly updater (preserves [default,curl-cffi], --pre)
 │   ├── shared.py             # In-memory registries: queue, DOWNLOAD_CACHE, POT_AVAILABLE, RUNTIME_SETTINGS
 │   ├── queue_manager.py      # Non-blocking serializing task queue (single worker, priority)
 │   ├── gate.py               # Security access control + settings registry (authorized/blacklisted/premium)
-│   ├── id_validator.py       # Telegram/Bale ID format checks (5-11 digits)
+│   ├── id_validator.py       # Telegram ID format checks (5-11 digits)
 │   ├── security.py           # SSRF guard (_is_ssrf_target), is_safe_url, flood, redact_token
 │   ├── rich_stream.py        # RichStream (Bot API 10.1+ streaming drafts, 30s ephemeral)
 │   ├── keyboard_expiry.py    # Auto-expiry of dead inline keyboards
@@ -291,24 +290,21 @@ tgbot/
 │   │   ├── direct_menu.py    # Direct-Forward menu rendering
 │   │   ├── callback_dispatch.py  # Callback dispatcher (admin UI, now fixed UnboundLocalError)
 │   │   └── register.py       # Handler registration & text/command routing (group -1,0,1,2)
-│   ├── bale/                 # Bale.ai frontend (government messenger, optional, LIMITED)
-│   │   ├── runner.py         # Aiogram poller tapi.bale.ai + drain, LIMITED admin, 20MB split, extras
-│   │   ├── uploader.py       # Bale direct multipart (19/20 MB, sanitize, clean_caption)
-│   │   └── admin.py          # Bale limited admin keyboard (no cookies/premium/POT)
-│   ├── github/               # GitHub explorer (Telegram + Bale): repo panel, ZIP, branches/tags
+│   ├── bale/                 # REMOVED 2026-10-18 (Bale.ai frontend — history: docs/memory/BALEBOT.md)
+│   ├── github/               # GitHub explorer: repo panel, ZIP, branches/tags
 │   │   ├── api.py            # GitHub API (headers + PAT)
 │   │   ├── keyboards.py      # Repo menu, branches/releases/tags/file explorer
 │   │   └── handlers.py       # Link intercept + /search /user /trend + gh: callbacks (queue)
-│   ├── youtube/              # YouTube search + transcript (Telegram + Bale via /yt)
+│   ├── youtube/              # YouTube search + transcript (/yt)
 │   │   ├── scraper.py        # search_ytdlp_flat, clean_vtt_subtitles
 │   │   └── handlers.py       # /yt, /ytrecent, /ytch, /transcript (yt-dlp flat + queue)
-│   ├── translate/            # Google Translate (Telegram + Bale)
+│   ├── translate/            # Google Translate
 │   │   ├── api.py            # google_translate_async (gtx)
 │   │   └── handlers.py       # /tr src:dst text
-│   ├── web/                  # Webpage -> Markdown (Telegram + Bale)
+│   ├── web/                  # Webpage -> Markdown
 │   │   ├── api.py            # fetch_markdown_text (urltomarkdown)
 │   │   └── handlers.py       # /web <url> (cache + split)
-│   ├── subscription/         # Subscription (Telegram only, no Bale free tier)
+│   ├── subscription/         # Subscription (in-chat only, no WebApp/Mini App since 2026-08-26)
 │   │   ├── tiers.py          # free 5, basic 100/100⭐, plus 500/250⭐, pro 2500/500⭐
 │   │   ├── store.py          # subscriptions, usage, sub_settings (channels[])
 │   │   ├── quota.py          # daily limit, remaining, increment
@@ -465,3 +461,6 @@ per-file by the uploader.
 - [x] Phase 26 — **Sequential headless cookie refresher (1 tab at a time, 24h, 4GB safe)** (2026-08-13): DM-only jars (IG/X/TT/YT) never get `yt-dlp` write-back, so they go stale `~7 days` and hit `update_risky_contactpoint` / `login_required` (weekly IG stall). Added `utils/cookie_refresher.py` that visits each site sequentially with `Playwright` (one Chromium at a time, `~300 MB` peak, not 4 tabs → your `4GB+8swap` stays safe, `chromium-1234` already cached). Each site: load Netscape jar -> `add_cookies` -> `goto` homepage -> `networkidle 15s + 5s settle` -> `context.cookies()` -> Netscape write via `_write_cookie_jar` (atomic, `0o444`, purge snapshots, `touch meta`, clear `direct_ig_session.json` for IG). Proxy-aware (`DIRECT_FORWARD_PROXY`/`PROXY_URL`). Scheduled as `auto_refresh_cookies_loop` in `main.py` (`300s + jitter` first run, then `24h ±1h`) as isolated task. Enabled by `COOKIE_REFRESH_ENABLED=true` (`config.py`, `.env.example`). Also fixed `fresh igcookies upload now clears stale direct_ig_session.json` so next login goes straight to new `sessionid` (your "stuck on a copy" report).
 - [x] Phase 27 — **Bale logging + extras parity + docs overhaul** (2026-08-13): same `INFO` level for Bale via `BaleChannelHandler` -> `BALE_LOG_CHANNEL_ID` (`bale_log`), `TelegramChannelHandler` stays on `LOG_CHANNEL_ID`. Added `BALE_LOG_CHANNEL_ID` to `config.py` + `.env.example`. Fixed Bale `github.com` panel to reply via `process_split_and_upload_bale` (20 MB splits). Overhauled `README`, `blueprint` directory map, `docs/UBUNTU_VPS_SETUP.md` (Bale private channel steps), and added `docs/USER_GUIDE.md` (feature table + how to use each).
 - [x] Phase 28 — **Dispatch-propagation hardening + logger package split + channel-join greeting** (2026-08-13): `utils/logger.py` monolith split into the `utils/logger/` package (`local.py`, `telegram.py`, `bale.py`) with backwards-compat re-exports, rich-message truncation raised to the Rich Bot API limit of **32768** (was 3500/6000/8000 premature cuts in `d2c3dcf`), and a **strict log split** so the `bale_log` Telegram channel gets ONLY Bale/aiogram lines while the main log channel gets pyrogram/direct-forward/queue lines (`d723798`, Bale full-JSON detail parity in `f14a244`, POT-flap reduction + shared logs in `36505e6`). New `utils/propagation.py` (`stop()`/`continue_()`) fixes two dispatch bugs (`e3df33c`): bare `except Exception` swallowing `StopPropagation` (caused group-0 GitHub links to also be grabbed by the group-1 downloader) and a `RawUpdateHandler` mid-group starving later handlers (fixed by `raise ContinuePropagation` on non-owned updates). Added `modules/subscription/join.py` — channel force-join verification UI: the `/start` greeting now carries a single self-contained message with the intro guide + subscription access prompt + "✅ I joined — verify" keyboard (live `chkjoin:` re-check), wired in `main.py` and `modules/admin/register.py`.
+
+- [x] Phase 29 — **Bale.ai frontend removed** (2026-10-18): deleted `modules/bale/` (aiogram `tapi.bale.ai` poller, the 19/20 MB direct-multipart uploader, the limited-admin console), `utils/logger/bale.py` (`BaleChannelHandler`) and its separate `bale_log` Telegram channel, `apiDocuments/baleAPI.md`, the `aiogram` dependency, every `BALE_*` setting (`BALE_TOKEN`, `BALE_SYSTEM_CREATOR_ID`, `BALE_LOG_CHANNEL_ID`, `BALE_HARD_LIMIT_MB`, `BALE_SPLIT_TARGET_MB`, `BALE_DIRECT_DOWNLOAD`) and every cross-frontend conditional/docstring that existed only for it. Reason: the integration caused more operational problems than it solved and the operator no longer wants a Bale bot at all — if one is ever wanted it belongs in its own project, not welded into tgbot. Telegram is now the only frontend: one poller, one log channel, one uploader. History preserved in `docs/memory/BALEBOT.md` (design + threat model), the phase entries above, and `docs/memory/tgbot-2026-10-18-bale-frontend-removal.md` (what was deleted, why, verification).
+

@@ -773,7 +773,7 @@ starves. Full write-up: `docs/memory/tgbot-2026-08-13-propagation-dispatche-bugs
 `utils/logger.py` (monolith) → `utils/logger/` **package**:
 - `local.py` — `ensure_local_log_handler` (`logs/bot.log`, 5 MB × 3).
 - `telegram.py` — `TelegramChannelHandler` → `LOG_CHANNEL_ID`.
-- `bale.py` — `BaleChannelHandler` → `BALE_LOG_CHANNEL_ID`.
+- `bale.py` — **removed 2026-10-18** (it was `BaleChannelHandler` → `BALE_LOG_CHANNEL_ID`).
 - `__init__.py` — backwards-compat re-exports (`from utils.logger import ...`
   still works), so call sites did not change.
 
@@ -784,22 +784,18 @@ earlier 3500/6000/8000 cuts were premature and **broke detailed log lines**
 handlers now truncate at 31500 + a `[TRUNCATED at 32768 rich limit]` marker.
 Keep the `sendMessage` fallback byte-compatible with the pre-rich format.
 
-### Strict log split (`d723798`)
-- The main Telegram log channel (`LOG_CHANNEL_ID`) gets **pyrogram /
-  direct-forward / queue** lines.
-- The `bale_log` channel gets **ONLY Bale/aiogram** lines — both at the same
-  INFO level. This lets the Bale frontend be monitored without drowning the
-  Telegram channel in duplicate Bale noise. Don't merge the streams.
+### Strict log split (`d723798`) — historical, now removed
+While the Bale frontend existed there were two channels: `LOG_CHANNEL_ID` got
+pyrogram / direct-forward / queue lines and the `bale_log` channel got ONLY
+Bale/aiogram lines (both at the same INFO level). `BaleChannelHandler` was
+itself a *Telegram*-API handler — it posted to `https://api.telegram.org` with
+the same `BOT_TOKEN`, never to `tapi.bale.ai`, because Bale is government-owned
+and Bale-side logs containing sensitive info must not cross into it.
 
-### `bale_log` is a TELEGRAM channel (important correction)
-`BaleChannelHandler` sends to `https://api.telegram.org` with the **same
-`BOT_TOKEN`** — NOT to `tapi.bale.ai`. Reason: Bale is government-owned, so
-Bale-side logs containing sensitive info must never cross into `tapi.bale.ai`
-(security hole). They land in a separate private **Telegram** channel named
-`bale_log`. Both handlers are Telegram-API; they are kept separate only so the
-two log streams stay isolated. Earlier docs that said "bale_log on Bale via
-`tapi.bale.ai`" were wrong and were corrected in README / USER_GUIDE /
-UBUNTU_VPS_SETUP.
+**2026-10-18: the Bale frontend was removed**, so `utils/logger/bale.py` and the
+separate channel went with it. The remaining `TelegramChannelHandler` now
+carries every line, at the same single INFO level. History: `docs/memory/BALEBOT.md`,
+`docs/memory/tgbot-2026-10-18-bale-frontend-removal.md`.
 
 ---
 
@@ -1291,11 +1287,13 @@ duplicated shared logic:
 cookies), `utils/cookie_manager`, `utils/pot_provider`, `utils/queue_manager`,
 and the transport-free extras `modules/{github,youtube,translate,web}`.
 
-**Divided (per-endpoint, never duplicated):** Telegram transport
-`modules/{admin,downloader_handler,subscription,stream_handler}` (pyrogram, FULL
-console); Bale transport `modules/bale/` (aiogram, LIMITED console, own 20 MB
-uploader `clean_caption_text`/`sanitize_filename_for_bale`, own `BALE_*`
-creator id). The Bale runner imports the shared downloader + shared extras.
+**Transport layer (Telegram only since 2026-10-18):**
+`modules/{admin,downloader_handler,subscription,stream_handler}` (pyrogram, full
+console). There used to be a second, per-endpoint Bale transport
+(`modules/bale/`, aiogram, limited console, its own 20 MB uploader and
+`BALE_*` creator id) that imported the shared downloader + shared extras; it was
+deleted with the Bale removal, and the shared modules stayed shared by
+construction.
 
 ## Files changed
 
@@ -1789,8 +1787,9 @@ re-cleans defensively at every archive read site.
   `get_contacts()` scan by id.
 - **aiogram overwrote SIGTERM** (`dp.start_polling` installs its own handler),
   so SIGTERM only stopped Bale polling and the process hung — Restart Bot
-  button dead, systemd restarts hung. Fix: `handle_signals=False` in
-  `modules/bale/runner.py`. Keep it.
+  button dead, systemd restarts hung. The fix (`handle_signals=False` in the
+  deleted `modules/bale/runner.py`) is moot now that there is no second poller;
+  apply the same rule if one is ever added again.
 - **Restart without sudo** (this box has no passwordless sudo):
   `kill -TERM $(systemctl show tgbot --property=MainPID --value)` →
   `Restart=always` relaunches (~20 s).

@@ -661,8 +661,8 @@ collapses whitespace/separator runs, avoids Windows device names and trailing
 dots/spaces, truncates on a character boundary and appends a stable blake2b
 digest so truncated names stay unique. `ascii_only=True` reproduces the legacy
 strict-ASCII behaviour. Every path that derives an on-disk name from remote or
-user text routes through it (direct file, github cache names, Bale filenames and
-custom filename, web→Markdown, YouTube transcript, friend-media archive zip).
+user text routes through it (direct file, github cache names, web→Markdown,
+YouTube transcript, friend-media archive zip).
 Tests: `tests/test_filenames.py`. Full writeup:
 [`docs/memory/tgbot-2026-10-16-filename-sanitizer-and-media-classification.md`](memory/tgbot-2026-10-16-filename-sanitizer-and-media-classification.md).
 

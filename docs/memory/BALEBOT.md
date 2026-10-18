@@ -1,5 +1,20 @@
 # Balebot — integration, merge & hardening
 
+> ## ⛔ REMOVED 2026-10-18 — HISTORICAL RECORD ONLY
+>
+> The operator dropped the Bale integration and every line of it was deleted from
+> this repository: `modules/bale/` (aiogram `tapi.bale.ai` poller, 20 MB uploader,
+> limited console), `utils/logger/bale.py` (`BaleChannelHandler`) and its separate
+> `bale_log` Telegram channel, `apiDocuments/baleAPI.md`, the `aiogram`
+> dependency, all `BALE_*` settings and every cross-frontend conditional. Reason:
+> the integration caused more operational problems than it solved, and a Bale bot
+> (if ever wanted) belongs in its own project.
+>
+> This file is kept **for the record** — the design, the threat model and the
+> "WHY this frontend exists" reasoning below are what was true while it existed.
+> Nothing in it should be re-applied to tgbot. Removal report + verification:
+> `docs/memory/tgbot-2026-10-18-bale-frontend-removal.md`.
+
 All Bale.ai frontend notes merged: integration plan, ported extras (GitHub/YouTube/Translate/Web), and hardening (20 MB limit, getUpdates drain, limited admin).
 
 ## WHY this frontend exists (operator intent — do not treat Bale as dead weight)

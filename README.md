@@ -9,8 +9,8 @@ to it — piped straight from Telegram's servers with zero local buffering.
 Built on **kurigram** (active pyrogram fork, `import pyrogram` stays). Provisioned with a one-shot `./install.sh` (no Docker
 required). Runs as a `systemd` service that survives reboots.
 
-> **Last verified:** 2026-08-21 — **kurigram 2.2.24** (active pyrogram fork; `import pyrogram` stays), **TikTok chrome131 pin** (`curl_cffi<0.14` + `curl-adapter==1.1.0` — `0.14`/chrome142 blocked, `yt-dlp#17403`), **IG decode shim** (`urllib3>=2.3` `max_length`), **admin WebApp themes** (system/light/dark + `no-store` + Clear Cache), **Bale.ai frontend now live** (optional `tapi.bale.ai` mirror, same `INFO` level logging to the `bale_log` Telegram channel), **GitHub/YouTube/Translate/Web on both Telegram & Bale**, **free-tier Instagram fix**, **IG gap recovery (200) + optional MQTToT push**, **sequential headless cookie refresher (1 tab at a time, 24h, 4GB-safe)**, **dispatch-propagation hardening** (logger package split `utils/logger/`, Rich `32768` limit, strict Telegram/Bale log split, `utils/propagation.py` `stop()`/`continue_()`), **channel-join verification** (`modules/subscription/join.py` "✅ I joined" button), **full admin Mini App** (`/admin`, `docs/INFRA.md`). See `docs/INFRA.md` (covers kurigram, ptb-architecture & tiktok-pin).
-> Built on **kurigram** (`pyrogram` API). Full yt-dlp site support (1,786 patterns, generic excluded) + dual Telegram/Bale logging at same level.
+> **Last verified:** 2026-10-18 — **kurigram** (active pyrogram fork; `import pyrogram` stays), **TikTok chrome131 pin** (`curl_cffi<0.14` + `curl-adapter==1.1.0` — `0.14`/chrome142 blocked, `yt-dlp#17403`), **Instagram photo posts / carousels delivered natively** (yt-dlp's IG extractor is video-only — see `docs/DOWNLOADER.md`), **Bale.ai frontend REMOVED** (agent, its `bale_log` channel and `aiogram` dep are gone — history in `docs/memory/BALEBOT.md`), **admin Mini App / subscription WebApp removed** (2026-08-26), **sequential headless cookie refresher (1 tab at a time, 24h, 4GB-safe)**, **channel-join verification** (`modules/subscription/join.py` "✅ I joined" button), **byte-bounded filenames + content-based media routing**. See `docs/INFRA.md`, `docs/DOWNLOADER.md`.
+> Built on **kurigram** (`pyrogram` API). Full yt-dlp site support (1,786 patterns, generic excluded). Telegram-only: the optional Bale.ai frontend was removed on 2026-10-18 (see `docs/memory/BALEBOT.md`).
 
 > **New to this?** The complete, beginner-friendly walkthrough — from "I just
 > bought a VPS" to "the bot is live" — lives in
@@ -56,12 +56,12 @@ required). Runs as a `systemd` service that survives reboots.
   sign-in required, geo-blocked, rate-limited, private/deleted, live/storyboard.
 - **💳 Subscriptions (Stars/TON/Gram).** Toggleable 3-tier plans (Basic 100/d 100⭐, Plus 500/d 250⭐, Pro 2500/d 500⭐) + free tier (5/d, or join channels). Telegram Stars invoices + TON inbound via memo, daily quota, **multi-channel force-join with a "✅ I joined — verify" live re-check button in the greeting**, priority queue (free last). Managed entirely from the in-chat Admin Console (`/subscription` for users).
 - **🌐 No Mini App / WebApp (removed 2026-08-26).** The Telegram Mini App admin console and the subscription WebApp are gone — every feature lives in the in-chat inline console. The FastAPI/uvicorn server still runs, but only for the `/stream/{token}/{file_name}` zero-disk streaming endpoint.
-- **🐙 GitHub explorer + 🔍 YouTube search + 🈯 Translate + 🌐 Web→Markdown (Telegram + Bale).** Paste any `github.com/owner/repo` → repo panel (ZIP via 20 MB splits on Bale, 2 GB/4 GB on Telegram; branches/tags/releases, issues/PRs, commits, languages, README, file explorer with folder ZIP); `/search <q>`, `/user <u>`, `/trend`; `/yt <q> [n]`, `/ytrecent @chan [n]`, `/ytch @chan <q>`, `/transcript <yt_url>`; `/tr src:dst text`; `/web <url>` (Markdown). All queue through the single worker; Bale uses sanitized 20 MB splits. See `docs/USER_GUIDE.md` for usage table.
-- **🇮🇷 Bale.ai frontend (optional, hardened, same log level).** One `tgbot.service` hosts both `pyrogram` (Telegram) and `aiogram 3.30` (`tapi.bale.ai`). Bale is government-owned, so: **no Bale log channel by default** (Telegram logs stay on Telegram), optional separate `bale_log` **Telegram** private channel (`BALE_LOG_CHANNEL_ID`, same `INFO` level — Bale logs never touch `tapi.bale.ai`); **LIMITED admin** on Bale (users, blacklist, doc mode, size limits `19/20 MB`, abort -- no cookies/premium/POT/direct-forward); **20 MB real hard limit** (docs lie 50, split `19/20`); `getUpdates` drain (Bale `deleteWebhook` is NOOP). When `BALE_TOKEN` empty, zero Bale code runs.
+- **🐙 GitHub explorer + 🔍 YouTube search + 🈯 Translate + 🌐 Web→Markdown.** Paste any `github.com/owner/repo` → repo panel (ZIP in 2 GB / 4 GB splits; branches/tags/releases, issues/PRs, commits, languages, README, file explorer with folder ZIP); `/search <q>`, `/user <u>`, `/trend`; `/yt <q> [n]`, `/ytrecent @chan [n]`, `/ytch @chan <q>`, `/transcript <yt_url>`; `/tr src:dst text`; `/web <url>` (Markdown). All queue through the single worker. See `docs/USER_GUIDE.md` for the usage table.
+- **🇮🇷 No Bale.ai frontend (removed 2026-10-18).** The optional `tapi.bale.ai` mirror is gone: `modules/bale/`, the `BaleChannelHandler`/`bale_log` channel, `aiogram` and every `BALE_*` setting were deleted, along with the 20 MB splitter and Limited-admin console they needed. Telegram is the only frontend. The original design and threat model are kept as a historical record in `docs/memory/BALEBOT.md` — the integration caused more operational problems than it solved, and a Bale bot (if ever wanted again) belongs in its own project.
 - **🕸️ Headless cookie refresher (1 tab at a time, 24h).** DM-only jars (IG/X/TT/YT) never get `yt-dlp` write-back, so they go stale. `utils/cookie_refresher.py` visits each site **sequentially** with `Playwright` (one `chromium-1234` `~300 MB` peak, not 4 tabs -> your `4GB+8swap` stays safe) every `24h ±1h`, `add_cookies -> goto -> networkidle -> context.cookies() -> Netscape write` (atomic, `0o444`, `touch meta`, clears `direct_ig_session.json` for IG). Proxy-aware. First run `5-10 min` after boot.
 - **🩹 Instagram gap recovery + optional MQTToT push (TikTok-like).** IG worker now paginates `direct_v2/threads/{id}/` with `cursor` until `oldest_id <= last_id` (`8x25=200` cap, `gap fetch: X had Y new` log) and **only bumps cursor on success** (at-least-once). Missed batch from stalled `update_risky_contactpoint` now replays. Optional `IG_DIRECT_MQTT_ENABLED` (`instagrapi 2.18.14` `edge-mqtt.facebook.com`, `~5 MB`, no browser) hybrid push alongside polling.
 - **🖥️ Standalone system monitor.** A tiny static Go binary (`cmd/tgbot-monitor/`)
-  posts `#system` reports and 80% CPU/RAM/disk warnings to **both** log channels (when `BALE_LOG_CHANNEL_ID` set) -- even when the bot itself is down.
+  posts `#system` reports and 80% CPU/RAM/disk warnings to the log channel -- even when the bot itself is down.
 
 ---
 
@@ -74,9 +74,7 @@ required). Runs as a `systemd` service that survives reboots.
    - `BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
    - Your numeric Telegram user ID (message [@userinfobot](https://t.me/userinfobot)).
    - A private log channel ID (`LOG_CHANNEL_ID` Telegram, `-100...`) — **required**: the bot refuses to start without it.
-3. **Optional Bale (only if you want the `tapi.bale.ai` mirror):**
-   - `BALE_TOKEN` from Bale `@botfather` (`116645...:xxxx`), `BALE_SYSTEM_CREATOR_ID` (your Bale numeric ID), and a private `bale_log` channel (`BALE_LOG_CHANNEL_ID`, same level as Telegram, `angelbalzac` admin). When empty, zero Bale code runs. Bale is government-owned, so logs are separate.
-4. **That's it.** `install.sh` installs everything else (git, python, ffmpeg,
+3. **That's it.** `install.sh` installs everything else (git, python, ffmpeg,
    tmux, Deno, `chromium-1234` for cookie refresher, node/npm for XChat bridge, PO-token provider, Go monitor, swap). `playwright 1.62.0` is pre-cached.
 
 ---
@@ -106,12 +104,12 @@ sudo systemctl enable --now tgbot-monitor
 sudo journalctl -u tgbot -f
 ```
 
-Then open **Telegram** (and Bale if you set `BALE_TOKEN`), message your bot, send `/start` (or `console`), open the
-**🛠 Admin System Console** (Telegram full, Bale LIMITED `19/20 MB` -- no cookies/premium/POT), and upload your YouTube cookies
+Then open **Telegram**, message your bot, send `/start` (or `console`), open the
+**🛠 Admin System Console**, and upload your YouTube cookies
 (**Cookie Jars → YouTube → Replace**). See the
 [VPS setup guide](docs/UBUNTU_VPS_SETUP.md) for the fully-explained version,
-including Premium session, **dual log channels** (`LOG_CHANNEL_ID` Telegram + `bale_log` `BALE_LOG_CHANNEL_ID`), and cookies.
-**New here?** See `docs/USER_GUIDE.md` for a complete feature table (every command, what it does, how to use) and Bale quirks (20 MB, `sendVideo` MPEG4-only, Markdown auto-parse).
+including the Premium session and cookies.
+**New here?** See `docs/USER_GUIDE.md` for a complete feature table (every command, what it does, how to use).
 
 ---
 
@@ -128,10 +126,9 @@ inline-button console:
 | 🍪 Cookie Jars | Per-site jars: **Download / Replace**, and for YouTube also **Test / Save Backup / Restore Backup**. Add jars for any other site (per-site). |
 | 🔐 PO Token | Start / stop / restart / diagnose the PO-token provider; live status badge. |
 | 📨 Direct-Forward | Pair / unpair the bot's Instagram account for the DM relay. |
-| 💳 Subscriptions | Toggle mode, free tier + multi-channel add/remove, Stars/TON tiers, grant/revoke (in-chat only — no WebApp/Mini App since 2026-08-26). Queue priority 0→3. **Telegram only, no Bale free tier.** |
+| 💳 Subscriptions | Toggle mode, free tier + multi-channel add/remove, Stars/TON tiers, grant/revoke (in-chat only — no WebApp/Mini App since 2026-08-26). Queue priority 0→3. |
 | 🌐 WebApp Console | Full admin console as a Mini App (`/admin`, also the 🌐 button in this console): Users, Cookies, PO Token, Premium, Subscriptions, Direct-Forward, System. Creator auth via initData or `X-Admin-Token`. |
 | 💥 Abort Transfer | Cancel everything in the queue and purge the cache. |
-| 🇮🇷 Bale LIMITED | Same `tgbot.service` but **LIMITED**: `List/Add/Remove`, `Blacklist`, `Doc Mode`, `Size Limits 19/20`, `Abort`, `Close` -- **no** 🍪/👑/🔐/📨/💳. Create private `bale_log` channel, add `angelbalzac` admin, set `BALE_LOG_CHANNEL_ID` for same `INFO` level as Telegram (otherwise Bale logs stay local only). |
 
 ---
 
@@ -439,7 +436,7 @@ Four streams, same `INFO` level:
 - **Service log** (stdout/stderr): `sudo journalctl -u tgbot -f` (and `sudo journalctl -u tgbot -b` for boot)
 - **Bot's own log** (timestamped, rotated at 5 MB × 3): `tail -f logs/bot.log`
 - **Telegram log channel** (required): `LOG_CHANNEL_ID` (`-100...`, Telegram private channel, `angelbalzac` admin). The bot refuses to start without it. All `INFO`/`WARNING`/`ERROR` mirror there via `TelegramChannelHandler` (rich `sendRichMessage` + `sendMessage` fallback, `html` escaped, `32768` Rich limit, async daemon thread).
-- **Bale log channel** (optional, same level): `BALE_LOG_CHANNEL_ID` (a *separate private **Telegram** channel* named `bale_log`, `angelbalzac` admin — NOT a Bale channel). Reason: Bale is government-owned, so Bale-side logs containing sensitive info must never go to `tapi.bale.ai`; they go to this Telegram channel via `api.telegram.org` with the same `BOT_TOKEN`. `BaleChannelHandler` mirrors Bale/aiogram lines there at the same `INFO` level (rich HTML, `32768` limit), so Bale logs are isolated from the main Telegram log stream. When `0`, Bale logs stay local only. Create it like any Telegram channel: new private channel `bale_log` -> add `angelbalzac` admin -> post once and resolve the numeric `-100...` id (forward a channel post to `@userinfobot`) -> put in `.env` `BALE_LOG_CHANNEL_ID=-100...` -> `systemctl restart tgbot`. Verify: `[Logger] Bale logging linked to BALE_LOG_CHANNEL_ID ...` in `logs/bot.log`.
+- **Bale log channel** — **removed 2026-10-18.** The optional Bale.ai frontend and its separate `bale_log` channel were deleted (the operator dropped the Bale integration; the reasoning is kept in `docs/memory/BALEBOT.md`). Only `LOG_CHANNEL_ID` remains.
 - **System monitor**: `cmd/tgbot-monitor` Go binary posts `#system` reports every 15 min and `80%` warnings to **both** log channels when set (otherwise Telegram only) -- even when the bot is down. `sudo journalctl -u tgbot-monitor -f`.
 
 ---
