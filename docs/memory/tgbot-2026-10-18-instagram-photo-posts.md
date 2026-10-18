@@ -121,11 +121,27 @@ Non-Instagram URLs keep the generic message (verified in the tests).
 
 | input | result |
 |---|---|
-| `/p/Dem-LAGmuqO/?img_index=4` (5 photos) | 5 photos, first with caption, all quote-replying; log `🖼 Instagram post delivered: … 5 photo(s), 0 video(s)` |
+| `/p/Dem-LAGmuqO/?img_index=4` (5 photos) | 5 photos, first with caption, all quote-replying; log `🖼 Instagram post delivered: … 5 photo(s), 0 video(s)` (driven twice — before and after the last code edit) |
 | `/p/DeUZHSKkWhz/?img_index=3` (3 photos + 1 video) | 3 photos in one group + the carousel video (1080×1080, 0.4 MB, `thumb_count 1`) |
+| `/p/BxAteoyA2Lz/` (single photo) | 1 photo via `send_photo`, caption on it (exercises the single-item branch) |
 | `/reel/Dce6Z8os04Y/` (regression) | format keyboard → picked 1280p → video 2.8 MB, 44 s, thumb present |
 
 Zero `ERROR`/`CRITICAL` lines in `logs/bot.log` since the restart.
+
+### How big was the hole? (survey of every `/p/` code ever logged)
+
+All 31 unique Instagram post codes in `logs/bot.log*` were re-enumerated offline
+with the new reader:
+
+| class | count | before this fix |
+|---|---|---|
+| photo-only posts | 25 | **all failed** ("The site changed its layout…") |
+| mixed carousels (photos + video) | 2 | **all failed** (a photo entry killed the playlist) |
+| video-only posts | 1 | worked (format keyboard) |
+| anonymously unreadable | 3 | failed; still unreadable (deleted/private/anonymous rate-limit) but now report the actionable jar message |
+
+27 of the 31 posts the operator ever sent to the bot were unreachable. All 27
+work now.
 
 ---
 
@@ -199,9 +215,10 @@ promising a removed feature.
      reels/posts) stays off until a fresh `cookies/instagram/igcookies.txt` is
      uploaded and IG Auth is re-enabled. The new photo path needs no session and
      keeps working meanwhile.
-  2. `https://www.instagram.com/p/DePboi5Gn2w/` is permanently refused
-     anonymously ("empty media response", 3/3 attempts) — deleted, private, or
-     anonymous-rate-limited content. It now reports the actionable jar message.
-* The Telethon verification left 3 test links + their delivered media in your DM
-  with the bot (the delivered media is the proof the fix works); delete them if
-  you want a clean chat.
+  2. Three posts the operator sent are permanently refused anonymously
+     (`DePboi5Gn2w`, `DdzZ_WoBfzC`, `DdEgSX1iH2d`) — deleted, private, or
+     anonymous-rate-limited content (retried 3×: not stochastic). They now
+     report the actionable jar message instead of "the site changed its layout".
+* The Telethon verification left 4 test links + their delivered media
+  (17 photos + 2 videos) in your DM with the bot — the delivered media is the
+  proof the fix works; delete them if you want a clean chat.
