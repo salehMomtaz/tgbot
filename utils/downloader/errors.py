@@ -47,6 +47,24 @@ def _classify_ytdl_error(exc: Exception, url: str) -> str:
             "Admin Console → Cookies."
         )
 
+    # Instagram's logged-out endpoint can answer with no media at all
+    # ("Instagram sent an empty media response") or hand back the login page
+    # ("Failed to parse JSON") mid-ladder. Neither is a layout change: the post
+    # is gone, login-walled, or Instagram is anonymously rate-limiting this
+    # server. Name the jar like every other auth wall so the operator gets an
+    # actionable message (2026-10-18: failing Instagram links reported
+    # "the site changed its layout", which sent the operator hunting for bugs).
+    if "instagram.com" in url.lower() and (
+        "empty media response" in text or "failed to parse json" in text
+    ):
+        site, jar = _site_cookie_context(url)
+        return (
+            f"{site} did not return this post to an anonymous request (it may be "
+            f"deleted or login-walled, or Instagram is rate-limiting this server "
+            f"anonymously). A logged-in session is needed: send a fresh `{jar}` "
+            "jar via Admin Console → Cookies."
+        )
+
     if "unexpected response from webpage request" in text and "tiktok.com" in url.lower():
         return (
             "TikTok's anti-bot challenge has changed and yt-dlp cannot solve it (known issue: "
