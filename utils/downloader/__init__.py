@@ -78,6 +78,14 @@ from .supported_sites import (
     warm_ytdlp_patterns,
 )
 
+from .instagram_post import (
+    InstagramIE,
+    is_instagram_post_url,
+    canonical_post_url,
+    fetch_instagram_post,
+    download_post_photos,
+)
+
 from .split import (
     split_file_generator,
     split_video_by_size_generator,
@@ -139,6 +147,12 @@ __all__ = [
     "is_ytdlp_supported",
     "get_ytdlp_extractor_name",
     "warm_ytdlp_patterns",
+    # instagram_post
+    "InstagramIE",
+    "is_instagram_post_url",
+    "canonical_post_url",
+    "fetch_instagram_post",
+    "download_post_photos",
     # split
     "split_file_generator",
     "split_video_by_size_generator",

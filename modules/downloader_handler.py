@@ -5,10 +5,14 @@ import socket
 import uuid
 import shutil
 import asyncio
+import logging
 import urllib.parse
 import aiohttp
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    InputMediaPhoto,
+)
 import config
 from utils.shared import queue, DOWNLOAD_CACHE  # Fixed: Import from clean shared registry
 from main import progress_bar_handler, log_event
@@ -20,9 +24,14 @@ from utils.downloader import (
     is_playlist_url,
     is_pure_playlist_url,
     PLAYLIST_TIERS,
+    is_instagram_post_url,
+    fetch_instagram_post,
+    download_post_photos,
 )
 from utils.uploader_handler import process_split_and_upload, send_reply_safe
 from utils.rich_stream import RichStream
+
+logger = logging.getLogger(__name__)
 
 
 # Canonical is_link lives in utils.url_validator (transport-neutral, shared
@@ -126,7 +135,207 @@ def build_format_keyboard(cache_id: str, videos: list, audios: list, premium_all
     return InlineKeyboardMarkup(keyboard_rows)
 
 
-async def show_format_selection(message: Message, status: RichStream, url: str, custom_filename, user_id: int, origin_message_id: int | None = None):
+# ===========================================================================
+# Instagram photo posts / carousels
+# ===========================================================================
+# yt-dlp cannot see Instagram IMAGES at all (see utils/downloader/instagram_post.py),
+# so a /p/ link whose post contains a photo used to die with "No video formats
+# found" → "The site changed its layout or the URL is malformed." Here the post
+# is enumerated with the extended extractor and delivered natively: photos as a
+# (quote-replied) media group, carousel videos through the normal splitter/
+# uploader so they keep thumbnails, metadata and the 2 GB/4 GB ceilings.
+# Video-ONLY posts still use the yt-dlp format keyboard — no quality loss.
+
+# Telegram caps a media group at 10 items and a photo at 10 MB.
+_MEDIA_GROUP_MAX = 10
+_PHOTO_TELEGRAM_MAX = int(9.5 * 1024 * 1024)
+_IG_CAPTION_LIMIT = 1024  # Telegram's media-caption limit
+
+
+def _instagram_post_caption(post: dict) -> str:
+    """Caption for the first item of a native Instagram post delivery."""
+    head = f"📷 {post.get('title') or 'Instagram post'}"
+    author = (post.get("author") or "").strip()
+    if author:
+        head = f"{head} — @{author}"
+    parts = [head]
+    body = (post.get("caption") or "").strip()
+    if body:
+        parts.append("")
+        parts.append(body)
+    parts.append(f"\n🔗 {post['url']}")
+    text = "\n".join(parts)
+    if len(text) > _IG_CAPTION_LIMIT:
+        text = text[: _IG_CAPTION_LIMIT - 1].rstrip() + "…"
+    return text
+
+
+async def deliver_instagram_post(message: Message, status: RichStream, url: str,
+                                 custom_filename, user_id: int, reply_to_id: int,
+                                 premium_client: Client = None) -> bool:
+    """Deliver an Instagram /p|tv/ post natively when it contains photos.
+
+    Returns ``True`` when the post was handled here, ``False`` when the caller
+    must carry on with the yt-dlp format flow (video-only posts, or a post we
+    could not read — the normal error path then reports it).
+
+    Blocking Instagram calls are offloaded to the executor, so concurrent
+    fetches and any running download keep the event loop responsive
+    (invariant #10).  Photos are sent with the user's link message quoted
+    (invariant #14); the custom filename is not applicable to a carousel.
+    """
+    if not is_instagram_post_url(url):
+        return False
+
+    loop = asyncio.get_event_loop()
+    await status.update(thinking="Reading the Instagram post…")
+    try:
+        post = await loop.run_in_executor(None, fetch_instagram_post, url)
+    except Exception as e:
+        # Not fatal: the yt-dlp flow below gets its own chance (and produces
+        # the user-facing error message if it fails too).
+        logger.warning("Instagram post enumeration failed for %s: %s", url, e)
+        return False
+
+    if not post or not post.get("has_photo"):
+        return False
+
+    cache_id = str(uuid.uuid4())[:8]
+    task_dir = f"cache/{cache_id}"
+    client = message._client
+    chat_id = message.chat.id
+    photo_items = [i for i in post["items"] if i["kind"] == "photo"]
+    video_items = [i for i in post["items"] if i["kind"] == "video"]
+
+    try:
+        await status.update(f"📷 Downloading {len(photo_items)} photo(s)…")
+        files = await loop.run_in_executor(
+            None, download_post_photos, photo_items, task_dir)
+
+        if not files and not video_items:
+            return False
+
+        caption = _instagram_post_caption(post)
+        await status.close()
+
+        # --- photos: one media group per 10, quote-replying on the first -----
+        sendable = [p for p in files if os.path.getsize(p) <= _PHOTO_TELEGRAM_MAX]
+        oversized = [p for p in files if os.path.getsize(p) > _PHOTO_TELEGRAM_MAX]
+        sent = 0
+        for start in range(0, len(sendable), _MEDIA_GROUP_MAX):
+            chunk = sendable[start:start + _MEDIA_GROUP_MAX]
+            first = sent == 0
+            try:
+                if len(chunk) == 1:
+                    await send_reply_safe(
+                        client.send_photo, reply_to_id if first else None,
+                        chat_id=chat_id, photo=chunk[0],
+                        caption=caption if first else None,
+                    )
+                else:
+                    group = [
+                        InputMediaPhoto(
+                            p, caption=caption if (first and j == 0) else "")
+                        for j, p in enumerate(chunk)
+                    ]
+                    await send_reply_safe(
+                        client.send_media_group, reply_to_id if first else None,
+                        chat_id=chat_id, media=group,
+                    )
+                sent += len(chunk)
+            except Exception as e:
+                # One rejected/damaged item must not sink the whole post: fall
+                # back to individual sends and keep the survivors.
+                logger.warning("Instagram media group failed (%s) — sending items "
+                               "individually", e)
+                for j, p in enumerate(chunk):
+                    try:
+                        await send_reply_safe(
+                            client.send_photo,
+                            reply_to_id if (first and sent == 0 and j == 0) else None,
+                            chat_id=chat_id, photo=p,
+                            caption=caption if (first and sent == 0 and j == 0) else None,
+                        )
+                        sent += 1
+                    except Exception as ie:
+                        logger.warning("Instagram photo send failed: %s", ie)
+
+        for p in oversized:
+            # >10 MB: Telegram refuses it as a photo, so deliver the original
+            # as a document instead of silently dropping it.
+            try:
+                await send_reply_safe(
+                    client.send_document, reply_to_id if sent == 0 else None,
+                    chat_id=chat_id, document=p,
+                    caption=caption if sent == 0 else None,
+                )
+                sent += 1
+            except Exception as e:
+                logger.warning("Instagram oversized photo send failed: %s", e)
+
+        # --- carousel videos: the normal downloader/uploader path -----------
+        for item in video_items:
+            permalink = item.get("permalink")
+            if not permalink:
+                continue
+            progress_msg = None
+            try:
+                progress_msg = await send_reply_safe(
+                    client.send_message, reply_to_id, chat_id=chat_id,
+                    text="🎥 Downloading the video from this Instagram post...",
+                )
+            except Exception:
+                progress_msg = None
+            try:
+                result = await loop.run_in_executor(
+                    None, download_media, permalink, None, 'v', cache_id, None,
+                    'bestvideo+bestaudio/best',
+                )
+                await process_split_and_upload(
+                    bot_client=client,
+                    premium_client=premium_client,
+                    chat_id=chat_id,
+                    file_path=result['file_path'],
+                    action='v',
+                    title=result['title'],
+                    uploader=result['uploader'],
+                    duration=result['duration'],
+                    thumb_path=result['thumb_path'],
+                    progress_msg=progress_msg,
+                    reply_to_message_id=reply_to_id,
+                    premium_allowed=is_premium_user(user_id),
+                )
+                sent += 1
+            except Exception as e:
+                logger.warning("Instagram post video %s failed: %s", permalink, e)
+                await log_event(f"⚠️ **Instagram post video failed:** `{permalink}`. "
+                                f"Details: `{str(e)[:200]}`")
+                try:
+                    if progress_msg is not None:
+                        await progress_msg.edit_text(
+                            f"❌ Could not download the video from this post: `{str(e)[:200]}`")
+                except Exception:
+                    pass
+
+        if sent:
+            try:
+                from utils.subscription.quota import increment_quota as _inc_ig
+                _inc_ig(user_id)
+            except Exception:
+                pass
+            await log_event(
+                f"🖼 **Instagram post delivered:** `{post['title']}` — "
+                f"{len(files)} photo(s), {len(video_items)} video(s) for User `{user_id}`.")
+        return bool(sent)
+    finally:
+        if os.path.exists(task_dir):
+            try:
+                shutil.rmtree(task_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+async def show_format_selection(message: Message, status: RichStream, url: str, custom_filename, user_id: int, origin_message_id: int | None = None, premium_client: Client = None):
     """Extract formats for a single media URL and post the selection keyboard.
 
     *origin_message_id* is the user's original link message. The keyboard (and
@@ -136,8 +345,25 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
 
     *status* is a RichStream streaming the analysis progress; it is closed (and
     any fallback status message removed) before the keyboard is posted.
+
+    Instagram /p|tv/ posts are probed FIRST (their photos are invisible to
+    yt-dlp): when the post holds a photo it is delivered here and no keyboard is
+    shown. Everything else — including video-only Instagram posts — keeps the
+    yt-dlp flow below.
     """
     reply_to_id = origin_message_id or message.id
+    try:
+        if await deliver_instagram_post(message, status, url, custom_filename,
+                                        user_id, reply_to_id,
+                                        premium_client=premium_client):
+            return
+    except Exception as e:
+        logger.warning("Instagram post delivery crashed for %s: %s", url, e)
+        try:
+            await status.close()
+        except Exception:
+            pass
+
     await status.update("🔍 Fetching format attributes...")
     try:
         # extract_formats is a blocking yt-dlp call — run it off the event loop
@@ -420,7 +646,10 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             # actual download (queued when the user taps a format button) is
             # serialized, so the user can pick formats for many links while
             # earlier downloads run.
-            _spawn_fetch(show_format_selection(message, status, url, custom_filename, user_id))
+            _spawn_fetch(show_format_selection(
+                message, status, url, custom_filename, user_id,
+                premium_client=premium_app,
+            ))
         else:
             status_msg = await send_reply_safe(
                 message._client.send_message, message.id,
@@ -690,6 +919,7 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             _spawn_fetch(show_format_selection(
                 callback_query.message, status, url, custom_filename, user_id,
                 origin_message_id=origin_id,
+                premium_client=premium_app,
             ))
             return
 
@@ -912,6 +1142,7 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
             callback_query.message, status, entry["url"],
             cache_data.get("custom_filename"), user_id,
             origin_message_id=origin_id,
+            premium_client=premium_app,
         ))
 
 
