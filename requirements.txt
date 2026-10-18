@@ -35,7 +35,8 @@ python-dotenv
 bgutil-ytdlp-pot-provider
 # Direct-forward DM relay (modules/direct_forward/). Local libraries speaking
 # the platforms' own private APIs — no third-party relay services.
-# 2.18.14 brings Realtime MQTToT (Instagram push, TikTok-like). Keep in sync with aiogram.
+# 2.18.14 brings Realtime MQTToT (Instagram push, TikTok-like) for the
+# optional IG_DIRECT_MQTT_ENABLED hybrid; needs pydantic 2.13+.
 instagrapi==2.18.14
 # curl-backed requests adapter giving instagrapi's PRIVATE session a real
 # Chrome TLS fingerprint (utils/ig_anti_detect.py). The private API previously
