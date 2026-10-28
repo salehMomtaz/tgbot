@@ -342,10 +342,15 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     (`filesize` → `filesize_approx` → `tbr`/`vbr`/`abr` × duration) is correct
     — do not rewrite it.
     (b) **Blind-guess metadata** (fixed via `_apply_cdn_size_probes`):
-    Instagram DASH reels expose NO `filesize`, NO `tbr`, often NO `duration`,
-    so the 60 s fallback heuristic overshot real files 2–3× (measured `~5M`
-    vs 2 MB). Button-visible formats in that class now get an exact CDN
-    `Content-Length` probe (HEAD, Range-GET fallback) and become `exact`.
+    Instagram DASH reels expose NO `filesize` and some expose no usable `tbr`,
+    so a tbr-less format fell through to the 60 s fallback heuristic and
+    overshot real files 2–3× (measured `~5M` vs 2 MB). Button-visible formats
+    in that class now get an exact CDN `Content-Length` probe (HEAD, Range-GET
+    fallback) and become `exact`. Since 2026-10-28 IG duration is no longer
+    blind either: the extractor subclass reads it from the DASH manifest
+    (`mediaPresentationDuration`, invariant #21), so IG formats that DO report
+    `tbr` size accurately from `tbr × duration` (measured 495K estimated vs
+    500K real) and are no longer probed; only tbr-less ones still are.
     YouTube/TikTok report stream metadata and are NEVER probed — don't widen
     the probe scope to them; it's wasted traffic.
     (c) **Residual `~` overshoot**: ordinary tbr-based estimates still carry a
@@ -824,10 +829,27 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     and `YoutubeDL.add_info_extractor` **replaces** the built-in extractor
     (declaring it under any other name appends a second extractor that never
     matches — the first version of this fix did exactly that and silently never
-    ran); it only (a) makes `raise_no_formats` a no-op and (b) records the
+    ran); it (a) makes `raise_no_formats` a no-op, (b) records the
     `image_versions2` candidates as `ig_photos`, largest first (`candidates[0]`
     is the original — Instagram's list is ordered big→small, which is why
-    `thumbnails` is reversed upstream). Everything else — logged-out GraphQL
+    `thumbnails` is reversed upstream), and (c) **repairs the missing
+    duration**. Instagram's logged-out GraphQL stopped sending
+    `video_duration` (verified 2026-10-28: the key is absent from
+    `product_media`), so `info['duration']` was `None`/0 for EVERY IG link —
+    the format keyboard read `⏱ Duration: 0m 0s` and size estimates fell back
+    to the blind 60 s heuristic. The same payload still ships
+    `video_dash_manifest` with its real length
+    (`mediaPresentationDuration="PT16.033333S"`), so
+    `_dash_duration_seconds` parses that (ISO-8601) and fills a *missing*
+    duration only — a value the extractor reported stays authoritative. No
+    extra request, no second GraphQL client, no `doc_id` to rotate.
+    **`register_instagram_extractor(ydl)` must be called by every
+    `YoutubeDL` that may extract an Instagram URL** (`extract_formats` and
+    `download._ydl`); registering only inside `fetch_instagram_post` left the
+    reel/format-keyboard flow on upstream's extractor, which is why the
+    duration bug survived the photo-post fix.
+
+    Everything else — logged-out GraphQL
     fetch, LSD/CSRF handling, embed fallback, curl_cffi impersonation, cookies —
     stays upstream's code; **do not** hand-roll a GraphQL client (the `doc_id`
     rotates and would break silently). `show_format_selection` probes every IG

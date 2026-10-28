@@ -115,6 +115,70 @@ def test_extractor_shadowing() -> None:
         getattr(InstagramIE, "_extract_product_media", None)))
 
 
+def test_duration_from_dash_manifest() -> None:
+    """Instagram stopped sending `video_duration`; the DASH manifest has it.
+
+    Operator report 2026-10-28: every Instagram video showed duration 0 in the
+    format-selection message. yt-dlp reads `product_media.video_duration`,
+    which logged-out GraphQL no longer returns (verified live: the reel's
+    product_media had no `video_duration` key but its
+    `video_dash_manifest` declared `mediaPresentationDuration="PT16.033333S"`).
+    """
+    print("test_duration_from_dash_manifest")
+    d = igp._dash_duration_seconds
+    check("PT16.033333S", d('<MPD mediaPresentationDuration="PT16.033333S"/>') == 16.033333)
+    check("PT1M2.5S is 62.5", d("<MPD mediaPresentationDuration='PT1M2.5S'/>") == 62.5)
+    check("P1DT2H3M4S is 93784", d('<MPD mediaPresentationDuration="P1DT2H3M4S"/>') == 93784)
+    check("no manifest → None", d(None) is None)
+    check("manifest without the attr → None", d("<MPD/>") is None)
+    check("zero duration → None", d('<MPD mediaPresentationDuration="PT0S"/>') is None)
+    check("garbage → None", d('<MPD mediaPresentationDuration="soon"/>') is None)
+
+    # End-to-end on the extractor helper: a missing duration is filled from
+    # the manifest, a reported one is never overwritten.
+    import yt_dlp as _yt_dlp
+    mpd = (
+        '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" '
+        'mediaPresentationDuration="PT16.033333S"><Period>'
+        '<AdaptationSet mimeType="video/mp4">'
+        '<Representation id="v1" bandwidth="200000" width="720" height="1280" '
+        'codecs="avc1.4d401f"><BaseURL>https://cdn/v.mp4</BaseURL>'
+        '</Representation></AdaptationSet></Period></MPD>'
+    )
+    product_media = {
+        "pk": "123",
+        "video_versions": [{"url": "https://cdn/v.mp4", "id": "1",
+                            "type": 101, "width": 720, "height": 1280}],
+        "image_versions2": {"candidates": [{"url": "https://cdn/c.jpg",
+                                            "width": 640, "height": 1136}]},
+        "has_audio": True,
+        "video_codec": "avc1",
+        "video_dash_manifest": mpd,
+    }
+    ie = InstagramIE()
+    ie.set_downloader(_yt_dlp.YoutubeDL({"quiet": True}))
+    info = ie._extract_product_media(product_media)
+    check("duration filled from the manifest", info.get("duration") == 16.033333,
+          repr(info.get("duration")))
+    check("formats still parsed", bool(info.get("formats")))
+    kept = ie._extract_product_media({**product_media, "video_duration": 8.5})
+    check("an extractor-reported duration wins", kept.get("duration") == 8.5)
+
+    # The regular format/download flows must register the subclass, otherwise
+    # the repair would only reach fetch_instagram_post (/p/ photo posts).
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("formats.py", "download.py"):
+        with open(os.path.join(root, "utils", "downloader", name), encoding="utf-8") as fh:
+            src = fh.read()
+        check(f"{name} registers the Instagram extractor",
+              "register_instagram_extractor(" in src)
+
+    ydl = _yt_dlp.YoutubeDL({"quiet": True})
+    igp.register_instagram_extractor(ydl)
+    check("registration REPLACES the 'Instagram' extractor key",
+          isinstance(ydl._ies.get("Instagram"), InstagramIE))
+
+
 def test_build_post() -> None:
     print("test_build_post")
     photo_entry = {
@@ -265,6 +329,7 @@ def test_error_classification() -> None:
 def main() -> int:
     test_url_matching()
     test_extractor_shadowing()
+    test_duration_from_dash_manifest()
     test_build_post()
     test_download_post_photos()
     test_non_post_url_short_circuits()

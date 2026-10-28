@@ -84,6 +84,7 @@ from .instagram_post import (
     canonical_post_url,
     fetch_instagram_post,
     download_post_photos,
+    register_instagram_extractor,
 )
 
 from .split import (
@@ -153,6 +154,7 @@ __all__ = [
     "canonical_post_url",
     "fetch_instagram_post",
     "download_post_photos",
+    "register_instagram_extractor",
     # split
     "split_file_generator",
     "split_video_by_size_generator",

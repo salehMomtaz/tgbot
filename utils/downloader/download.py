@@ -11,6 +11,7 @@ from .cookies import _resolve_jar_path
 from .url_normalize import normalize_url, _apply_pot_options
 from .sizing import required_merge_headroom, _ensure_disk_space
 from .errors import _classify_ytdl_error
+from .instagram_post import register_instagram_extractor
 from .thumbnails import (
     _find_thumbnail_file,
     convert_thumbnail_to_jpeg,
@@ -18,6 +19,19 @@ from .thumbnails import (
 )
 from utils import cookie_manager
 from utils.filenames import MAX_TITLE_BYTES
+
+
+def _ydl(opts) -> yt_dlp.YoutubeDL:
+    """``yt_dlp.YoutubeDL`` with our Instagram extractor registered.
+
+    Instagram's post duration only reaches ``info['duration']`` through our
+    subclass (upstream reads a GraphQL field Instagram no longer sends), so
+    every extraction/download attempt in this module must use this factory.
+    Harmless for non-Instagram URLs — it just replaces the "Instagram" key.
+    """
+    ydl = yt_dlp.YoutubeDL(opts)
+    register_instagram_extractor(ydl)
+    return ydl
 
 
 # Hard cap on the byte length of a title's contribution to an on-disk filename.
@@ -182,7 +196,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     info = None
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with _ydl(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as e:
         error_msg = str(e).lower()
@@ -200,7 +214,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 fallback_format = "bestvideo+bestaudio/best"
             ydl_opts['format'] = fallback_format
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with _ydl(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
             except Exception as e2:
                 last_attempt_error = str(e2)
@@ -214,7 +228,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             retry_opts = dict(ydl_opts)
             retry_opts.pop('cookiefile', None)
             try:
-                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                with _ydl(retry_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
             except Exception as e2:
                 last_attempt_error = str(e2)
@@ -242,7 +256,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 retry_opts = dict(ydl_opts)
                 retry_opts.pop('cookiefile', None)
                 try:
-                    with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    with _ydl(retry_opts) as ydl:
                         info = ydl.extract_info(url, download=True)
                 except Exception as e2:
                     last_attempt_error = str(e2)
@@ -250,7 +264,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             if snap_in_play:
                 retry_opts['cookiefile'] = snap_in_play
             try:
-                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                with _ydl(retry_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
             except Exception as e2:
                 last_attempt_error = str(e2)
@@ -269,7 +283,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
             retry_opts = dict(ydl_opts)
             retry_opts.pop('cookiefile', None)
             try:
-                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                with _ydl(retry_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
             except Exception as e2:
                 last_attempt_error = str(e2)
@@ -283,7 +297,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
                 if snap_in_play:
                     retry_opts2['cookiefile'] = snap_in_play
                 try:
-                    with yt_dlp.YoutubeDL(retry_opts2) as ydl:
+                    with _ydl(retry_opts2) as ydl:
                         info = ydl.extract_info(url, download=True)
                 except Exception as e2:
                     last_attempt_error = str(e2)
@@ -297,7 +311,7 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     cookie_manager.commit(snap_in_play, success=True)
 
     # Determine the expected filename from the options used for the successful download.
-    filename = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info)
+    filename = _ydl(ydl_opts).prepare_filename(info)
 
     if format_type == 'a':
         base, _ = os.path.splitext(filename)

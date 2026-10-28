@@ -59,6 +59,54 @@ _INSTAGRAM_POST_RE = re.compile(
     re.IGNORECASE,
 )
 
+# yt-dlp reads the post duration from `video_duration`, but Instagram's
+# logged-out GraphQL stopped shipping that field (verified 2026-10-28):
+# product_media carries NO `video_duration`, so `info['duration']` was None for
+# every IG link and the format keyboard read "⏱ Duration: 0m 0s" (and size
+# estimates fell back to a blind 60 s heuristic). The SAME payload still ships
+# `video_dash_manifest`, whose MPD root declares the real length:
+#   mediaPresentationDuration="PT16.033333S"
+# Parsing that is free (no extra request, no second GraphQL client, no doc_id
+# to rot) and is the extractor-data source of truth. ISO-8601 durations look
+# like P[nD][T[nH][nM][nS]].
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+(?:\.\d+)?)D)?"
+    r"(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?"
+    r"(?:(?P<minutes>\d+(?:\.\d+)?)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
+    re.IGNORECASE,
+)
+_MPD_DURATION_RE = re.compile(
+    r"""mediaPresentationDuration\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+
+
+def _dash_duration_seconds(manifest: str | None) -> float | None:
+    """Real duration (seconds) from an Instagram DASH manifest, or ``None``.
+
+    Returns ``None`` for a missing/unparseable manifest or a zero duration so
+    callers can keep yt-dlp's value untouched. Never raises.
+    """
+    if not manifest or not isinstance(manifest, str):
+        return None
+    m = _MPD_DURATION_RE.search(manifest)
+    if not m:
+        return None
+    iso = m.group(1).strip()
+    parsed = _ISO_DURATION_RE.match(iso)
+    if not parsed:
+        return None
+    parts = parsed.groupdict()
+    if not any(parts.values()):
+        return None
+    total = (
+        float(parts["days"] or 0) * 86400
+        + float(parts["hours"] or 0) * 3600
+        + float(parts["minutes"] or 0) * 60
+        + float(parts["seconds"] or 0)
+    )
+    return total if total > 0 else None
+
+
 # Telegram's sendPhoto / photo-in-media-group limit is 10 MB per photo.
 _PHOTO_TELEGRAM_MAX = int(9.5 * 1024 * 1024)
 # Refuse absurd payloads outright rather than buffering them in RAM.
@@ -94,7 +142,27 @@ class InstagramIE(_UpstreamInstagramIE):
             {'url': ('url', {url_or_none})},
         ))
         info['ig_photos'] = [c['url'] for c in (candidates or []) if c.get('url')]
+        # Instagram stopped returning `video_duration`; the DASH manifest still
+        # carries the real length. Only fill a MISSING duration — a value the
+        # extractor (or a future yt-dlp) did report stays authoritative.
+        if not info.get('duration'):
+            duration = _dash_duration_seconds(product_media.get('video_dash_manifest'))
+            if duration is not None:
+                info['duration'] = duration
         return info
+
+
+def register_instagram_extractor(ydl) -> None:
+    """Use our ``InstagramIE`` subclass on *ydl* (replaces yt-dlp's built-in).
+
+    Every yt-dlp entry point that may extract an Instagram URL must call this:
+    the class name keeps ``ie_key() == "Instagram"``, so
+    ``add_info_extractor`` REPLACES the built-in extractor rather than
+    appending a second one that never matches. Registration is what makes the
+    duration repair (and ``ig_photos`` for photo posts) reach the regular
+    format/download flows, not just :func:`fetch_instagram_post`.
+    """
+    ydl.add_info_extractor(InstagramIE())
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +200,7 @@ def _extract_info(url: str, cookie_path: str | None = None) -> dict:
     if cookie_path:
         opts['cookiefile'] = cookie_path
     with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.add_info_extractor(InstagramIE())
+        register_instagram_extractor(ydl)
         # process=False keeps the RAW extractor result: format selection is
         # meaningless for a post with no video stream and would fail the whole
         # playlist ("Requested format is not available").

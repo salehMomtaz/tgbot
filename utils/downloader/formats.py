@@ -18,6 +18,7 @@ from .sizing import (
     _ensure_disk_space,
 )
 from .errors import _is_live_or_storyboard_only, _storyboard_error, _classify_ytdl_error
+from .instagram_post import register_instagram_extractor
 from utils import cookie_manager
 import yt_dlp
 import config
@@ -99,6 +100,7 @@ def extract_formats(url: str) -> dict:
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                register_instagram_extractor(ydl)
                 info = ydl.extract_info(url, download=False)
         except Exception as e:
             last_error = e
