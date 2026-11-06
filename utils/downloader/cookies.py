@@ -25,6 +25,13 @@ def _resolve_jar_path(url: str) -> str | None:
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
         cookie_path = config.YT_COOKIES
     elif "instagram.com" in url_lower:
+        # IG paused (account suspended/appealing) or session known-dead:
+        # NEVER send the jar's sessionid to Instagram. yt-dlp's Instagram
+        # ladder tries no-auth FIRST, so public content still downloads; only
+        # login-walled media is skipped until the operator uploads a fresh jar
+        # and re-enables IG auth (Admin → 🔐 IG Auth).
+        if not getattr(config, "IG_AUTH_ENABLED", True):
+            return None
         cookie_path = config.IG_COOKIES
     elif "tiktok.com" in url_lower:
         cookie_path = config.TT_COOKIES

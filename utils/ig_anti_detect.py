@@ -62,17 +62,48 @@ This module closes those gaps with four, independently-failing-safe pieces:
    we just alert the operator and let the exception propagate so the
    worker freezes per the existing challenge policy.
 
+9. ``sessionid_sig`` — sha256 fingerprint of the jar's ``sessionid`` VALUE.
+   The only legitimate trigger for a login attempt / breaker re-arm is this
+   value changing (operator uploads a fresh jar). Cookie rotation by the
+   refresher / yt-dlp write-back changes mtime, never the sessionid — and
+   must never re-arm a login.
+
 Every entry point is a no-op (or a logged degradation) when its dependency is
 missing, so this file can never take the worker down.
 """
 
+import hashlib
 import logging
 import math
 import os
 import random
 import time
 
+import config
+
 logger = logging.getLogger(__name__)
+
+
+def sessionid_sig(jar_path: str) -> str:
+    """sha256 fingerprint of the jar's ``sessionid`` VALUE ("" if absent).
+
+    This is the ONLY legitimate "fresh jar uploaded" signal. The cookie
+    refresher and yt-dlp write-back rotate OTHER cookies and bump the file's
+    mtime while the same (possibly dead) sessionid stays in place — gating a
+    login attempt on mtime re-tried logins with a dead session and deepened
+    Instagram's enforcement (proven 2026-10-03..08 in cookies/history.jsonl).
+    """
+    try:
+        with open(jar_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if raw.startswith("#") or not raw.strip():
+                    continue
+                parts = raw.rstrip("\n").split("\t")
+                if len(parts) >= 7 and parts[5] == "sessionid" and parts[6]:
+                    return hashlib.sha256(parts[6].encode()).hexdigest()
+    except Exception:
+        pass
+    return ""
 
 # Response headers Instagram sets that the app echoes back on later requests.
 # instagrapi already persists ig_u_rur / ig_www_claim / mid; shbid + shbts are
@@ -474,7 +505,7 @@ def write_back_session(cl, jar_path: str) -> None:
 # pacing that scales with the burst size.
 # ---------------------------------------------------------------------------
 
-def burst_pace(n_items: int) -> float:
+def burst_pace(n_items: int, delivered_in_run: int = 0) -> float:
     """Per-item sleep to apply between relayed items in a backfill.
 
     Returns the number of seconds to wait before processing the NEXT item.
@@ -485,12 +516,27 @@ def burst_pace(n_items: int) -> float:
     Below 3 items (the normal live-polling case) the per-item sleep
     is < 8 s, so the live path feels unchanged.
 
+    ``delivered_in_run`` is the media items already relayed by THIS worker
+    run (not this poll batch). If it reaches
+    ``IG_DIRECT_BACKFILL_MAX_ITEMS``, return -1 so the caller can stop
+    cleanly: a >10h backlog killed the account once, and a cap that
+    resumes at the normal poll cadence turns a scrape-shaped burst into
+    hours of small human-sized read sessions. The cursor stays behind the
+    remaining backlog, so the next successful poll starts one batch later.
+
     Called from the IG worker between gap-fetch items, not from the
     live-poll case (1 item per cycle), so this is a backfill-specific
     lever and doesn't throttle the idle case.
     """
     if n_items <= 0:
         return 0.0
+    max_items = int(getattr(config, "IG_DIRECT_BACKFILL_MAX_ITEMS", 150) or 150)
+    if delivered_in_run >= max_items:
+        logger.warning(
+            "[IG anti-detect] backfill safety cap reached after %d delivered item(s); "
+            "stopping this poll batch — the cursor resumes at the normal poll cadence.",
+            delivered_in_run)
+        return -1.0
     base = 6.0 + (math.log2(n_items + 1) * 2.0)
     jitter = random.uniform(-1.5, 2.5)
     return max(0.0, min(30.0, base + jitter))

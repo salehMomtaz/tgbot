@@ -58,6 +58,7 @@ cookies/ytdlp/*.txt
 # Direct-forward client sessions (contain logged-in tokens)
 direct_ig_session.json
 direct_x_cookies.json
+friend_media_ig_session.json
 direct_forward_state.json
 # Timestamped backups written by tools/recover_x_gap.py and the atomic writer
 direct_forward_state.json.*

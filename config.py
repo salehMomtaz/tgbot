@@ -172,6 +172,11 @@ IG_AUTH_ENABLED = os.getenv("IG_AUTH_ENABLED", "true").lower() in ("true", "1", 
 
 # Instagram direct-forward
 IG_DIRECT_ENABLED = os.getenv("IG_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
+# Backfill burst cap: the max DM items one IG worker run may actually deliver
+# before stopping cleanly. A 36h backlog delivered in one scrape-shaped burst
+# was suspected to deepen account flags; remaining backlog resumes on later
+# polls (the cursor stays behind unprocessed items).
+IG_DIRECT_BACKFILL_MAX_ITEMS = get_env_int("IG_DIRECT_BACKFILL_MAX_ITEMS", 150)
 # NOTE (2026-09-05): there is deliberately NO username/password/TOTP login
 # fallback — removed 2026-08-26 because password login hammered
 # accounts/login/ and deepened Instagram's rate-limit on the VPS IP. The
@@ -189,20 +194,15 @@ IG_DIRECT_COUNTRY_CODE = get_env_int("IG_DIRECT_COUNTRY_CODE", 1) or 1
 IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
 IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
 IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
-# Experimental MQTToT push (pure Python, NO headless browser) — TikTok-like
-# instant delivery alongside the jittered poller, which stays on as the
-# fallback + cursor reconciler. Off by default because it is experimental:
-# Instagram can change MQTToT without notice and it needs keepalive + reconnect.
-# The venv ships instagrapi 2.18.14, which DOES provide the realtime_* methods
-# this needs (validate with tools/test_ig_mqtt.py). Same sessionid/proxy as the
-# poller, ~5 MB RAM.
-IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in ("true", "1", "yes")
+# MQTToT hybrid push was REMOVED 2026-11-06: it created a SECOND instagrapi
+# client that logged in on its own with a freshly randomized device identity —
+# the device-churn/auto-login pattern that gets IG accounts suspended. Polling
+# is the only IG session path (operator requirement: no auto-login systems).
 # TESTING ONLY — shortens the Instagram checkpoint freeze (normally 3-5h) to
 # 60-120s so a developer can iterate without waiting out the anti-detection
 # backoff. Both checkpoint sites (login + polling) honour it, so behaviour is
-# consistent. This is deliberately a SEPARATE knob from IG_DIRECT_MQTT_ENABLED:
-# that flag only enables the experimental MQTToT push listener and must never
-# silently disable the freeze that protects the account from a retry storm.
+# consistent. It must never be enabled in production: the freeze is what
+# protects the account from a checkpoint retry storm.
 # Leave false in production.
 IG_DIRECT_CHALLENGE_FREEZE_TEST = os.getenv("IG_DIRECT_CHALLENGE_FREEZE_TEST", "false").lower() in ("true", "1", "yes")
 # Emoji the bot's Instagram account reacts with on each DM it receives from the

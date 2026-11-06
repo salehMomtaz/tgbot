@@ -38,7 +38,15 @@ from . import common
 logger = logging.getLogger(__name__)
 
 _IG_JAR = "cookies/instagram/igcookies.txt"
+# Persisted device identity for the one-time bootstrap login (see _build).
+# The DM worker's direct_ig_session.json is PREFERRED when present, so both
+# workers share ONE Instagram device identity instead of minting a new phone
+# every rebuild (that churn is what got the account suspended).
+_FM_SESSION = "friend_media_ig_session.json"
 _IG_CLIENT_TTL = 1800  # seconds
+# sessionid signature of the last FAILED bootstrap login: never retry the
+# same rejected session — only an operator jar upload (new signature) may.
+_IG_BOOT_SIG = ""
 
 _ig_client_cache = {"cl": None, "ts": 0.0}
 _ig_lock = asyncio.Lock()
@@ -50,11 +58,13 @@ _ig_lock = asyncio.Lock()
 # probes users/<id>/info/ AND users/<id>/info_stream/) ≈ 100 authenticated
 # requests/hour against a dead session — pure checkpoint fuel. The breaker
 # trips on the FIRST auth-classified login failure and grounds all friend-
-# media IG calls until either the jar changes on disk (operator re-upload)
-# or the cooldown lapses. Non-auth errors (network) don't trip it.
+# media IG calls until the jar's sessionid VALUE is replaced (operator
+# re-upload). There is deliberately NO cooldown/auto-probe: automated
+# re-login is banned (operator requirement, 2026-11-06) — mtime-based or
+# timed re-arming re-attempted login with the SAME dead sessionid, which
+# deepens Instagram's enforcement. Non-auth errors (network) don't trip it.
 # ---------------------------------------------------------------------------
-_IG_BREAKER = {"tripped_at": 0.0, "reason": ""}
-_IG_BREAKER_COOLDOWN = 3600  # 1h: one probe per cycle, never a hammer
+_IG_BREAKER = {"tripped_at": 0.0, "reason": "", "sid_sig": ""}
 
 # ---------------------------------------------------------------------------
 # Archive pacing window (2026-09-05, operator request). While a full IG
@@ -105,30 +115,31 @@ def _ig_auth_failure(exc: Exception) -> bool:
 
 
 def _ig_breaker_open() -> bool:
-    """True while the breaker is tripped and the cooldown hasn't lapsed."""
+    """True while the breaker is tripped and no fresh sessionid was uploaded.
+
+    Re-arms ONLY when the jar's sessionid VALUE changes. mtime is not a
+    signal: the cookie refresher / yt-dlp write-back rotate OTHER cookies
+    and bump mtime while the same dead sessionid stays in place — that
+    re-armed the breaker on mtime and the bot re-attempted login with the
+    dead session (proven 2026-10-03..08 in cookies/history.jsonl).
+    """
     if not _IG_BREAKER["tripped_at"]:
         return False
-    if _jar_mtime() > _IG_BREAKER["tripped_at"]:
-        # The jar changed on disk (operator re-upload / refresher rotation)
-        # — give the new session a chance and re-arm.
-        logger.info("[FriendMedia:ig] jar changed since breaker tripped — re-arming.")
-        _IG_BREAKER.update({"tripped_at": 0.0, "reason": ""})
-        return False
-    if time.time() - _IG_BREAKER["tripped_at"] >= _IG_BREAKER_COOLDOWN:
-        # Cooldown lapsed: probe once on the next call (half-open). A fresh
-        # failure re-trips for another hour, so the worst case is ONE failed
-        # login per cycle — exactly the anti-hammering budget we want.
-        _IG_BREAKER["tripped_at"] = time.time()
+    sig = _jar_sessionid_sig()
+    if sig and sig != _IG_BREAKER.get("sid_sig", ""):
+        logger.info("[FriendMedia:ig] jar sessionid replaced — re-arming the breaker.")
+        _IG_BREAKER.update({"tripped_at": 0.0, "reason": "", "sid_sig": ""})
         return False
     return True
 
 
 def _ig_breaker_trip(reason: str):
     now = time.time()
-    if not _IG_BREAKER["tripped_at"] or now - _IG_BREAKER["tripped_at"] > 300:
+    sig = _jar_sessionid_sig()
+    if not _IG_BREAKER["tripped_at"] or _IG_BREAKER.get("sid_sig") != sig:
         logger.warning(f"[FriendMedia:ig] IG session unusable ({reason}) — "
-                       f"pausing IG archives for ~{_IG_BREAKER_COOLDOWN // 60}m "
-                       f"(one login probe per cycle until the jar is re-uploaded).")
+                       f"pausing IG archives until a fresh igcookies.txt is "
+                       f"uploaded (NO automated re-login by operator requirement).")
         # Mirror the trip into cookies/history.jsonl so the in-chat jar
         # History view (Admin → 🍪 → Instagram → 📜) shows WHY the archives
         # went quiet, correlated with the jar's own write events.
@@ -139,7 +150,7 @@ def _ig_breaker_trip(reason: str):
                                   note=f"archives paused: {str(reason)[:160]}")
         except Exception:
             pass
-    _IG_BREAKER.update({"tripped_at": now, "reason": str(reason)})
+    _IG_BREAKER.update({"tripped_at": now, "reason": str(reason), "sid_sig": sig})
 
 
 def _jar_mtime():
@@ -161,6 +172,16 @@ def _ig_sessionid_from_jar():
     except Exception:
         pass
     return None
+
+
+def _jar_sessionid_sig() -> str:
+    """sha256 of the jar's sessionid VALUE ("" if absent). The only
+    legitimate trigger for a login attempt / breaker re-arm."""
+    try:
+        from utils import ig_anti_detect
+        return ig_anti_detect.sessionid_sig(_IG_JAR)
+    except Exception:
+        return ""
 
 
 class IGUnavailable(Exception):
@@ -198,6 +219,15 @@ async def _ig_client():
         def _build():
             c = IGClient()
             c.delay_range = [2, 4]
+            # SAME egress IP as the DM worker: when DIRECT_FORWARD_PROXY is
+            # configured the archives MUST ride it too — one session seen from
+            # the VPS IP and the residential proxy is an identity mismatch.
+            _proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
+            if _proxy:
+                try:
+                    c.set_proxy(_proxy)
+                except Exception as e:
+                    logger.warning(f"[FriendMedia:ig] proxy pin degraded: {e}")
             # Anti-detection hardening (same as direct_forward): WITHOUT the
             # curl_cffi TLS-impersonating transport, the private API rides plain
             # Python requests TLS — a JA3 "this is a script" fingerprint that
@@ -244,14 +274,54 @@ async def _ig_client():
 
             c.private_request = _pace_gated
 
-            sid = _ig_sessionid_from_jar()
-            if not sid:
+            # --- ONE DEVICE IDENTITY, NO AUTO-LOGIN LOOP -------------------
+            # Every rebuild used to construct a FRESH Android device and call
+            # login_by_sessionid() again (~24 "new phones"/day on one
+            # sessionid — the device-churn pattern Instagram bans accounts
+            # for). Now rebuilds RESUME a persisted session (the DM worker's
+            # device identity preferred; one read-only account_info() proves
+            # it alive). A sessionid login happens AT MOST ONCE for a NEW jar
+            # and never retries the same rejected sessionid.
+            for _path in ("direct_ig_session.json", _FM_SESSION):
+                if os.path.exists(_path) and os.path.getsize(_path) > 0:
+                    try:
+                        c.load_settings(_path)
+                        c.account_info()  # read-only liveness proof
+                        logger.info(f"[FriendMedia:ig] resumed session from {_path}")
+                        return c
+                    except Exception as e:
+                        if _ig_auth_failure(e):
+                            # Same sessionid the DM worker uses — it is dead.
+                            # The breaker trips; a fresh jar re-arms it.
+                            raise
+                        logger.warning(f"[FriendMedia:ig] {_path} unusable ({e}); trying next")
+
+            global _IG_BOOT_SIG
+            sig = _jar_sessionid_sig()
+            if not sig:
                 raise RuntimeError(
                     "no sessionid in cookies/instagram/igcookies.txt — "
                     "re-upload a fresh jar via Admin → 🍪 Cookie Jars")
-            if not c.login_by_sessionid(sid):
+            if sig == _IG_BOOT_SIG:
+                raise RuntimeError(
+                    "sessionid unchanged since the last failed login — waiting for an "
+                    "operator jar upload (no automated re-login by design)")
+            sid = _ig_sessionid_from_jar()
+            try:
+                ok = c.login_by_sessionid(sid)
+            except Exception:
+                _IG_BOOT_SIG = sig  # never retry this sessionid
+                raise
+            if not ok:
+                _IG_BOOT_SIG = sig
                 raise RuntimeError("login_by_sessionid failed (session expired?) — "
                                    "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
+            _IG_BOOT_SIG = ""
+            try:
+                c.dump_settings(_FM_SESSION)
+                os.chmod(_FM_SESSION, 0o600)
+            except Exception as dump_err:
+                logger.warning(f"[FriendMedia:ig] could not persist session: {dump_err}")
             # Persist the live session tokens Instagram just re-issued back into
             # the shared jar so it stays warm (instagrapi discards them).
             try:

@@ -637,22 +637,27 @@ def _ig_jar_mtime() -> float:
 
 
 async def _ig_wait_for_fresh_jar(cl, loop) -> None:
-    """Block until the IG cookie jar file changes (fresh upload) or the abort
-    flag is set. When the session is dead, the worker must NOT attempt an
-    automated re-login — it waits for the operator to upload a fresh jar."""
-    last_mtime = _ig_jar_mtime()
-    logger.info("[DirectForward/IG] waiting for fresh igcookies.txt upload "
-                "(jar mtime change detected)...")
+    """Block until the OPERATOR replaces the jar's sessionid (or IG is paused).
+
+    Waiting on mtime is wrong: the cookie refresher / yt-dlp write-back rotate
+    OTHER cookies and bump the file's mtime while the same dead sessionid sits
+    in place — that re-armed the worker and made it re-attempt login with the
+    dead session (2026-10-03..08, cookies/history.jsonl). The sessionid VALUE is
+    the signal; an identical value means no fresh jar has been uploaded yet.
+    """
+    last_sig = ig_anti_detect.sessionid_sig(config.IG_COOKIES)
+    logger.info("[DirectForward/IG] waiting for a fresh igcookies.txt (sessionid "
+                "replaced) — NO automated re-login by operator requirement.")
     while True:
         await asyncio.sleep(60)
         if not getattr(config, "IG_AUTH_ENABLED", True):
             logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — stopping the "
                         "wait (IG paused). No login will be attempted.")
             return
-        mtime = _ig_jar_mtime()
-        if mtime and mtime != last_mtime:
-            logger.info(f"[DirectForward/IG] igcookies.txt changed (mtime {last_mtime} -> {mtime}) — "
-                        f"attempting fresh login.")
+        sig = ig_anti_detect.sessionid_sig(config.IG_COOKIES)
+        if sig and sig != last_sig:
+            logger.info("[DirectForward/IG] igcookies.txt sessionid replaced — "
+                        "attempting ONE login for the fresh jar.")
             try:
                 await loop.run_in_executor(None, lambda: _ig_login(cl))
                 cl.dump_settings("direct_ig_session.json")
@@ -660,7 +665,7 @@ async def _ig_wait_for_fresh_jar(cl, loop) -> None:
                 return
             except Exception as e:
                 logger.error(f"[DirectForward/IG] fresh login failed: {e} — continuing to wait.")
-                last_mtime = mtime
+                last_sig = sig
 
 
 async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> None:
@@ -763,10 +768,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             # For testing, shorten freeze to 60s instead of 4h; the gap recovery (200 items) will
             # still deliver the stalled batch once login succeeds. If you see repeated PleaseWait,
             # the durable fix is still to pass the challenge in the official app.
-            # NOTE: gated on IG_DIRECT_CHALLENGE_FREEZE_TEST, NOT on
-            # IG_DIRECT_MQTT_ENABLED — that flag only enables the experimental
-            # MQTToT push listener and must not silently disable the freeze
-            # that protects the account from a checkpoint retry storm.
+            # NOTE: IG_DIRECT_CHALLENGE_FREEZE_TEST exists for developer iteration
+            # only and must never be enabled in production — the freeze is what
+            # protects the account from a checkpoint retry storm.
             if getattr(config, "IG_DIRECT_CHALLENGE_FREEZE_TEST", False):
                 freeze = random.uniform(60, 120)
             else:
@@ -859,122 +863,15 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
 
-    # --- Hybrid push (experimental, pure Python MQTToT, NO browser) ---
-    # When IG_DIRECT_MQTT_ENABLED, we run a lightweight Realtime MQTT listener
-    # alongside polling. Same TikTok-like instant push (~1-3s) with polling as
-    # fallback + gap recovery for the stalled batch you saw.
-    mqtt_task = None
-    if getattr(config, "IG_DIRECT_MQTT_ENABLED", False):
-        async def _ig_mqtt_listener():
-            # Separate client for MQTT so polling's direct_threads doesn't race
-            mqtt_cl = _make_client()
-            try:
-                await loop.run_in_executor(None, lambda: _ig_login(mqtt_cl, log_prefix="[DirectForward/IG-MQTT]"))
-                mqtt_cl.dump_settings("direct_ig_session.json")
-            except Exception as e:
-                logger.warning(f"[DirectForward/IG-MQTT] MQTT login failed: {e} — will retry via polling only")
-                return
-            # Connect Realtime (MQTToT on edge-mqtt.facebook.com)
-            try:
-                # realtime_on must be set before connect to catch early events
-                def _on_mqtt_message(payload):
-                    # payload is already parsed by dispatch_message_sync → emitted as "message"
-                    # We handle it via same path as polling but from MQTT thread.
-                    # Use thread-safe scheduling: push to asyncio queue
-                    try:
-                        # payload wrapper: {"message": {"path": "/direct_v2/threads/...", "op": "replace", "thread_id": ..., "value": {...}}}
-                        msg = payload.get("message") if isinstance(payload, dict) else None
-                        if isinstance(msg, dict) and "value" in msg:
-                            # MQTT value is the raw DM item dict (same shape as polling)
-                            item = msg["value"] if isinstance(msg["value"], dict) else {}
-                            if item.get("item_id"):
-                                # Schedule processing off the MQTT thread
-                                loop.call_soon_threadsafe(lambda: asyncio.create_task(_ig_mqtt_handle_item(item)))
-                    except Exception as ex:
-                        logger.warning(f"[DirectForward/IG-MQTT] handler error: {ex}")
-
-                async def _ig_mqtt_handle_item(item: dict):
-                    # Reuse same processing as polling, with shared state lock
-                    st = _load_state()
-                    pr = _get_pair(st, "ig")
-                    if not pr:
-                        return
-                    uid = str(item.get("user_id", ""))
-                    if uid != pr["user_id"]:
-                        return
-                    last = _cursor(st, "ig")
-                    try:
-                        iid = int(item.get("item_id", 0) or 0)
-                        if iid <= last:
-                            return  # already processed via polling or previous MQTT
-                    except:
-                        return
-                    logger.info(f"[DirectForward/IG-MQTT] push item {item.get('item_id')} from @{pr['username']} — instant relay")
-                    try:
-                        await _ig_process_message(item, mqtt_cl, loop, queue, chat_id, bot_client, premium_client, pr["username"], thread_id=item.get("thread_id"))
-                        _bump_cursor(st, "ig", int(item["item_id"]))
-                        await _state_save_owned(st, {"ig"})
-                    except Exception as e:
-                        logger.warning(f"[DirectForward/IG-MQTT] item {item.get('item_id')} failed: {e}")
-
-                # Register handlers for both iris and direct realtime
-                mqtt_cl.realtime_on("message", _on_mqtt_message)
-                mqtt_cl.realtime_on("direct", _on_mqtt_message)
-                # Connect and subscribe (iris_subscribe needs seq_id/snapshot_at_ms from inbox)
-                rt = await loop.run_in_executor(None, mqtt_cl.realtime_connect)
-                try:
-                    await loop.run_in_executor(None, rt.direct_subscribe)
-                    logger.info("[DirectForward/IG-MQTT] Realtime MQTT connected + direct_subscribe ok — push active")
-                except Exception as e:
-                    logger.warning(f"[DirectForward/IG-MQTT] direct_subscribe failed: {e} — will rely on polling")
-
-                # Keepalive + read loop (blocking recv, so run in executor)
-                while True:
-                    try:
-                        # ping every 60s to keep MQTToT alive
-                        await asyncio.sleep(60)
-                        try:
-                            await loop.run_in_executor(None, mqtt_cl.realtime_ping)
-                        except Exception as e:
-                            logger.warning(f"[DirectForward/IG-MQTT] ping failed: {e} — reconnecting")
-                            raise
-                        # Also drain any pending packets (read_once is non-blocking after ping)
-                        for _ in range(5):
-                            try:
-                                await loop.run_in_executor(None, mqtt_cl.realtime_read_once)
-                            except Exception:
-                                break
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[DirectForward/IG-MQTT] loop error: {e} — reconnect in 20s")
-                        await asyncio.sleep(20)
-                        # Reconnect logic: disconnect then reconnect
-                        try:
-                            await loop.run_in_executor(None, mqtt_cl.realtime_disconnect)
-                        except:
-                            pass
-                        try:
-                            rt2 = await loop.run_in_executor(None, mqtt_cl.realtime_connect)
-                            await loop.run_in_executor(None, rt2.direct_subscribe)
-                            logger.info("[DirectForward/IG-MQTT] reconnected")
-                        except Exception as e2:
-                            logger.warning(f"[DirectForward/IG-MQTT] reconnect failed: {e2}")
-                            await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                try:
-                    await loop.run_in_executor(None, mqtt_cl.realtime_disconnect)
-                except:
-                    pass
-                raise
-            except Exception as e:
-                logger.error(f"[DirectForward/IG-MQTT] fatal: {e} — falling back to polling only")
-                await asyncio.sleep(60)
-
-        mqtt_task = asyncio.create_task(_ig_mqtt_listener())
-        logger.info("[DirectForward/IG-MQTT] hybrid enabled — polling + push (TikTok-like)")
+    # MQTToT hybrid push REMOVED 2026-11-06 (operator requirement: no
+    # secondary login path). It built a SECOND instagrapi client with a
+    # freshly randomized device identity and logged in on its own — exactly
+    # the device-churn / auto-login pattern that got the IG account
+    # suspended repeatedly and finally banned. Polling is the only IG
+    # session path; do not reintroduce a second client.
 
     relogin_failures = 0  # consecutive mid-poll re-login failures (alert gate)
+    delivered_in_run = 0  # DM items actually relayed by THIS worker run (backfill cap, burst_pace)
     try:
         while True:
             if not getattr(config, "IG_AUTH_ENABLED", True):
@@ -987,6 +884,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
                 pair = _get_pair(state, "ig")
                 pairing_active = "ig" in _pending_pairs
+                cap_hit = False  # set when the backfill cap halts this poll wave
 
                 for th in threads:
                     if th.is_group:
@@ -1071,6 +969,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         mark_worker_alive("ig")
                         consumed = False
                         success = False
+                        relayed = False  # went through _ig_process_message (counts toward the backfill cap)
                         try:
                             # Burst pacing: a multi-item backfill (the gap-fetch
                             # case) is exactly the pattern that triggers
@@ -1082,7 +981,17 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                             # item backfill it spaces the relay over several
                             # minutes so the cumulative activity looks human.
                             if len(new_msgs) > 1:
-                                wait = ig_anti_detect.burst_pace(len(new_msgs))
+                                wait = ig_anti_detect.burst_pace(
+                                    len(new_msgs), delivered_in_run)
+                                if wait < 0:
+                                    # Backfill safety cap reached: stop cleanly.
+                                    # The unprocessed item(s) stay behind the
+                                    # cursor, so subsequent jittered polls resume
+                                    # the backlog at the normal cadence — several
+                                    # human-sized sessions instead of one
+                                    # scrape-shaped burst (36h-backlog incident).
+                                    cap_hit = True
+                                    break
                                 await asyncio.sleep(wait)
                             if pairing_active:
                                 consumed = await _ig_pairing_scan(m, thread_users, state,
@@ -1094,6 +1003,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                                                           bot_client, premium_client, pair.get("username", ""),
                                                           thread_id=th.id)
                                 success = True
+                                relayed = True
                             elif consumed:
                                 success = True
                             elif not pair or str(m.get("user_id", "")) != pair["user_id"]:
@@ -1112,9 +1022,18 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                                 await _state_save_owned(state, {"ig"})
                             except Exception:
                                 pass
+                            if relayed:
+                                delivered_in_run += 1
                         else:
                             # Don't bump — leave cursor at previous value so this item is retried
                             logger.warning(f"[DirectForward/IG] cursor NOT advanced for failed item {m.get('item_id')} — will retry")
+
+                    if cap_hit:
+                        logger.warning(
+                            f"[DirectForward/IG] backfill cap reached after {delivered_in_run} "
+                            f"delivered item(s) this run — the rest of this thread's "
+                            f"backlog stays behind the cursor and resumes on later polls.")
+                        break
 
                 if state_dirty:
                     await _state_save_owned(state, {"ig"})
@@ -1176,14 +1095,6 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             await wait_if_stopped()
             await asyncio.sleep(_poll_interval())
     finally:
-        # Cancel the hybrid MQTT listener on ANY exit (stop flag, cancel,
-        # or an escaping exception). Without this the task kept running a
-        # second IG client + MQTToT socket after the worker returned.
-        if mqtt_task is not None and not mqtt_task.done():
-            mqtt_task.cancel()
-            try:
-                await mqtt_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+        # No background tasks are spawned by this worker. The MQTToT hybrid
+        # was removed 2026-11-06 (it logged in with a second device identity).
+        pass
