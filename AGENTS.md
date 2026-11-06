@@ -265,7 +265,7 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    `Pyrogram-2.0.106.dist-info` left on disk is leftover metadata from the
    pre-migration install (commit `31f4dfd chore(deps): migrate from
    pyrogram to kurigram 2.2.24`); `pip show` reports BOTH
-   `Pyrogram 2.0.106` and `Kurigram 2.2.25` as installed, but the runtime
+   `Pyrogram 2.0.106` and `Kurigram 2.2.26` as installed, but the runtime
    identity is kurigram (`pyrogram.__version__` returns the kurigram
    version string). POLICY: when a new stable kurigram ships
    (https://github.com/KurimuzonAkuma/kurigram/releases), upgrade on this
@@ -331,6 +331,17 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     with `loop.run_in_executor` so concurrent fetches (and any running download)
     keep the event loop responsive — never call them inline. Downloads still run
     one-at-a-time by design so the user can queue many and collect files later.
+    **The queue must never wedge (2026-11-06):** `_worker`'s `finally` resets
+    `_active` unconditionally and respawns exactly ONE worker when items are
+    still pending (a cancelled/crashed worker used to leave the engine "busy"
+    forever — every later `add_task` skipped spawning, and the queue stopped
+    draining until a restart). The worker task is held in `_worker_task` with a
+    done-callback that surfaces crashes, and `MAX_QUEUE_DEPTH`
+    (`utils/shared.py`, 20) is enforced in `add_task` (reject + user notice;
+    it used to be a dead constant). Priority `0` is the FREE tier and must be
+    preserved verbatim — `int(priority or 1)` silently promoted it to 1, so
+    free users were never actually last. Regression tests:
+    `tests/test_queue_manager.py`.
 
 11. **"Uploaded size ≠ button size": check the selector first, the estimator
     second, and blind metadata last.** Three distinct failure classes, in
@@ -437,8 +448,13 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     **The IG worker NEVER auto-re-logins on a dead session (2026-10-08, operator
     requirement).** A login failure (startup OR mid-poll `LoginRequired`) logs
     once, DMs the operator once, then calls `_ig_wait_for_fresh_jar(cl, loop)` —
-    a loop that polls the jar's mtime every 60 s and attempts a login ONLY after
-    the operator uploads a new `igcookies.txt` (mtime change). There is NO
+    a loop that polls the jar's **sessionid VALUE signature**
+    (`utils/ig_anti_detect.sessionid_sig`) every 60 s and attempts a login ONLY
+    after the operator REPLACES the sessionid. **mtime is NOT a signal:** the
+    cookie refresher / yt-dlp write-back rotate other cookies and bump mtime
+    while the same dead sessionid stays in place — mtime gating re-armed login
+    with the dead session and deepened enforcement (proven 2026-10-03..08 in
+    `cookies/history.jsonl`). There is NO
     exponential-backoff retry storm and NO hourly mid-poll re-login: the operator
     explicitly forbade automated login attempts when the cookie is invalidated
     (the old behavior logged 8 retries in a day and hammered the dead session).
@@ -447,6 +463,34 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `PleaseWaitFewMinutes`) still trigger the multi-hour freeze. `_ig_login`
     validates the persisted session via `account_info()` (not `login()`, which
     demands a password).
+    **Exactly ONE IG session path, NO auto-login anywhere (2026-11-06,
+    operator requirement).** The repeated suspensions that ended in a permanent
+    ban came from device churn: `modules/friend_media/instagram.py::_ig_client()`
+    rebuilt a brand-new `IGClient()` (fresh randomized Android identity) on
+    every 30-min TTL expiry and called `login_by_sessionid()` hourly
+    (~24 "new phones"/day) while the DM worker polled from a different persisted
+    device — `cookies/history.jsonl` recorded **578** `instagrapi_writeback`
+    overlays at the watcher cadence. Now:
+    - Friend Media rebuilds RESUME a persisted session (`direct_ig_session.json`
+      preferred → `friend_media_ig_session.json`) validated by a read-only
+      `account_info()`; it never re-logs in on rebuild and applies
+      `DIRECT_FORWARD_PROXY` for IP parity.
+    - The one-time bootstrap login is gated by `_IG_BOOT_SIG` (sessionid sig) and
+      never retries the same rejected sessionid; the Friend Media breaker
+      re-arms ONLY when the sig changes (the old 1-hour cooldown auto-probe is
+      gone).
+    - The MQTToT hybrid listener was **REMOVED** (`IG_DIRECT_MQTT_ENABLED`
+      deleted, `tools/test_ig_mqtt.py` deleted): it was a SECOND client with its
+      own randomized device identity that logged in on its own.
+    - `utils/downloader/cookies.py` never hands the IG jar to yt-dlp while
+      `IG_AUTH_ENABLED=false` (yt-dlp's no-auth ladder still serves public
+      media; only login-walled media is skipped).
+    - Backfill bursts are capped by `IG_DIRECT_BACKFILL_MAX_ITEMS` (default
+      150): `burst_pace(n_items, delivered_in_run)` returns `-1` at the cap and
+      the worker stops cleanly with the cursor behind the remainder, resuming
+      on later jittered polls instead of one scrape-shaped run.
+    Do NOT reintroduce a second IG client, a periodic login retry, or
+    mtime-gated re-login. Regression tests: `tests/test_ig_session_gate.py`.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links
@@ -1108,6 +1152,14 @@ Don't port it to Go.
   `schedule_self_restart` powers the admin console's **🔄 Restart Bot** button
   (`admin_restart` → confirmation → `admin_restart_confirm`), so the operator can
   reboot the bot entirely from chat.
+- **`database.json` writes are atomic — keep them that way (2026-11-06).**
+  `utils/gate.py::save_database` writes a unique temp file (`pid` + thread id),
+  `fsync`s it, then `os.replace`s it over `DB_FILE`. The old plain
+  `open('w') + json.dump` truncated the file on a crash mid-write, and
+  `load_database` then silently returned an EMPTY default DB — wiping
+  `authorized` / `blacklisted` / `premium_users` with no warning. Never
+  "simplify" this back to a direct write. Regression tests:
+  `tests/test_gate_db.py`.
 - **`RUNTIME_SETTINGS`** in `utils/shared.py` only holds `max_cache_age_hours` and
   `max_disk_usage_pct` — housekeeping knobs, NOT upload-size knobs (the 2 GB / 4 GB
   boundary is picked per-file in the uploader). Do not add any per-frontend size

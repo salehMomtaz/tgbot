@@ -3,6 +3,11 @@
   "pythonVersion": "3.12",
   "venvPath": ".",
   "venv": "venv",
+  "exclude": [
+    "reference",
+    "bgutil-provider",
+    "learn"
+  ],
   "reportPrivateImportUsage": "none",
   "reportOptionalMemberAccess": "warning",
   "reportOptionalSubscript": "warning",
