@@ -1,4 +1,5 @@
 # utils/uploader_handler.py
+import logging
 import os
 import asyncio
 import config
@@ -6,6 +7,8 @@ from pyrogram import Client
 from pyrogram.errors import MessageIdInvalid, RPCError
 from pyrogram.types import ReplyParameters
 from utils.gate import is_document_mode, is_premium_user
+
+logger = logging.getLogger(__name__)
 
 # Telegram upload ceilings (bytes).
 #   Bot API:  2 GB  (2 * 1024^3 = 2147483648)
@@ -316,23 +319,33 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
             )
 
             if part_path != file_path:
-                if os.path.exists(part_path):
-                    os.remove(part_path)
+                try:
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+                except OSError as rm_err:
+                    # A cleanup failure must never fail a part that ALREADY
+                    # uploaded successfully — the cache cleaner sweeps it.
+                    logger.warning("Could not remove split part %s: %s", part_path, rm_err)
 
             part_num += 1
 
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except OSError as rm_err:
+                logger.warning("Could not remove source file %s: %s", file_path, rm_err)
 
         if delete_progress_after:
             if progress_msg is not None:
                 await progress_msg.delete()
 
-    except Exception as e:
+    except BaseException as e:
+        # CancelledError is a BaseException: a cancelled upload must still free
+        # the source file and every ffmpeg part (it used to leak all of them).
         for p in parts_list:
             if p != file_path and os.path.exists(p):
                 try:
                     os.remove(p)
                 except Exception:
                     pass
-        raise e
+        raise

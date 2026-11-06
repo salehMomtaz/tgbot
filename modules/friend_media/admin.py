@@ -38,6 +38,31 @@ logger = logging.getLogger(__name__)
 # time keeps the user account under flood limits and deliveries ordered.
 _ARCHIVE_LOCK = asyncio.Lock()
 
+# Fire-and-forget archive tasks: hold strong refs and surface exceptions (an
+# unmanaged asyncio.create_task is GC-able and drops its exception silently).
+_FM_TASKS: set = set()
+
+# Per-friend in-flight guard for the on-demand full IG zip (dedupes taps).
+_IG_ZIP_INFLIGHT: set = set()
+
+
+def _spawn_bg(coro):
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as e:  # event loop shutting down
+        logger.warning(f"[FriendMedia] background task spawn failed: {e}")
+        return None
+    _FM_TASKS.add(task)
+
+    def _done(t):
+        _FM_TASKS.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("[FriendMedia] background task failed: %r",
+                         t.exception(), exc_info=t.exception())
+
+    task.add_done_callback(_done)
+    return task
+
 # One operator DM per dead-session streak (not one per friend per cycle —
 # the 2026-09-05 incident would have sent 12 identical alerts/hour). The
 # streak identity is the breaker's tripped_at: a re-arm (jar re-upload or
@@ -443,7 +468,7 @@ async def fm_callback_dispatch(client, callback_query):
             return
         await fm_common.ensure_contact(u)
         key, _ = await _add_friend_from_user(u)
-        asyncio.create_task(_auto_backfill(client, key))
+        _spawn_bg(_auto_backfill(client, key))
         await callback_query.message.edit_text(
             "👤 **Friend**\n\n" + _label(await fm_state.get_friend(key)),
             reply_markup=_friend_keyboard(key, await fm_state.get_friend(key)))
@@ -483,7 +508,7 @@ async def fm_callback_dispatch(client, callback_query):
             await callback_query.answer("IG @username not set for this friend.", show_alert=True)
             return
         await callback_query.answer("Starting IG archive (zip)…")
-        asyncio.create_task(_run_ig_archive(client, callback_query.message, key, friend))
+        _spawn_bg(_run_ig_archive(client, callback_query.message, key, friend))
         return
 
     async def _toggle(field):
@@ -849,7 +874,7 @@ async def _archive_all(client, status_msg):
     msg = await status_msg.reply_text(
         f"🚀 Checking {len(enabled)} friend(s) for NEW media (delivering to "
         f"{_dest_label()})…")
-    asyncio.create_task(_run_archives(client, enabled, msg))
+    _spawn_bg(_run_archives(client, enabled, msg))
 
 
 async def _archive_one(client, status_msg, key, full=False):
@@ -863,7 +888,7 @@ async def _archive_one(client, status_msg, key, full=False):
         return
     msg = await status_msg.reply_text(
         f"⬇️ Full backfill of `{key}`…" if full else f"🔍 Checking `{key}` for new media…")
-    asyncio.create_task(_run_archives(client, [(key, friend)], msg, full=full))
+    _spawn_bg(_run_archives(client, [(key, friend)], msg, full=full))
 
 
 async def _auto_backfill(client, key):
@@ -952,35 +977,55 @@ async def _ig_add_archive(client, key):
 
 async def _run_ig_archive(client, status_msg, key, friend):
     """Run a full IG archive (-> zip) for one friend, streaming progress to a
-    status message and delivering the zip to the safe destination."""
+    status message and delivering the zip to the safe destination.
+
+    Serialized with every OTHER archive via ``_ARCHIVE_LOCK`` and deduped per
+    friend: a double-tap or an overlap with the hourly cycle used to run two
+    full archives concurrently on the ONE IG session — double request volume,
+    the exact burst class that killed the 2026-09-05 session."""
     ig_user = fm_common.ig_username_of(friend)
+
+    if key in _IG_ZIP_INFLIGHT:
+        try:
+            await status_msg.reply_text(
+                f"🗂 An IG zip archive of @{ig_user} is already running — "
+                f"wait for it to finish.")
+        except Exception:
+            pass
+        return
+    _IG_ZIP_INFLIGHT.add(key)
 
     msg = None
     try:
-        msg = await status_msg.reply_text(f"🗂 Starting full IG archive of @{ig_user}…")
-    except Exception:
-        pass
-
-    status = msg or status_msg
-    try:
-        await status.edit_text(f"🗂 Archiving @{ig_user} … starting")
-
-        async def _cb(step):
-            try:
-                await status.edit_text(f"🗂 Archiving @{ig_user} … {step}")
-            except Exception:
-                pass
-
-        zip_path = await fm_ig.archive_instagram_full(key, friend, bot=client, status_cb=_cb)
-        await status.edit_text(
-            f"✅ IG archive of @{ig_user} delivered.\n"
-            f"Profile pic + posts + reels + highlights are in the zip.")
-    except Exception as e:
-        logger.exception(f"[FriendMedia] IG archive for @{ig_user} failed: {e}")
         try:
-            await status.edit_text(f"❌ IG archive of @{ig_user} failed: {e}")
+            msg = await status_msg.reply_text(f"🗂 Starting full IG archive of @{ig_user}…")
         except Exception:
             pass
+
+        status = msg or status_msg
+        try:
+            await status.edit_text(f"🗂 Archiving @{ig_user} … starting")
+
+            async def _cb(step):
+                try:
+                    await status.edit_text(f"🗂 Archiving @{ig_user} … {step}")
+                except Exception:
+                    pass
+
+            async with _ARCHIVE_LOCK:
+                zip_path = await fm_ig.archive_instagram_full(
+                    key, friend, bot=client, status_cb=_cb)
+            await status.edit_text(
+                f"✅ IG archive of @{ig_user} delivered.\n"
+                f"Profile pic + posts + reels + highlights are in the zip.")
+        except Exception as e:
+            logger.exception(f"[FriendMedia] IG archive for @{ig_user} failed: {e}")
+            try:
+                await status.edit_text(f"❌ IG archive of @{ig_user} failed: {e}")
+            except Exception:
+                pass
+    finally:
+        _IG_ZIP_INFLIGHT.discard(key)
 
 
 async def handle_friend_text(client, message, user_id, state, input_text, prompt_id, app, back_markup):
@@ -1024,7 +1069,7 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
                       "media gets delivered.")
             await message.reply_text(reply, reply_markup=back_markup)
             for key in keys:
-                asyncio.create_task(_auto_backfill(app, key))
+                _spawn_bg(_auto_backfill(app, key))
         else:
             reply = ("❌ Could not resolve any of those. Telegram's API returned "
                      "no user for any of them (unknown id, no public username, "
@@ -1074,7 +1119,7 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
         # is best-effort and silent on failure (the operator already saw
         # the IG cookies warning if the session is stale).
         for key in keys:
-            asyncio.create_task(_ig_add_archive(app, key))
+            _spawn_bg(_ig_add_archive(app, key))
         return
 
     if state == "waiting_for_ig_archive_username":
@@ -1103,7 +1148,7 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             # Synthetic friend record: the archive path only needs an
             # ig_username, and nothing is persisted to the friends list.
             friend = {"platform": "instagram", "ig_username": u, "first_name": u}
-            asyncio.create_task(_run_ig_archive(client, message, f"adhoc:{u}", friend))
+            _spawn_bg(_run_ig_archive(client, message, f"adhoc:{u}", friend))
         return
 
     if state == "waiting_for_friend_search":
@@ -1156,7 +1201,7 @@ async def handle_friend_text(client, message, user_id, state, input_text, prompt
             return
         await fm_common.ensure_contact(u)
         key, _ = await _add_friend_from_user(u)
-        asyncio.create_task(_auto_backfill(app, key))
+        _spawn_bg(_auto_backfill(app, key))
         await message.reply_text(
             f"✅ Added `{getattr(u, 'first_name', '') or u.id}` (tg:{u.id}) — "
             "full backfill starting.", reply_markup=back_markup)

@@ -25,7 +25,9 @@ def register_stream_interceptor_handlers(app: Client):
         file_size = media_obj.file_size
         mime_type = getattr(media_obj, "mime_type", "application/octet-stream")
         
-        token = str(uuid.uuid4())[:12]
+        # Full-length random token: the old uuid4()[:12] was only 48 bits for
+        # a 24h unauthenticated URL. 128-bit hex is unguessable.
+        token = uuid.uuid4().hex
         
         from modules.stream_handler import STREAM_CACHE
         STREAM_CACHE[token] = {

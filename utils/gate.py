@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from config import SYSTEM_CREATOR_ID, DB_FILE
 
 def load_database() -> dict:
@@ -11,8 +12,7 @@ def load_database() -> dict:
         "premium_users": []
     }
     if not os.path.exists(DB_FILE):
-        with open(DB_FILE, 'w') as f:
-            json.dump(default_db, f)
+        save_database(default_db)
         return default_db
     try:
         with open(DB_FILE, 'r') as f:
@@ -43,8 +43,27 @@ def load_database() -> dict:
         return default_db
 
 def save_database(data: dict):
-    with open(DB_FILE, 'w') as f:
-        json.dump(data, f)
+    """Atomically persist the database (temp file + fsync + os.replace).
+
+    A plain ``open('w')`` truncated the file when the process died mid-write,
+    and ``load_database`` then silently returned defaults — wiping the
+    authorized / blacklist / premium lists with no warning. The unique temp
+    name keeps concurrent writers (threads / executors) from clobbering the
+    same scratch file.
+    """
+    tmp = f"{DB_FILE}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, DB_FILE)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 def is_authorized(user_id: int) -> bool:
     if user_id == SYSTEM_CREATOR_ID:

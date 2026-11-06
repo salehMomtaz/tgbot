@@ -1,9 +1,12 @@
+import logging
 import time
 import urllib.parse
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pyrogram import Client
 from pyrogram.types import Message
+
+logger = logging.getLogger(__name__)
 
 # In-memory session mapper
 # Structure: { "token": { "chat_id": 123, "message_id": 456, "file_name": "x.mp4", "file_size": 1000000, "mime_type": "video/mp4", "created_at": 1609459200 } }
@@ -17,6 +20,13 @@ tg_client: Client = None
 @fastapi_app.get("/stream/{token}/{file_name}")
 async def stream_telegram_file(token: str, file_name: str):
     """Retrieve media dynamically from Telegram servers and stream it to the client with a 24h validity check."""
+    # Lazily evict expired entries: they were only removed when the URL was
+    # hit again, so abandoned stream tokens accumulated forever.
+    now = time.time()
+    for _tok, _meta in list(STREAM_CACHE.items()):
+        if now - _meta.get("created_at", 0) > 86400:
+            STREAM_CACHE.pop(_tok, None)
+
     if token not in STREAM_CACHE:
         raise HTTPException(status_code=404, detail="Streaming token expired or not found.")
         
@@ -58,7 +68,7 @@ async def stream_telegram_file(token: str, file_name: str):
             async for chunk in tg_client.stream_media(msg):
                 yield chunk
         except Exception as e:
-            print(f"[Streamer] Stream connection aborted: {str(e)}")
+            logger.warning("[Streamer] Stream connection aborted: %s", e)
 
     # Set precise headers to make browser download managers recognize the file size
     headers = {
