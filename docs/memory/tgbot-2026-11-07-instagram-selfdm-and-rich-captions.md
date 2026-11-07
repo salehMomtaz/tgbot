@@ -77,9 +77,19 @@ highest quality available.
 
 - Session: `[DirectForward/IG] Logged in via sessionid from igcookies.txt.`
 - Self-DM: thread id adopted + primed, marker text confirmed in the log.
+- **End-to-end (2026-11-07 18:43):** a reel link was sent into the self-DM from
+  the persisted session; the worker logged
+  `gap fetch: … 1 new after cursor …`, resolved
+  `item …: xma_clip -> https://www.instagram.com/reel/DVIp5xvkc1u/ (author
+  @_m.mouse_28)`, delivered it (`✅ relayed … (video)`), and advanced
+  `self_last_id`. The delivered Telegram caption carried the full post text
+  (`Part 3 der jungle tour🦜… #sydney`), proving the caption merge.
 - Rich API: live `sendRichMessage` calls (single video, 2-photo collage,
   text-only) all returned `ok:true`; test messages were deleted afterwards.
 - IG reel download: 15.29 MiB, caption + thumbnail present.
+- Found and fixed while testing: instagrapi's default `request_timeout` is
+  **1 second**, which aborted CDN media reads (`ReadTimeout` tracebacks from
+  FriendMedia archives). Both IG clients now set `request_timeout = 30`.
 - Tests: `tests/test_relay_captions.py` (8/8), full suite green, `py_compile`.
 - **Final acceptance:** the operator sends a reel/post/link to the Instagram
   self-DM; the worker should log `[DirectForward/IG] item … -> …` and deliver

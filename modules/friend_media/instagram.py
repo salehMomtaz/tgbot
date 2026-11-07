@@ -219,6 +219,9 @@ async def _ig_client():
         def _build():
             c = IGClient()
             c.delay_range = [2, 4]
+            # instagrapi's default 1s request timeout aborts CDN media reads
+            # (ReadTimeout tracebacks in the archive loop); 30s is safe.
+            c.request_timeout = 30
             # SAME egress IP as the DM worker: when DIRECT_FORWARD_PROXY is
             # configured the archives MUST ride it too — one session seen from
             # the VPS IP and the residential proxy is an identity mismatch.

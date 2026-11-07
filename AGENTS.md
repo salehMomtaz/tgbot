@@ -508,6 +508,9 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     sighting primes the cursor to the newest item so the whole thread is never
     dumped; later items advance only after a successful relay (gap-aware
     pagination, 200-item cap, `burst_pace` backfill cap apply unchanged).
+    Both IG clients (`_make_client` here and FriendMedia's `_build`) set
+    `request_timeout = 30` — instagrapi defaults to **1 second**, which aborted
+    CDN media reads with `ReadTimeout` (the archive-loop tracebacks).
     Instagram uses `instagrapi` (sync → always
     via `run_in_executor`; bootstraps its login from the `sessionid` in the
     igcookies jar).     **There is NO password login fallback (removed 2026-08-26)**

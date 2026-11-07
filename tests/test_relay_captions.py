@@ -87,6 +87,19 @@ def test_ig_resolve_prefers_first_photo_candidate():
     assert r["url"] == "https://cdn/orig.jpg"
 
 
+def test_ig_share_uses_post_url_for_feed_and_reel_for_clips():
+    post = {"item_type": "media_share", "media_share": {"media": {
+        "code": "P1", "product_type": "feed",
+        "caption": {"text": "post caption"}, "user": {"username": "a"}}}}
+    r = instagram._ig_resolve_raw(post)
+    assert r["url"] == "https://www.instagram.com/p/P1/"
+    assert r["body"] == "post caption"
+
+    reel = {"item_type": "clip", "clip": {"media": {
+        "code": "R1", "product_type": "clips", "user": {"username": "a"}}}}
+    assert instagram._ig_resolve_raw(reel)["url"] == "https://www.instagram.com/reel/R1/"
+
+
 def _run():
     tests = sorted(
         (n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)

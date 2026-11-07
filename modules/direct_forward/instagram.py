@@ -141,7 +141,9 @@ def _ig_resolve_raw(item: dict) -> dict | None:
         user = md.get("user") or {}
         author = user.get("username") if isinstance(user, dict) else None
         if code:
-            return {"kind": "url", "url": f"https://www.instagram.com/reel/{code}/",
+            # ``reel`` only for clips; a photo/carousel post is ``/p/<code>``.
+            seg = "reel" if md.get("product_type") == "clips" else "p"
+            return {"kind": "url", "url": f"https://www.instagram.com/{seg}/{code}/",
                     "author": author, "preview": None,
                     "body": (md.get("caption") or {}).get("text", "") if isinstance(md.get("caption"), dict) else ""}
         if pk2:
@@ -724,6 +726,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
     def _make_client():
         c = IGClient()
         c.delay_range = [2, 4]
+        # instagrapi defaults request_timeout to 1s — CDN media reads routinely
+        # take longer and died with ReadTimeout (the FriendMedia archive
+        # tracebacks). 30s is the library's common production setting.
+        c.request_timeout = 30
         # One STABLE proxy for the whole account lifetime (residential preferred);
         # churning IPs is a top checkpoint trigger.
         if ig_proxy:
