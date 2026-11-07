@@ -192,6 +192,44 @@ def test_reconcile_is_noop_without_new_messages():
         state["tiktok"]["relayed_item_ids"] == []
 
 
+def test_process_message_does_not_confirm_a_failed_relay():
+    """A failed relay must return False so the caller leaves the push unseen."""
+    async def fake_relay(item_id, content, queue, chat_id, bot, premium, state):
+        return False
+
+    orig = tt._tt_relay_share
+    try:
+        tt._tt_relay_share = fake_relay
+        m = {"conversation_id": "0:1:7:7", "server_message_id": 1,
+             "content": _share("newshare")}
+        state = {"tiktok": {}}
+        ok = asyncio.run(tt._tt_process_message(m, None, 1, None, None, state))
+        assert ok is False
+        assert "relayed_item_ids" not in state["tiktok"]
+    finally:
+        tt._tt_relay_share = orig
+
+
+def test_process_message_skips_already_relayed_item():
+    """History may have relayed a share before its push arrives — no duplicate."""
+    calls = []
+
+    async def fake_relay(item_id, content, queue, chat_id, bot, premium, state):
+        calls.append(item_id)
+        return True
+
+    orig = tt._tt_relay_share
+    try:
+        tt._tt_relay_share = fake_relay
+        m = {"conversation_id": "0:1:7:7", "server_message_id": 2,
+             "content": _share("done")}
+        state = {"tiktok": {"relayed_item_ids": ["done"]}}
+        ok = asyncio.run(tt._tt_process_message(m, None, 1, None, None, state))
+        assert ok is True and calls == []
+    finally:
+        tt._tt_relay_share = orig
+
+
 def _run():
     tests = sorted(
         (n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)

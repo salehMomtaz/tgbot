@@ -41,7 +41,8 @@ _TT_PRIME_WINDOW = 15  # seconds of the first connect to treat as backlog
 # server ignores it (proven 2026-11-07; see docs/TIKTOK.md).
 _TT_HTTP_BASE = "https://im-api-sg.tiktok.com"
 _TT_HISTORY_PAGE = 20          # rows per get_by_conversation page
-_TT_HISTORY_PAGES = 3          # max pages per reconcile pass (newest first)
+_TT_HISTORY_PAGES = 100        # hard page cap per pass (2,000 rows); the walk
+                               # stops as soon as it crosses the watermark
 _TT_HISTORY_MAX_FAILS = 3      # give up on a share after N relay failures
 _TT_RELAYED_CAP = 2000         # persisted relayed-item-id cap
 
@@ -592,6 +593,7 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
 
     msgs: list[dict] = []
     cursor = 0
+    truncated = True
     for _ in range(_TT_HISTORY_PAGES):
         try:
             page = await loop.run_in_executor(
@@ -599,15 +601,24 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
                 cursor, _TT_HISTORY_PAGE)
         except Exception as e:
             logger.warning(f"[DirectForward/TT] backlog history fetch failed: {e}")
+            truncated = False
             break
         if not page:
+            truncated = False
             break
         msgs.extend(page)
         if min(m["ts_us"] for m in page) <= watermark:
+            truncated = False
             break
         cursor = min((m["cursor_ts_us"] for m in page if m["cursor_ts_us"]), default=0)
         if not cursor:
+            truncated = False
             break
+    if truncated and msgs:
+        logger.warning("[DirectForward/TT] backlog: page cap ("
+                       f"{_TT_HISTORY_PAGES * _TT_HISTORY_PAGE} rows) reached before "
+                       "the watermark — the backlog exceeds one pass; raise "
+                       "_TT_HISTORY_PAGES or reset history_watermark_us")
     msgs.sort(key=lambda m: m["ts_us"])
 
     new_watermark = watermark
@@ -759,6 +770,23 @@ async def _tt_run_ws(bot_client, premium_client, chat_id, queue, state: dict,
             await _tt_persist_seen(state, seen)
 
 
+async def _tt_reconcile_once(state: dict, queue, chat_id, bot_client,
+                             premium_client) -> None:
+    """Best-effort reconcile that resolves its own cookies/wid.
+
+    Used when the WebSocket itself is down: the push channel is then certainly
+    dead, so the HTTP history read is the only way shares can still arrive."""
+    cookies = _tt_jar_cookies()
+    if not cookies.get("sessionid"):
+        return
+    loop = asyncio.get_event_loop()
+    wid = await loop.run_in_executor(None, _tt_wid, cookies)
+    if not wid:
+        return
+    await _tt_reconcile_backlog(cookies, wid, queue, chat_id, bot_client,
+                                premium_client, state)
+
+
 async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> None:
     state = _load_state()
     seen = set(state.get("tiktok", {}).get("seen_msg_ids", []))
@@ -789,6 +817,10 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
             await _tt_run_ws(bot_client, premium_client, chat_id, queue, state, seen)
         except Exception as e:
             logger.error(f"[DirectForward/TT] WS error: {e}")
+            try:
+                await _tt_reconcile_once(state, queue, chat_id, bot_client, premium_client)
+            except Exception as re_err:
+                logger.warning(f"[DirectForward/TT] history reconcile while WS down failed: {re_err}")
         await asyncio.sleep(_tt_poll_interval())
 
 
