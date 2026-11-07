@@ -24,8 +24,9 @@ from .state import (
 from .common import (
     URL_RE, IG_POST_RE, _poll_interval, _compose_caption,
     _send_followups, _download_and_deliver, _enqueue_relay, _await_relays, _fetch_bytes,
-    _video_upload_kwargs, _header_lines,
+    _video_upload_kwargs, _header_lines, _try_rich_media, _full_text,
 )
+from utils.rich_media import send_rich_album
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,8 @@ def _ig_resolve_raw(item: dict) -> dict | None:
     item_type = (item.get("item_type") or "").lower()
 
     # 1) XMA containers (modern clips & post/story shares)
-    xma_entries = _ig_raw_xma_entries(item)
-    for e in xma_entries:
+    entries = _ig_raw_xma_entries(item)
+    for e in entries:
         link = e.get("video_url") or e.get("target_url")
         if link and "instagram.com" in str(link):
             m = IG_POST_RE.search(str(link))
@@ -82,6 +83,14 @@ def _ig_resolve_raw(item: dict) -> dict | None:
                         "author": e.get("header_title_text"),
                         "preview": e.get("preview_url"),
                         "body": e.get("title") or e.get("title_text") or ""}
+        if link:
+            # Deep links (instagram://media?id=<pk>) carry no web path; resolve
+            # them by pk so post/profile shares still relay.
+            dm = re.search(r"[?&]id=(\d+)", str(link))
+            if dm:
+                return {"kind": "ig_pk", "pk": int(dm.group(1)),
+                        "author": e.get("header_title_text"),
+                        "preview": e.get("preview_url")}
 
     # 2) Story/highlight shares and pk-only items: original_media_igid points
     #    at the underlying media (works for expired stories inside highlights).
@@ -101,6 +110,14 @@ def _ig_resolve_raw(item: dict) -> dict | None:
     media = item.get("media") or item.get("visual_media")
     if isinstance(media, dict):
         video_url = media.get("video_url")
+        # Highest-quality video rendition when the payload lists several.
+        versions = media.get("video_versions") or []
+        if versions:
+            try:
+                best = max(versions, key=lambda v: int(v.get("width", 0)) * int(v.get("height", 0)))
+                video_url = best.get("url") or video_url
+            except Exception:
+                pass
         img = None
         iv = media.get("image_versions2")
         if isinstance(iv, dict):
@@ -259,12 +276,23 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
             raise RuntimeError(f"IG media {pk}: all {len(targets)} resource(s) were empty/invalid")
         if len(files) == 1:
             path, is_video = files[0]
+            if await _try_rich_media(chat_id, path, is_video, header_lines, body,
+                                     duration=int(getattr(media, "video_duration", 0) or 0) or None):
+                logger.info(f"[DirectForward/IG] ✅ native relayed {url} "
+                            f"(single, rich caption)")
+                return True
             if is_video:
                 await bot_client.send_video(chat_id=chat_id, video=path,
                                             caption=caption, **_video_upload_kwargs(path))
             else:
                 await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
+            if len(_full_text(header_lines, body)) > 1024:
+                if await send_rich_album(chat_id, [(p, v) for p, v in files],
+                                         header_lines, body):
+                    logger.info(f"[DirectForward/IG] ✅ native relayed {url} "
+                                f"(album, rich caption)")
+                    return True
             from pyrogram.types import InputMediaPhoto, InputMediaVideo
             group = [
                 (InputMediaVideo(p, caption=caption if j == 0 else "",
@@ -468,19 +496,23 @@ async def _ig_react_to(cl, loop, thread_id, item_id) -> None:
 
 async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
                               bot_client, premium_client, paired_username: str,
-                              thread_id=None) -> None:
-    """Process one RAW direct_v2 DM item (dict) from the paired contact.
+                              thread_id=None, self_dm: bool = False) -> None:
+    """Process one RAW direct_v2 DM item (dict) from the paired contact or the
+    account's own self-DM thread.
 
     Relays are awaited before returning so the caller's IG cursor only advances
     once the media actually reached the queue worker (see ``_enqueue_relay``)."""
-    sender_label = f"@{paired_username}" if paired_username else "paired contact"
+    sender_label = ("your Instagram self-DM" if self_dm
+                    else (f"@{paired_username}" if paired_username else "paired contact"))
     item_id = item.get("item_id", "?")
     item_type = (item.get("item_type") or "").lower()
     futs: list = []
     try:
         # Acknowledge receipt in the IG thread (👍 by default). Fire first so a
-        # reaction still lands even if this item's relay later fails.
-        await _ig_react_to(cl, loop, thread_id, item_id)
+        # reaction still lands even if this item's relay later fails. Never
+        # react in the self-DM thread — reacting to your own message is noise.
+        if not self_dm:
+            await _ig_react_to(cl, loop, thread_id, item_id)
         resolved = _ig_resolve_raw(item)
         kind = (resolved or {}).get("kind")
 
@@ -532,8 +564,13 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
             os.makedirs("cache", exist_ok=True)
             with open(path, "wb") as f:
                 f.write(data)
-            caption, followups = _compose_caption(
-                _header_lines("Instagram", sender_label, None, None, None), "")
+            dm_text = (item.get("text") or "").strip()
+            header = _header_lines("Instagram", sender_label, None, None, None)
+            if await _try_rich_media(chat_id, path, not is_photo, header, dm_text):
+                logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> "
+                            f"direct attachment delivered (rich caption)")
+                return
+            caption, followups = _compose_caption(header, dm_text)
             if is_photo:
                 await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
             else:
@@ -823,11 +860,30 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
 
     state = _load_state()
 
+    # Self-DM ("Message yourself") support. Instagram's self thread has NO
+    # other participant (``users == []``) and an opaque thread id — it is NOT
+    # ``{uid}_{uid}`` on current app versions (verified 2026-11-07), so the id
+    # is discovered from the inbox on the first poll and persisted here.
+    # It needs its OWN cursor: the paired-thread cursor is a global item-id
+    # watermark, and sharing it would skip older messages on either side.
+    self_uid = str(getattr(cl, "user_id", "") or "")
+    ig_state = state.setdefault("ig", {})
+    self_thread_id = str(ig_state.get("self_thread_id") or "")
+    logger.info(f"[DirectForward/IG] self-DM mode: account uid {self_uid or '?'}, "
+                f"thread {self_thread_id or '(discovering from inbox)'}, "
+                f"cursor {ig_state.get('self_last_id', '(unprimed)')}")
+
     # Static pre-pair from .env (bootstrap for existing setups). Resolves the
-    # handle to a numeric user id once and persists it as the pair.
+    # handle to a numeric user id once and persists it as the pair. When the
+    # handle is the account's OWN username, self-DM mode is what the operator
+    # wants — pairing with yourself would make every 1:1 thread look "paired"
+    # and waste private-API calls without relaying anything.
     if not _get_pair(state, "ig") and config.IG_DIRECT_FROM_USERNAME:
         uid = await loop.run_in_executor(None, _ig_resolve_user_id, cl, config.IG_DIRECT_FROM_USERNAME)
-        if uid:
+        if uid and self_uid and str(uid) == self_uid:
+            logger.info(f"[DirectForward/IG] @{config.IG_DIRECT_FROM_USERNAME} is this account — "
+                        f"self-DM mode (no separate paired contact)")
+        elif uid:
             _set_pair(state, "ig", uid, config.IG_DIRECT_FROM_USERNAME)
             await _state_save_owned(state, {"ig"})
             logger.info(f"[DirectForward/IG] pre-paired with @{config.IG_DIRECT_FROM_USERNAME} (id {uid}) from .env")
@@ -856,8 +912,13 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
 
     poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
     pair = _get_pair(state, "ig")
+    if pair and self_uid and str(pair.get("user_id")) == self_uid:
+        pair = None
     if pair:
         logger.info(f"[DirectForward/IG] polling DMs from @{pair['username']} (id {pair['user_id']}) "
+                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+    elif self_thread_id:
+        logger.info(f"[DirectForward/IG] self-DM mode — polling thread {self_thread_id} "
                     f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
     else:
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
@@ -882,18 +943,44 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             state_dirty = False
             try:
                 threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
+                if not getattr(_instagram_worker, "_logged_inbox", False):
+                    _instagram_worker._logged_inbox = True
+                    for th in threads[:20]:
+                        logger.info(f"[DirectForward/IG] inbox thread {th.id} "
+                                    f"group={th.is_group} "
+                                    f"users={[str(u.pk) for u in (th.users or [])]}")
                 pair = _get_pair(state, "ig")
+                if pair and self_uid and str(pair.get("user_id")) == self_uid:
+                    # A pair pointing at ourselves is not a paired contact.
+                    pair = None
                 pairing_active = "ig" in _pending_pairs
                 cap_hit = False  # set when the backfill cap halts this poll wave
 
                 for th in threads:
                     if th.is_group:
                         continue
+                    user_ids = {str(u.pk) for u in (th.users or [])}
+                    persisted_self = bool(self_thread_id) and str(th.id) == self_thread_id
+                    # Self-DM = the thread with no other participant (Instagram
+                    # models "Message yourself" as a 1:1 thread whose other side
+                    # is absent), or a persisted id, or a thread containing only us.
+                    is_self = (persisted_self
+                               or (bool(self_uid) and user_ids == {self_uid})
+                               or not user_ids)
+                    if is_self and str(th.id) != self_thread_id:
+                        # Adopt the inbox's opaque self-thread id so later polls
+                        # match it directly (no more heuristic).
+                        self_thread_id = str(th.id)
+                        state.setdefault("ig", {})["self_thread_id"] = self_thread_id
+                        await _state_save_owned(state, {"ig"})
+                        logger.info(f"[DirectForward/IG] self-DM thread id adopted from inbox: {self_thread_id}")
                     thread_users = {str(u.pk): u.username for u in (th.users or [])}
                     pair_uid = pair["user_id"] if pair else None
                     # We only ever read threads that contain the paired partner,
-                    # EXCEPT while a pairing handshake is pending (scan everything).
-                    if not pairing_active and (not pair_uid or pair_uid not in thread_users):
+                    # EXCEPT while a pairing handshake is pending (scan everything)
+                    # and EXCEPT the account's own self-DM thread.
+                    if not is_self and not pairing_active and (
+                            not pair_uid or pair_uid not in thread_users):
                         continue
 
                     # Activity watermark: the inbox listing already carries each
@@ -914,7 +1001,8 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     # of missed DMs beyond that window. Now we walk the thread backwards (older)
                     # until the gap is closed or we hit a safety cap, so after a stale-cookie
                     # recovery (like the recent risky_contactpoint) every missed item is relayed.
-                    last_seen = _cursor(state, "ig")
+                    last_seen = (int(state.setdefault("ig", {}).get("self_last_id") or 0)
+                                 if is_self else _cursor(state, "ig"))
                     all_items: list[dict] = []
                     cursor = None
                     # Safety: cap at 200 items per thread per poll (covers ~1-2 weeks of DM)
@@ -943,10 +1031,25 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         if len(all_items) >= 200:
                             break
 
-                    # Filter to only new, non-viewer items after cursor
+                    # Filter to only new, non-viewer items after cursor. The
+                    # self-DM thread is the ONE place viewer-sent items are the
+                    # payload (you DM yourself), so they are kept there.
+                    if is_self and int(state.setdefault("ig", {}).get("self_last_id") or 0) <= 0:
+                        # First sighting: prime from this page so the whole
+                        # thread history is never dumped into the relay chat.
+                        ids = [int(m["item_id"]) for m in all_items if m.get("item_id")]
+                        state["ig"]["self_last_id"] = max(ids, default=0)
+                        await _state_save_owned(state, {"ig"})
+                        latest = ""
+                        if all_items:
+                            latest = (f" (latest: {all_items[0].get('item_type')!r} "
+                                      f"{str(all_items[0].get('text') or '')[:60]!r})")
+                        logger.info(f"[DirectForward/IG] self-DM primed at item "
+                                    f"{state['ig']['self_last_id']} — backlog skipped{latest}")
+                        continue
                     new_msgs = []
                     for m in all_items:
-                        if m.get("is_sent_by_viewer"):
+                        if not is_self and m.get("is_sent_by_viewer"):
                             continue
                         try:
                             if int(m["item_id"]) > last_seen:
@@ -998,7 +1101,18 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                                                                   bot_client, chat_id)
                                 pair = _get_pair(state, "ig")
                                 pairing_active = "ig" in _pending_pairs
-                            if not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
+                            if not consumed and is_self:
+                                # Every relayable item in the self thread is one
+                                # WE sent; ignore anything else that slips in.
+                                if self_uid and str(m.get("user_id", "")) != self_uid:
+                                    success = True
+                                else:
+                                    await _ig_process_message(m, cl, loop, queue, chat_id,
+                                                              bot_client, premium_client, "",
+                                                              thread_id=th.id, self_dm=True)
+                                    success = True
+                                    relayed = True
+                            elif not consumed and pair and str(m.get("user_id", "")) == pair["user_id"]:
                                 await _ig_process_message(m, cl, loop, queue, chat_id,
                                                           bot_client, premium_client, pair.get("username", ""),
                                                           thread_id=th.id)
@@ -1018,7 +1132,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         # retried until delivered, instead of being skipped.
                         if success:
                             try:
-                                _bump_cursor(state, "ig", int(m["item_id"]))
+                                if is_self:
+                                    state.setdefault("ig", {})["self_last_id"] = int(m["item_id"])
+                                else:
+                                    _bump_cursor(state, "ig", int(m["item_id"]))
                                 await _state_save_owned(state, {"ig"})
                             except Exception:
                                 pass

@@ -23,7 +23,9 @@ from .state import (
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
     _enqueue_relay, _await_relays, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
+    _try_rich_media, _full_text,
 )
+from utils.rich_media import send_rich_album
 
 logger = logging.getLogger(__name__)
 
@@ -417,8 +419,9 @@ async def _x_process_message(client, m: dict, queue, chat_id, bot_client, premiu
         if media_url:
             header = _header_lines("X", self_label, None, None, None)
             futs.append(_enqueue_relay(queue, chat_id,
-                           lambda u=media_url, p=is_photo, h=header: _x_deliver_dm_attachment(
-                               client, bot_client, chat_id, u, p, h)))
+                           lambda u=media_url, p=is_photo, h=header, b=(m.get("text") or ""):
+                               _x_deliver_dm_attachment(
+                                   client, bot_client, chat_id, u, p, h, b)))
             return
 
         # 3) Plain text with links. Tweet URLs use the highest-quality pipeline;
@@ -491,8 +494,9 @@ async def _x_process_bridge_line(line: dict, client, queue, chat_id, bot_client,
             if media_url:
                 header = _header_lines("X", self_label, None, None, None)
                 futs.append(_enqueue_relay(queue, chat_id,
-                               lambda u=media_url, p=bool(line.get("is_photo")), h=header:
-                                   _x_deliver_dm_attachment(client, bot_client, chat_id, u, p, h)))
+                               lambda u=media_url, p=bool(line.get("is_photo")), h=header,
+                                      b=(line.get("text") or ""):
+                                   _x_deliver_dm_attachment(client, bot_client, chat_id, u, p, h, b)))
             else:
                 # Encrypted DM media — the URL requires a media key the bridge does
                 # not extract (yet). Log once and skip; never drop silently forever.
@@ -608,8 +612,16 @@ async def _x_deliver_share_photos(client, bot_client, chat_id, photo_urls, heade
         if not files:
             raise RuntimeError("no share photos could be fetched")
         if len(files) == 1:
+            if await _try_rich_media(chat_id, files[0], False, header_lines, body):
+                logger.info(f"[DirectForward/X] ✅ relayed share photo with rich caption -> {chat_id}")
+                return
             await bot_client.send_photo(chat_id=chat_id, photo=files[0], caption=caption)
         else:
+            if len(_full_text(header_lines, body)) > 1024 and await send_rich_album(
+                    chat_id, [(p, False) for p in files], header_lines, body):
+                logger.info(f"[DirectForward/X] ✅ relayed {len(files)} share photo(s) "
+                            f"with rich caption -> {chat_id}")
+                return
             from pyrogram.types import InputMediaPhoto
             group = [InputMediaPhoto(p, caption=caption if j == 0 else "") for j, p in enumerate(files)]
             try:
@@ -637,10 +649,10 @@ async def _x_deliver_share_photos(client, bot_client, chat_id, photo_urls, heade
                 pass
 
 
-async def _x_deliver_dm_attachment(client, bot_client, chat_id, media_url, is_photo, header_lines):
+async def _x_deliver_dm_attachment(client, bot_client, chat_id, media_url, is_photo, header_lines, body=""):
     """Fetch a photo/video DM attachment through the authenticated twikit
     session (ton.twitter.com URLs 401 without cookies) and send it."""
-    caption, followups = _compose_caption(header_lines, "")
+    caption, followups = _compose_caption(header_lines, body)
     data = await _x_fetch_auth_bytes(client, media_url)
     if not _x_media_payload_ok(data, is_photo):
         raise RuntimeError(f"DM attachment invalid payload ({len(data)}B)")
@@ -650,6 +662,9 @@ async def _x_deliver_dm_attachment(client, bot_client, chat_id, media_url, is_ph
     with open(path, "wb") as f:
         f.write(data)
     try:
+        if await _try_rich_media(chat_id, path, not is_photo, header_lines, body):
+            logger.info("[DirectForward/X] ✅ DM attachment relayed (rich caption)")
+            return
         if is_photo:
             await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
         else:
@@ -729,6 +744,10 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                 top.get("height"), best_audio_id, bool(top.get("muxed")), top.get("bytes"),
             )
             file_path = result["file_path"]
+            desc = (result.get("description") or "").strip()
+            if desc and desc not in (body or ""):
+                body = f"{body}\n\n{desc}" if body else desc
+                caption, followups = _compose_caption(header_lines, body)
             # yt-dlp's prepare_filename can report a path that does not match
             # the file on disk: a long non-ASCII (e.g. Persian) title can be
             # truncated by the filesystem, and photo entries carry an unknown
@@ -767,6 +786,11 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                 return
             if kind == "image":
                 photo_path = ensure_photo_path(file_path)
+                if photo_path and await _try_rich_media(
+                        chat_id, photo_path, False, header_lines, body):
+                    logger.info(f"[DirectForward/X] ✅ relayed tweet {url} "
+                                f"(photo, rich caption) -> {chat_id}")
+                    return
                 if photo_path:
                     await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
                 else:
@@ -780,6 +804,13 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     duration=int(result.get("duration") or 0) or None,
                 )
             else:
+                if kind == "video" and await _try_rich_media(
+                        chat_id, file_path, True, header_lines, body,
+                        thumb_path=result.get("thumb_path"),
+                        duration=int(result.get("duration") or 0) or None):
+                    logger.info(f"[DirectForward/X] ✅ relayed tweet {url} "
+                                f"(video, rich caption) -> {chat_id}")
+                    return
                 await process_split_and_upload(
                     bot_client=bot_client,
                     premium_client=premium_client,

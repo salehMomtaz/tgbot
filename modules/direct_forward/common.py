@@ -13,6 +13,8 @@ import shutil
 
 import config
 
+from utils.rich_media import send_rich_media, send_rich_text
+
 logger = logging.getLogger(__name__)
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
@@ -23,6 +25,7 @@ IG_POST_RE = re.compile(r"(instagram\.com/(?:reel|reels|p|tv|stories)/[^\s?]+)")
 
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_RICH_TEXT_LIMIT = 32768
 
 # Magic-byte photo signatures (the same class of check as
 # thumbnails.py::_looks_like_image). Extensions lie: yt-dlp can hand us a
@@ -150,9 +153,20 @@ def _chunk_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
+def _full_text(header_lines: list[str], body: str) -> str:
+    """Header + body as the user-visible text (no Telegram limit applied)."""
+    header = "\n".join(line for line in (header_lines or []) if line)
+    body = (body or "").strip()
+    if header and body:
+        return f"{header}\n\n{body}"
+    return header or body
+
+
 def _compose_caption(header_lines: list[str], body: str) -> tuple[str, list[str]]:
     """Return (media_caption <= 1024, followup_texts). Telegram media captions
-    cap at 1024 chars; the overflow is sent as normal text messages (<= 4096)."""
+    cap at 1024 chars; the overflow is sent as a single rich text message
+    (``sendRichMessage``, up to 32768 chars) and only chunked into 4096-char
+    plain messages when rich sending is unavailable."""
     header = "\n".join(line for line in header_lines if line)
     if not body:
         return header, []
@@ -162,16 +176,42 @@ def _compose_caption(header_lines: list[str], body: str) -> tuple[str, list[str]
     budget = TELEGRAM_CAPTION_LIMIT - len(header) - 4  # "\n\n" + "…"
     first_body = body[:max(0, budget)] + "…"
     remainder = body[max(0, budget):]
-    followups = _chunk_text(remainder, TELEGRAM_TEXT_LIMIT)
-    return f"{header}\n\n{first_body}", followups
+    return f"{header}\n\n{first_body}", ([remainder] if remainder else [])
 
 
 async def _send_followups(bot_client, chat_id: int, followups: list[str]) -> None:
-    for chunk in followups:
-        try:
-            await bot_client.send_message(chat_id=chat_id, text=chunk)
-        except Exception as e:
-            logger.warning(f"[DirectForward] follow-up message failed: {e}")
+    """Send caption overflow: ONE rich message (32k) per part, with a plain
+    4096-char chunking fallback when the Bot API rejects rich content."""
+    for text in followups:
+        if not text:
+            continue
+        if len(text) <= TELEGRAM_RICH_TEXT_LIMIT:
+            if await send_rich_text(chat_id, [], text):
+                continue
+        for i in range(0, len(text), TELEGRAM_TEXT_LIMIT):
+            chunk = text[i:i + TELEGRAM_TEXT_LIMIT]
+            try:
+                await bot_client.send_message(chat_id=chat_id, text=chunk)
+            except Exception as e:
+                logger.warning(f"[DirectForward] follow-up message failed: {e}")
+
+
+async def _try_rich_media(chat_id: int, path: str, is_video: bool,
+                          header_lines: list[str], body: str,
+                          thumb_path: str | None = None,
+                          duration: int | None = None,
+                          reply_to_message_id=None) -> bool:
+    """Send media + full text as ONE rich message when the text exceeds the
+    normal caption cap. Returns False when the caller should use the classic
+    send path (short text, oversized file, or a Bot API rejection)."""
+    if not path or not os.path.exists(path):
+        return False
+    if len(_full_text(header_lines, body)) <= TELEGRAM_CAPTION_LIMIT:
+        return False
+    mid = await send_rich_media(
+        chat_id, path, header_lines, body, thumb_path=thumb_path,
+        duration=duration, reply_to_message_id=reply_to_message_id)
+    return bool(mid)
 
 
 async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: str,
@@ -211,6 +251,14 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
             return
 
         file_path = result["file_path"]
+        # Attach the post's own caption/description so the Telegram copy carries
+        # the same text as the original (TikTok/IG/X share text is often just a
+        # title; ``description`` is the real caption). Deduped so a share body
+        # that already equals the caption isn't printed twice.
+        desc = (result.get("description") or "").strip()
+        if desc and desc not in (body or ""):
+            body = f"{body}\n\n{desc}" if body else desc
+            caption, followups = _compose_caption(header_lines, body)
         # Classify by CONTENT (ffprobe stream kinds + image magic), never by a
         # 320×320 probe result: probe_video_dimensions returns that sentinel
         # both for a real 320×320 video AND for a file with no video stream, so
@@ -223,6 +271,11 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
 
         if kind == "image":
             photo_path = ensure_photo_path(file_path)
+            if photo_path and await _try_rich_media(
+                    chat_id, photo_path, False, header_lines, body):
+                logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} "
+                            f"(photo, rich caption)")
+                return
             if photo_path:
                 await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
             else:
@@ -240,6 +293,13 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 duration=int(result.get("duration") or 0) or None,
             )
         elif kind == "video":
+            if await _try_rich_media(
+                    chat_id, file_path, True, header_lines, body,
+                    thumb_path=result.get("thumb_path"),
+                    duration=int(result.get("duration") or 0) or None):
+                logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} "
+                            f"(video, rich caption)")
+                return
             await process_split_and_upload(
                 bot_client=bot_client,
                 premium_client=premium_client,

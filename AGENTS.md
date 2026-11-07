@@ -494,7 +494,21 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links
-    into `DIRECT_FORWARD_CHAT_ID`. Instagram uses `instagrapi` (sync → always
+    into `DIRECT_FORWARD_CHAT_ID`. **Self-DM mode (2026-11-07):** when the
+    session belongs to the operator's own account, the worker also relays the
+    account's **self-DM thread** ("Message yourself") — the Instagram analogue
+    of the X/TikTok trick. That thread has NO other participant
+    (`th.users == []`) and an **opaque 39-digit id**, NOT `{uid}_{uid}`
+    (verified live), so the id is adopted from the inbox on the first poll and
+    persisted as `state["ig"]["self_thread_id"]`. It has its own cursor
+    `self_last_id` (never the paired global `last_id`) and is the ONE place
+    `is_sent_by_viewer` items are processed; reactions are skipped there.
+    A pair whose user id equals the account's own uid is ignored (it would
+    make every 1:1 thread look "paired" and burn private-API calls). The first
+    sighting primes the cursor to the newest item so the whole thread is never
+    dumped; later items advance only after a successful relay (gap-aware
+    pagination, 200-item cap, `burst_pace` backfill cap apply unchanged).
+    Instagram uses `instagrapi` (sync → always
     via `run_in_executor`; bootstraps its login from the `sessionid` in the
     igcookies jar).     **There is NO password login fallback (removed 2026-08-26)**
     — password login hammered `accounts/login/` and deepened Instagram's 429
@@ -930,6 +944,29 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `IG_AUTH_ENABLED=false`**; a login-walled/deleted post fails with the
     Instagram-specific "did not return this post to an anonymous request" message
     (`utils/downloader/errors.py`) instead of the misleading layout error.
+
+22. **DM relays carry the post's own text; long captions use a rich message.**
+    Every direct-forward relay (Instagram / TikTok / X) attaches the post
+    caption, not just the media. `download_media` returns `description`
+    (yt-dlp's full caption) and `_download_and_deliver` merges it into the
+    body (deduped, so a share title equal to the caption isn't printed twice);
+    IG native delivery already used `media.caption_text`. Telegram media
+    captions cap at **1024** chars, so when the full text is longer the relay
+    sends **one Bot API 10.2 rich message** (`sendRichMessage`) with the media
+    element FIRST (`<figure><video src="tg://video?id=m0">` /
+    `<img src="tg://photo?id=m0">`) and the whole text below (up to 32768
+    chars) — `utils/rich_media.py`, helpers `_try_rich_media` /
+    `send_rich_album` / `send_rich_text`. Photos are capped at 10 MB, videos at
+    the 2 GB Bot API ceiling (the 4 GB premium MTProto path stays classic send
+    + a rich-text follow-up). Rich sending is best-effort: a rejection falls
+    back to the old 1024-char caption + chunked follow-ups, so the bot works on
+    any Bot API version. **Highest available quality is mandatory**: yt-dlp
+    picks `bestvideo+bestaudio`; instagrapi already selects the largest video
+    rendition and the largest `image_versions2` candidate (do not "fix" it by
+    reading `thumbnail_url` as if it were a thumbnail); X uses `videos[0]` and
+    the original CDN media URL. Never downgrade to a preview/thumbnail when a
+    full rendition exists — only a genuinely unavailable original may fall
+    back to the preview, with the existing warning text.
 
 
 ## Running / testing

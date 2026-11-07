@@ -358,6 +358,9 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
         'file_path': filename,
         'thumb_path': clean_thumb,
         'title': title,
+        # The post's own text (caption/description). DM relays attach it so the
+        # Telegram copy carries the same text as the original post.
+        'description': (info.get('description') or '').strip(),
         'duration': info.get('duration', 0),
         'uploader': uploader
     }
