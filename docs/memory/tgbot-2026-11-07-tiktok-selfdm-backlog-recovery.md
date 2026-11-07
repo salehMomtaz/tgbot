@@ -11,7 +11,8 @@ push-based."*
   PID 652, `NRestarts=0`, up since 06:38 UTC.
 - Rollback: `git checkout 4dba7f2 -- .` (or `git revert` the two commits) and
   send SIGTERM to the unit; `Restart=always` relaunches.
-- Deployed commits: `cd14fea` (fix + tests), `c1f0ce0` (docs).
+- Deployed commits: `cd14fea` (fix + tests), `c1f0ce0` (docs), `84f1eba`
+  (self-test + docs), `cb4246b` (WS-down reconcile + page cap).
 
 ## Symptom and evidence
 
@@ -104,6 +105,12 @@ Config: `TIKTOK_DIRECT_RECONCILE_SECONDS=900`,
 - State after: watermark advanced to the newest row, `relayed_item_ids` holds
   the 6 ids, `relay_fail_counts` empty, service active, `NRestarts=1` (the
   intentional deploy).
+- Periodic path: while the socket stayed open and idle, the state file was
+  re-saved at 14:35:24 — 986 s (16.4 min) after the 14:18:55 pass, inside the
+  900 s ±40 % jitter window — with no re-relays, proving both the cadence and
+  the itemId dedupe.
+- Restart safety: two further deploy restarts ran the startup reconcile and
+  produced no duplicate deliveries.
 
 ## Notes / limits
 
