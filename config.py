@@ -235,6 +235,8 @@ XCHAT_INBOX = os.getenv("XCHAT_INBOX", "cache/xchat_inbox.jsonl")
 TIKTOK_DIRECT_ENABLED = os.getenv("TIKTOK_DIRECT_ENABLED", "false").lower() in ("true", "1", "yes")
 TIKTOK_DIRECT_POLL_SECONDS = get_env_int("TIKTOK_DIRECT_POLL_SECONDS", 300)
 TIKTOK_DIRECT_POLL_JITTER_PCT = get_env_int("TIKTOK_DIRECT_POLL_JITTER_PCT", 40)
+TIKTOK_DIRECT_RECONCILE_SECONDS = get_env_int("TIKTOK_DIRECT_RECONCILE_SECONDS", 900)
+TIKTOK_DIRECT_BACKFILL_MINUTES = get_env_int("TIKTOK_DIRECT_BACKFILL_MINUTES", 1440)
 
 # =========================================================================
 # System monitor (utils/system_monitor.py) — a lightweight, bot-independent
