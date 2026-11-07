@@ -45,6 +45,7 @@ _TT_HISTORY_PAGES = 100        # hard page cap per pass (2,000 rows); the walk
                                # stops as soon as it crosses the watermark
 _TT_HISTORY_MAX_FAILS = 3      # give up on a share after N relay failures
 _TT_RELAYED_CAP = 2000         # persisted relayed-item-id cap
+_TT_REPLAY_REQUEST = "cache/tiktok_replay_request.json"  # operator replay trigger
 
 
 def _pb_varint(n: int) -> bytes:
@@ -340,6 +341,32 @@ def _tt_share_item_id(content: str | None) -> str | None:
     return str(item_id) if item_id else None
 
 
+def _tt_apply_replay_request(tt: dict) -> None:
+    """Apply a one-shot operator replay request (written by
+    ``tools/tiktok_replay.py``) to the in-memory TikTok state.
+
+    The running worker owns the state file, so an external edit would be
+    overwritten on the next save. The request file is the IPC channel: the
+    worker lowers the watermark (and clears the relayed-item dedupe) before
+    its next history pass, then deletes the request."""
+    if not os.path.exists(_TT_REPLAY_REQUEST):
+        return
+    try:
+        with open(_TT_REPLAY_REQUEST, "r", encoding="utf-8") as f:
+            req = json.load(f)
+        watermark = int(req.get("watermark_us") or 0)
+        if watermark > 0:
+            tt["history_watermark_us"] = watermark
+            if req.get("clear_relayed", True):
+                tt["relayed_item_ids"] = []
+            tt["relay_fail_counts"] = {}
+            logger.info("[DirectForward/TT] replay request applied — watermark "
+                        f"rewound to {watermark}")
+        os.remove(_TT_REPLAY_REQUEST)
+    except Exception as e:
+        logger.warning(f"[DirectForward/TT] could not apply replay request: {e}")
+
+
 def _tt_reconcile_interval() -> float:
     """Jittered cadence for the HTTP backlog reconciliation pass."""
     base = max(60, getattr(config, "TIKTOK_DIRECT_RECONCILE_SECONDS", 900))
@@ -570,6 +597,7 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
     retries per item so one poison share cannot wedge the cursor."""
     loop = asyncio.get_event_loop()
     tt = state.setdefault("tiktok", {})
+    _tt_apply_replay_request(tt)
 
     conv_id = tt.get("conv_id")
     source_id = int(tt.get("source_id") or 0)

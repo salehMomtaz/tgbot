@@ -230,6 +230,28 @@ def test_process_message_skips_already_relayed_item():
         tt._tt_relay_share = orig
 
 
+def test_replay_request_rewinds_and_is_consumed():
+    import json as _json
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "req.json")
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump({"watermark_us": 123, "clear_relayed": True}, f)
+    orig = tt._TT_REPLAY_REQUEST
+    try:
+        tt._TT_REPLAY_REQUEST = path
+        state = {"history_watermark_us": 999,
+                 "relayed_item_ids": ["a"], "relay_fail_counts": {"x": 1}}
+        tt._tt_apply_replay_request(state)
+        assert state["history_watermark_us"] == 123
+        assert state["relayed_item_ids"] == []
+        assert state["relay_fail_counts"] == {}
+        assert not os.path.exists(path)  # consumed exactly once
+    finally:
+        tt._TT_REPLAY_REQUEST = orig
+
+
 def _run():
     tests = sorted(
         (n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)

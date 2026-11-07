@@ -632,6 +632,10 @@ MessageBody {
   replays the last day instead of the whole conversation.
 - **The push is not the only ingestion path any more** — the HTTP history read
   above is the authoritative backlog source whenever the push is missed.
+- Older backlogs are opt-in: `venv/bin/python tools/tiktok_replay.py` lists the
+  history with a delivered/not-delivered column; `--since YYYY-MM-DD` writes
+  `cache/tiktok_replay_request.json`, which the running worker consumes on its
+  next pass (it owns the state file, so the request file is the IPC channel).
 
 ## Downloading the shared video
 
