@@ -609,17 +609,37 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     into the JSON at field 8. Dedupe on `server_message_id` (field 3), not the
     ext `s:client_message_id`. **First run primes and skips backlog** (a 15 s
     `prime=True` connect consumes pushes without relaying, then the relay loop
-    takes over) — mirroring X. Shares resolve the author via the public oEmbed
-    endpoint (`tiktok.com/oembed?url=.../video/<itemId>` → `author_url`) and
-    download through the normal yt-dlp pipeline, whose fresh-cookie retry
-    ladder already handles TikTok's stochastic anti-bot challenge — **no
-    headless browser is needed** (see the doc's headless-browser analysis).
+    takes over) — mirroring X. Shares download through the normal yt-dlp
+    pipeline, whose fresh-cookie retry ladder already handles TikTok's
+    stochastic anti-bot challenge — **no headless browser is needed** (see the
+    doc's headless-browser analysis).
+    **The push channel delivers each message exactly ONCE (2026-11-07).** A
+    share sent while the socket was down, or whose relay failed, is never
+    re-pushed (a probe reconnect after the 7 dropped shares received only the
+    ack). Two hard rules follow: (a) a pushed share may only be marked `seen`
+    after its relay actually ran — `_tt_process_message` returns a bool and the
+    caller skips the `seen` bump on False; (b) `_tt_reconcile_backlog` reads
+    the HTTP IM history (`POST https://im-api-sg.tiktok.com/v1/message/get_by_conversation`,
+    protobuf, **no signature needed** — a random `X-Bogus` is accepted) on every
+    connect + every `TIKTOK_DIRECT_RECONCILE_SECONDS` (900, jittered) and
+    replays shares newer than `state["tiktok"]["history_watermark_us"]` that
+    are not in `relayed_item_ids` (itemId dedupe), oldest first. The inbox
+    endpoint `/v2/message/get_by_user_init` supplies the self-DM
+    `conversation_id` + `source_id` (cached in state); page cursor is the MIN
+    `cursor_ts_us` (field 25) of the batch. A failing share is retried and
+    abandoned after 3 strikes so it cannot pin the watermark. **Never resolve
+    the author to build the URL:** the relay uses
+    `https://www.tiktok.com/embed/<itemId>` (yt-dlp accepts it and
+    `download_media` already skips cookies for embed URLs); TikTok's oEmbed
+    stopped returning `author_url` in Nov 2026 and treating that as fatal
+    dropped every share that day. `_tt_resolve_author` is cosmetic only.
+    `_tt_wid`, `_tt_resolve_author` and the HTTP history/inbox calls are SYNC
+    blocking calls — they must always run through `loop.run_in_executor`,
+    never inline on the event loop (a slow TikTok endpoint would freeze
+    pyrogram + the IG/X workers).
     The bot's poll cadence is WS-push-driven, but reconnects still respect the
     jittered `TIKTOK_DIRECT_POLL_SECONDS` interval (via `_tt_poll_interval`),
-    never a fixed cadence. `_tt_wid` and
-    `_tt_oembed_author` are SYNC `requests.get` calls — they must always run
-    through `loop.run_in_executor`, never inline on the event loop (a slow
-    TikTok endpoint would freeze pyrogram + the IG/X workers). The reconnect
+    never a fixed cadence. The reconnect
     knob is `_tt_poll_interval()` (TIKTOK_DIRECT_POLL_SECONDS/JITTER), NOT the
     shared `_poll_interval()` (DIRECT_FORWARD_*) used by IG/X — keep them
     separate.

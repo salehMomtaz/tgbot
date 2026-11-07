@@ -543,11 +543,35 @@ Headers (`ExtValue` list) mirror the web client: `X-Bogus`, `aid=1988`,
 
 ### Acknowledged status codes
 
-- `200001` = command rejected (observed on cmd 300/301). The **conversation
-  list and history-by-conversation reads are NOT usable** on this endpoint
-  build; the push channel is the reliable path.
+- `200001` = command rejected (observed on WS cmd 300/301). The **WebSocket**
+  conversation-list and history reads are NOT usable on this endpoint build;
+  the push channel is the WS ingestion path.
 - cmd 300 with WS-variant body field 300 returned an ack `200001` but the
   server **also pushed** the pending unread self-DM message as cmd 500.
+- **History IS readable over the separate HTTP IM API** (proven 2026-11-07):
+  `POST https://im-api-sg.tiktok.com/v1/message/get_by_conversation` with
+  `Accept/Content-Type: application/x-protobuf`, the cookie header, and query
+  params `aid=1988&version_code=1.0.0&app_name=tiktok_web&device_platform=web_pc&msToken=…&X-Bogus=…`.
+  **Reads need no signature** — the web client sends a RANDOM `X-Bogus` and the
+  server ignores it (same finding as douyin's HAR capture). The request is the
+  `GetByConversationRequest` message (type 301) from
+  `matrix-tiktok/pkg/libtiktok/pb`; `GetInbox` uses
+  `POST /v2/message/get_by_user_init` (type 203, sub_command 10006 for DMs /
+  10002 for groups) to get each conversation's `source_id`.
+- Decoded layout (field numbers differ from the WS envelope):
+  - request: `1=message_type(301)`, `2=sub_command(1)`, `3=client_version`,
+    `4=options(empty)`, `5=platform_flag(3)`, `6=reserved`, `7=git_hash`,
+    `8=payload` → `payload.301` = query,
+    `11=client_platform("web")`, `15=metadata KV`, `18=final_flag(1)`.
+  - query: `1=conversation_id`, `2=direction(1)`, `3=source_id`,
+    `4=reserved(1)`, `5=cursor_ts_us`, `6=count`.
+  - response: `6=payload` → `payload.301` = list; `1` = repeated
+    `ConversationMessageEntry` with `3=server_message_id`, `4=timestamp_us`,
+    `7=sender_uid`, `8=content_json`, `25=cursor_ts_us`.
+  - inbox response: `6=payload` → `payload.203` → `1` = repeated conversation
+    entries with `1=conversation_id`, `5=source_id`.
+  - Page cursor = MIN `cursor_ts_us` in the batch (oldest anchor); entries may
+    arrive newest-first and must be sorted ascending.
 
 ## The push (cmd 500) structure — proven with a real self-DM video share
 
@@ -591,33 +615,40 @@ MessageBody {
 ### Delivery semantics (important!)
 
 - On **first connect**, the server pushes **all currently-unread** messages as
-  cmd 500 (backlog for messages that arrived while the bot was offline).
-- After a message has been pushed once it is **marked delivered** — a
-  subsequent reconnect does **not** re-push it. Therefore the worker must
-  keep a **persistent WS with reconnect** and process pushes as they arrive;
-  reconnects pick up anything that arrived during downtime.
-- The push is the **only** reliable ingestion path here: cmd 300/301 history
-  reads return `200001`.
+  cmd 500. Once pushed, a message is considered delivered: a later reconnect
+  does **not** re-push it, and messages sent while the socket was down can be
+  missed entirely (verified 2026-11-07: a probe connect after 7 skipped shares
+  received only the ack frame, no replay).
+- The worker therefore runs an **HTTP history reconciliation** pass on every
+  connect and every `TIKTOK_DIRECT_RECONCILE_SECONDS` (default 900 s, jittered
+  ±`TIKTOK_DIRECT_POLL_JITTER_PCT`%) while the socket is idle. It fetches the
+  newest pages of the self-DM conversation, relays shares newer than a
+  persisted `history_watermark_us` that are not in `relayed_item_ids`
+  (itemId-level dedupe), oldest first, and advances the watermark only past
+  messages it actually handled. A share that fails is retried on the next pass
+  and abandoned after `_TT_HISTORY_MAX_FAILS` (3) attempts so a poison item
+  cannot pin the cursor. First ever run seeds the watermark to
+  `now - TIKTOK_DIRECT_BACKFILL_MINUTES` (default 1440) so a fresh install
+  replays the last day instead of the whole conversation.
+- **The push is not the only ingestion path any more** — the HTTP history read
+  above is the authoritative backlog source whenever the push is missed.
 
 ## Downloading the shared video
 
 - The share JSON carries only `itemId` + author `uid`, not the author's
-  username. Resolve the username with TikTok's public **oEmbed** endpoint
-  (no signature/cookies needed):
-
-  ```
-  GET https://www.tiktok.com/oembed?url=https://www.tiktok.com/video/<itemId>
-  -> {"author_url":"https://www.tiktok.com/@seedtruth","author_name":"Seed Truth",...}
-  ```
-
-- Canonical yt-dlp URL: `https://www.tiktok.com/@<author_name>/video/<itemId>`.
-  yt-dlp's `TikTokIE._VALID_URL` requires the `@user/video/<id>` form.
+  username. **The author is NOT needed:** yt-dlp's `TikTokIE._VALID_URL`
+  accepts `https://www.tiktok.com/embed/<itemId>`, which is exactly the
+  challenge-free form `normalize_url` already uses, and `download_media`
+  already skips cookies for embed URLs. The worker builds that URL directly.
+- `_tt_resolve_author` is cosmetic (chat header) and best-effort only. TikTok's
+  public oEmbed endpoint **stopped returning `author_url` in Nov 2026**
+  (response now has only `provider_*` + `embed_*` keys); the fallback parses
+  `"uniqueId"` out of the embed page's hydration JSON. A None author must
+  never block a relay — that bug silently dropped every share on 2026-11-07.
 - **TikTok anti-bot is stochastic** ("Unable to extract universal data for
   rehydration"). It is already handled by the existing download pipeline
-  (fresh-cookie retry — `docs/tiktok-download-fix.md`). A fresh
-  `cookie_manager.acquire` snapshot extracts fine when the first attempt
-  fails. Do NOT add a headless-browser dependency for this; the retry ladder
-  is sufficient.
+  (fresh-cookie retry — `docs/tiktok-download-fix.md`). Do NOT add a
+  headless-browser dependency for this; the retry ladder is sufficient.
 
 ## Where this lives in the bot
 
@@ -638,13 +669,20 @@ MessageBody {
   (`_tt_walk`) — the MessageBody has extra group wire types that proto3
   rejects, so only the wanted fields are read and the JSON at field 8 is
   never recursed into.
-- **Dedupe:** `server_message_id` (MessageBody field 3) persisted under
-  `state["tiktok"]["seen_msg_ids"]` (capped at 2000), not the ext
-  `s:client_message_id` — server_message_id is always present and stable.
+- **Dedupe:** two layers. Pushed messages are deduped by `server_message_id`
+  (persisted under `state["tiktok"]["seen_msg_ids"]`, capped at 2000); shares
+  are additionally deduped by `itemId` (`state["tiktok"]["relayed_item_ids"]`)
+  so a push and a history row for the same video relay once. A pushed share is
+  marked seen **only when its relay actually ran** — a failed relay stays
+  unseen and is retried by the history reconciler.
 - **First run primes and skips backlog:** `_tiktok_worker` marks
-  `state["tiktok"]["primed"]`, then a `prime=True` connect consumes anything
-  the server pushes inside a 15 s window WITHOUT relaying (so enabling the
-  relay never floods the chat), then hands off to the relay loop.
+  `state["tiktok"]["primed"]`, seeds `history_watermark_us` to now, then a
+  `prime=True` connect consumes anything the server pushes inside a 15 s
+  window WITHOUT relaying (so enabling the relay never floods the chat), then
+  hands off to the relay loop.
+- Config: `TIKTOK_DIRECT_ENABLED`, `TIKTOK_DIRECT_POLL_SECONDS`,
+  `TIKTOK_DIRECT_POLL_JITTER_PCT`, `TIKTOK_DIRECT_RECONCILE_SECONDS` (900),
+  `TIKTOK_DIRECT_BACKFILL_MINUTES` (1440).
 - Jars: `cookies/tiktok/ttcookies.txt` (config.COOKIE_JARS / `config.TT_COOKIES`),
   already live.
 - Config: `TIKTOK_DIRECT_ENABLED`, `TIKTOK_DIRECT_POLL_SECONDS`,
