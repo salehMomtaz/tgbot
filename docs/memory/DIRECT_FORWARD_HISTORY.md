@@ -814,3 +814,17 @@ inclusive) still never arrived. Full write-up:
   the thumbnail, so the relay delivers the soundtrack (+ cover thumb). A native
   TikTok photo-post path is a separate feature.
 
+
+## 2026-11-07 — TikTok: author lookup was a fatal gate; push is exactly-once
+
+TikTok's oEmbed endpoint stopped returning `author_url`, and the worker treated
+"no author" as fatal — every self-DM share 12:28–12:41 UTC was skipped and then
+recorded as `seen`, i.e. lost (a reconnect probe confirmed pushes are delivered
+exactly once). Fixed by relaying the challenge-free
+`https://www.tiktok.com/embed/<itemId>` URL directly (author = cosmetic only)
+and by only marking a push seen after its relay ran. Added an HTTP IM history
+reconciler (`im-api-sg.tiktok.com`, protobuf, no signature) that replays missed
+shares behind a persisted watermark with itemId dedupe — this also answers
+"can we read already-sent messages?" with **yes**. The 7 dropped shares were
+recovered and delivered on the first post-deploy pass. Full writeup:
+[`tgbot-2026-11-07-tiktok-selfdm-backlog-recovery.md`](tgbot-2026-11-07-tiktok-selfdm-backlog-recovery.md).

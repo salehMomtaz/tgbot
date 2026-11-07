@@ -391,10 +391,13 @@ raw `client.gql.tweet_detail` GraphQL walk scoped to the focal `tweet-<id>`
 entry so thread replies/quote tweets are not over-collected, bypassing twikit
 2.3.3's `User.__init__` `KeyError('urls')`; the old model path is the secondary
 fallback) or a text-only note — never a failed queue task; the
-TikTok worker's `_tt_wid`/`_tt_oembed_author` network calls run through
-`run_in_executor` so a slow endpoint can't freeze the event loop, and its
-reconnect cadence honours `TIKTOK_DIRECT_POLL_SECONDS` via `_tt_poll_interval`
-(no longer the shared `_poll_interval`); the X worker live-reloads the
+TikTok worker's `_tt_wid`/`_tt_resolve_author` plus its HTTP IM
+history/inbox calls run through `run_in_executor` so a slow endpoint can't
+freeze the event loop, its reconnect cadence honours
+`TIKTOK_DIRECT_POLL_SECONDS` via `_tt_poll_interval` (no longer the shared
+`_poll_interval`), and its history reconciler replays missed shares behind a
+persisted watermark (`TIKTOK_DIRECT_RECONCILE_SECONDS`, oldest first, itemId
+dedupe, 3-strike cap); the X worker live-reloads the
 xcookies jar every poll (hash-compare + re-apply, rebuild client + re-prime
 cursor on `twid` change) so a jar re-upload needs no restart. See
 `docs/memory/DIRECT_FORWARD_HISTORY.md` and

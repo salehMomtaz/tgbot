@@ -399,8 +399,12 @@ You can DM media to the bot's **own Instagram, X, and TikTok accounts** and have
 - Send photos, videos, reels, story shares, tweet shares, or plain links from
    your personal account (whitelist or pairing handshake) to the bot's account.
 - TikTok uses a persistent IM-WebSocket connection (`websockets`) to your own
-   self-DM (`0:1:{uid}:{uid}`); shares resolve to authors via the public oEmbed
-   endpoint and download through the normal yt-dlp pipeline.
+   self-DM (`0:1:{uid}:{uid}`) for instant pushes, plus an HTTP IM history
+   reconciler (`im-api-sg.tiktok.com`, protobuf, no signature) that replays any
+   share the push channel missed (it delivers each message exactly once) —
+   every connect and every `TIKTOK_DIRECT_RECONCILE_SECONDS` (default 15 min).
+   Shares download via `https://www.tiktok.com/embed/<id>` and the normal
+   yt-dlp pipeline; author names are cosmetic.
 - The bot relays them into your Telegram chat; links go through the normal
   yt-dlp pipeline (with cookie jars), enqueued behind interactive downloads.
 - Instagram uses `instagrapi`; X uses `twikit` against the **self-DM** method

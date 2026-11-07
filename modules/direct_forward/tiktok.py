@@ -806,10 +806,23 @@ async def test_tiktok_connection() -> str:
         return ("❌ **TikTok**: could not fetch `wid` from the web-cookie-privacy "
                 "endpoint — the session may be stale. Re-upload the jar.")
     ak = _tt_access_key(wid)
-    # Note: TikTok video download via yt-dlp currently has a known upstream issue
-    # (yt-dlp#17403) where the challenge solver fails. The WebSocket connection works,
-    # but video downloads may fail until yt-dlp releases a fix.
+    loop = asyncio.get_event_loop()
+    conv = await loop.run_in_executor(None, _tt_self_dm_conversation, cookies, wid)
+    if not conv:
+        return (f"❌ **TikTok**: WebSocket auth OK (wid `{wid}`) but the HTTP IM "
+                f"inbox did not return the self-DM conversation — the session "
+                f"may be stale. Re-upload the jar.")
+    try:
+        msgs = await loop.run_in_executor(
+            None, _tt_fetch_history, cookies, wid, conv["conv_id"],
+            conv["source_id"], 0, 5)
+        hist = (f"history OK ({len(msgs)} recent message(s) readable)"
+                if msgs else "history reachable but empty")
+    except Exception as e:
+        hist = f"history read FAILED ({type(e).__name__})"
     return (f"✅ **TikTok**: jar OK, `sessionid` present, wid `{wid}`, "
-            f"access_key `{ak}`. The IM WebSocket can authenticate.\n"
-            f"⚠️ **Note**: Video downloads may fail due to a known yt-dlp issue "
-            f"(github.com/yt-dlp/yt-dlp/issues/17403). This is a temporary upstream problem.")
+            f"access_key `{ak}`.\n"
+            f"• IM WebSocket: can authenticate\n"
+            f"• Self-DM backlog: {hist}\n"
+            f"• Relays retry missed shares every "
+            f"`TIKTOK_DIRECT_RECONCILE_SECONDS` (default 900 s).")
