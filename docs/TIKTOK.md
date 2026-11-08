@@ -633,9 +633,27 @@ MessageBody {
 - **The push is not the only ingestion path any more** — the HTTP history read
   above is the authoritative backlog source whenever the push is missed.
 - Older backlogs are opt-in: `venv/bin/python tools/tiktok_replay.py` lists the
-  history with a delivered/not-delivered column; `--since YYYY-MM-DD` writes
+  history with a delivered/not-delivered column.
+  **`--ids <itemId,...>` is the safe recovery mode (2026-11-08):** it writes
+  only `{"item_ids": [...]}` — the watermark is NOT rewound and
+  `relayed_item_ids` is NOT cleared — so the worker relays exactly those ids
+  (wherever they sit in history), skips anything already delivered, persists
+  the pending list before the first relay (crash-durable), and abandons an
+  unavailable id after the normal 3 strikes. A failing targeted id does not
+  block the other requested ids.
+  `--since YYYY-MM-DD` is the WINDOW mode: it rewinds the watermark and clears
+  the dedupe set, so it re-relays every post after that date including ones
+  already delivered. Always `--dry-run` it first. Both modes write
   `cache/tiktok_replay_request.json`, which the running worker consumes on its
   next pass (it owns the state file, so the request file is the IPC channel).
+- **A photo-mode post that delivers nothing must not be recorded as relayed.**
+  `deliver_tiktok_photo` reports failure by RETURNING False, which the queue
+  never propagates; `_tt_relay_share` therefore captures the return value and
+  leaves the itemId retryable (2026-11-08 fix).
+- **The first-run prime no longer exits the worker.** After priming it falls
+  through to the normal relay loop — previously it returned, and because the
+  supervisor starts the worker exactly once, enabling TikTok left it dead until
+  a second restart.
 
 ## Downloading the shared video
 
