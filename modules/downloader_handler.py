@@ -152,22 +152,13 @@ _PHOTO_TELEGRAM_MAX = int(9.5 * 1024 * 1024)
 _IG_CAPTION_LIMIT = 1024  # Telegram's media-caption limit
 
 
-def _instagram_post_caption(post: dict) -> str:
-    """Caption for the first item of a native Instagram post delivery."""
+def _instagram_post_caption(post: dict) -> tuple[list[str], str]:
+    """Return (relay header lines, post caption) — caption is A, header is B."""
     head = f"📷 {post.get('title') or 'Instagram post'}"
     author = (post.get("author") or "").strip()
     if author:
         head = f"{head} — @{author}"
-    parts = [head]
-    body = (post.get("caption") or "").strip()
-    if body:
-        parts.append("")
-        parts.append(body)
-    parts.append(f"\n🔗 {post['url']}")
-    text = "\n".join(parts)
-    if len(text) > _IG_CAPTION_LIMIT:
-        text = text[: _IG_CAPTION_LIMIT - 1].rstrip() + "…"
-    return text
+    return [head, f"🔗 {post['url']}"], (post.get("caption") or "").strip()
 
 
 async def deliver_instagram_post(message: Message, status: RichStream, url: str,
@@ -215,50 +206,72 @@ async def deliver_instagram_post(message: Message, status: RichStream, url: str,
         if not files and not video_items:
             return False
 
-        caption = _instagram_post_caption(post)
+        caption_parts = _instagram_post_caption(post)
         await status.close()
 
         # --- photos: one media group per 10, quote-replying on the first -----
         sendable = [p for p in files if os.path.getsize(p) <= _PHOTO_TELEGRAM_MAX]
         oversized = [p for p in files if os.path.getsize(p) > _PHOTO_TELEGRAM_MAX]
         sent = 0
-        for start in range(0, len(sendable), _MEDIA_GROUP_MAX):
-            chunk = sendable[start:start + _MEDIA_GROUP_MAX]
-            first = sent == 0
-            try:
-                if len(chunk) == 1:
-                    await send_reply_safe(
-                        client.send_photo, reply_to_id if first else None,
-                        chat_id=chat_id, photo=chunk[0],
-                        caption=caption if first else None,
-                    )
+        from modules.direct_forward.common import (
+            _compose_caption, _send_followups, _full_text)
+        header, body = caption_parts
+        caption, followups = _compose_caption(header, body)
+        if sendable:
+            rich_done = False
+            if (len(sendable) <= _MEDIA_GROUP_MAX and not oversized
+                    and len(_full_text(header, body)) > _IG_CAPTION_LIMIT):
+                from utils.rich_media import send_rich_media, send_rich_album
+                if len(sendable) == 1:
+                    rich_done = bool(await send_rich_media(
+                        chat_id, sendable[0], header, body,
+                        reply_to_message_id=reply_to_id))
                 else:
-                    group = [
-                        InputMediaPhoto(
-                            p, caption=caption if (first and j == 0) else "")
-                        for j, p in enumerate(chunk)
-                    ]
-                    await send_reply_safe(
-                        client.send_media_group, reply_to_id if first else None,
-                        chat_id=chat_id, media=group,
-                    )
-                sent += len(chunk)
-            except Exception as e:
-                # One rejected/damaged item must not sink the whole post: fall
-                # back to individual sends and keep the survivors.
-                logger.warning("Instagram media group failed (%s) — sending items "
-                               "individually", e)
-                for j, p in enumerate(chunk):
+                    rich_done = bool(await send_rich_album(
+                        chat_id, [(p, False) for p in sendable], header, body,
+                        reply_to_message_id=reply_to_id))
+                if rich_done:
+                    sent += len(sendable)
+            if not rich_done:
+                for start in range(0, len(sendable), _MEDIA_GROUP_MAX):
+                    chunk = sendable[start:start + _MEDIA_GROUP_MAX]
+                    first = sent == 0
                     try:
-                        await send_reply_safe(
-                            client.send_photo,
-                            reply_to_id if (first and sent == 0 and j == 0) else None,
-                            chat_id=chat_id, photo=p,
-                            caption=caption if (first and sent == 0 and j == 0) else None,
-                        )
-                        sent += 1
-                    except Exception as ie:
-                        logger.warning("Instagram photo send failed: %s", ie)
+                        if len(chunk) == 1:
+                            await send_reply_safe(
+                                client.send_photo, reply_to_id if first else None,
+                                chat_id=chat_id, photo=chunk[0],
+                                caption=caption if first else None,
+                            )
+                        else:
+                            group = [
+                                InputMediaPhoto(
+                                    p, caption=caption if (first and j == 0) else "")
+                                for j, p in enumerate(chunk)
+                            ]
+                            await send_reply_safe(
+                                client.send_media_group, reply_to_id if first else None,
+                                chat_id=chat_id, media=group,
+                            )
+                        sent += len(chunk)
+                    except Exception as e:
+                        # One rejected/damaged item must not sink the whole post: fall
+                        # back to individual sends and keep the survivors.
+                        logger.warning("Instagram media group failed (%s) — sending items "
+                                       "individually", e)
+                        for j, p in enumerate(chunk):
+                            try:
+                                await send_reply_safe(
+                                    client.send_photo,
+                                    reply_to_id if (first and sent == 0 and j == 0) else None,
+                                    chat_id=chat_id, photo=p,
+                                    caption=caption if (first and sent == 0 and j == 0) else None,
+                                )
+                                sent += 1
+                            except Exception as ie:
+                                logger.warning("Instagram photo send failed: %s", ie)
+        if followups and sent:
+            await _send_followups(client, chat_id, followups)
 
         for p in oversized:
             # >10 MB: Telegram refuses it as a photo, so deliver the original
@@ -335,6 +348,34 @@ async def deliver_instagram_post(message: Message, status: RichStream, url: str,
                 pass
 
 
+def _link_caption_parts(url: str, title: str, uploader: str, description: str):
+    """Caption for a user-sent link: post text first (A), metadata last (B)."""
+    from modules.direct_forward.common import _compose_caption
+    header = []
+    if title:
+        header.append(f"🎥 **{title}**")
+    if uploader and uploader not in ("Unknown Artist", "Unknown"):
+        header.append(f"👤 @{uploader}")
+    if url:
+        header.append(f"🔗 {url}")
+    body = (description or "").strip()
+    caption, followups = _compose_caption(header, body)
+    return caption, followups, header, body
+
+
+async def _try_rich_link(chat_id, file_path, action, header, body,
+                         thumb_path=None, duration=None,
+                         reply_to_message_id=None) -> bool:
+    """Long post captions on a direct download go out as one rich message."""
+    if action != "v" or not body:
+        return False
+    from modules.direct_forward.common import _try_rich_media
+    return await _try_rich_media(
+        chat_id, file_path, True, header, body, thumb_path=thumb_path,
+        duration=int(duration) if duration else None,
+        reply_to_message_id=reply_to_message_id)
+
+
 async def show_format_selection(message: Message, status: RichStream, url: str, custom_filename, user_id: int, origin_message_id: int | None = None, premium_client: Client = None):
     """Extract formats for a single media URL and post the selection keyboard.
 
@@ -348,8 +389,9 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
 
     Instagram /p|tv/ posts are probed FIRST (their photos are invisible to
     yt-dlp): when the post holds a photo it is delivered here and no keyboard is
-    shown. Everything else — including video-only Instagram posts — keeps the
-    yt-dlp flow below.
+    shown. TikTok photo-mode/slideshow posts are probed next: they are delivered
+    as [images + caption] followed by the soundtrack (yt-dlp only sees the
+    audio). Everything else keeps the yt-dlp flow below.
     """
     reply_to_id = origin_message_id or message.id
     try:
@@ -359,6 +401,29 @@ async def show_format_selection(message: Message, status: RichStream, url: str, 
             return
     except Exception as e:
         logger.warning("Instagram post delivery crashed for %s: %s", url, e)
+        try:
+            await status.close()
+        except Exception:
+            pass
+
+    try:
+        from utils.downloader.url_normalize import _resolve_tiktok_short_url
+        from utils.downloader.tiktok_photo import tiktok_photo_item_id
+        # Resolve shortlinks WITHOUT the embed rewrite so a /photo/ post stays
+        # detectable (normalize_url would turn it into /embed/<id>).
+        canonical = _resolve_tiktok_short_url(url)
+        photo_id = tiktok_photo_item_id(canonical)
+        if photo_id:
+            from modules.direct_forward.common import deliver_tiktok_photo
+            ok = await deliver_tiktok_photo(
+                message._client, message.chat.id, photo_id,
+                [f"🔗 {canonical}"], "",
+                reply_to_message_id=reply_to_id)
+            if ok:
+                await status.close()
+                return
+    except Exception as e:
+        logger.warning("TikTok photo delivery crashed for %s: %s", url, e)
         try:
             await status.close()
         except Exception:
@@ -624,7 +689,11 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
         if not _sub_enabled and not is_authorized(user_id):
             return
 
-        if is_social_media_link(url):
+        # TikTok photo posts (/@user/photo/<id>) are not in any yt-dlp
+        # _VALID_URL (only video/embed are), so route the whole TikTok domain
+        # through the yt-dlp flow; show_format_selection probes photo posts
+        # first and delivers them as a slideshow + soundtrack.
+        if is_social_media_link(url) or "tiktok.com/" in url.lower():
             # --- YouTube playlist branch (pre-fetch tier selection) ---
             # A pure /playlist URL goes straight to the tier keyboard; a
             # watch?v=&list= URL offers a "just this video" escape too.
@@ -840,20 +909,38 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                 if clean_file_path != file_path:
                     os.rename(file_path, clean_file_path)
 
-                await process_split_and_upload(
-                    bot_client=app,
-                    premium_client=premium_app,
-                    chat_id=callback_query.message.chat.id,
-                    file_path=clean_file_path,
-                    action=action,
-                    title=clean_name,
-                    uploader=uploader,
-                    duration=result['duration'],
-                    thumb_path=thumb_path,
-                    progress_msg=callback_query.message,
-                    reply_to_message_id=cache_data.get("origin_message_id"),
-                    premium_allowed=is_premium_user(user_id),
-                )
+                caption, followups, cap_header, cap_body = _link_caption_parts(
+                    cache_data.get("url"), title, uploader,
+                    result.get("description") or "")
+                rich = await _try_rich_link(
+                    callback_query.message.chat.id, clean_file_path, action,
+                    cap_header, cap_body, thumb_path=thumb_path,
+                    duration=result.get("duration"),
+                    reply_to_message_id=cache_data.get("origin_message_id"))
+                if rich:
+                    try:
+                        await callback_query.message.delete()
+                    except Exception:
+                        pass
+                else:
+                    await process_split_and_upload(
+                        bot_client=app,
+                        premium_client=premium_app,
+                        chat_id=callback_query.message.chat.id,
+                        file_path=clean_file_path,
+                        action=action,
+                        title=title,
+                        uploader=uploader,
+                        duration=result['duration'],
+                        thumb_path=thumb_path,
+                        progress_msg=callback_query.message,
+                        caption=caption,
+                        reply_to_message_id=cache_data.get("origin_message_id"),
+                        premium_allowed=is_premium_user(user_id),
+                    )
+                    if followups:
+                        from modules.direct_forward.common import _send_followups
+                        await _send_followups(app, callback_query.message.chat.id, followups)
                 try:
                     from utils.subscription.quota import increment_quota as _iq3
                     _iq3(user_id)
@@ -1029,21 +1116,34 @@ def register_downloader_handlers(app: Client, premium_app: Client = None):
                         os.rename(file_path, clean_file_path)
 
                     await progress_msg.edit_text(f"📤 Uploading video {idx}/{total}...")
-                    await process_split_and_upload(
-                        bot_client=app,
-                        premium_client=premium_app,
-                        chat_id=chat_id,
-                        file_path=clean_file_path,
-                        action=fmt_type,
-                        title=result["title"],
-                        uploader=result["uploader"],
-                        duration=result["duration"],
+                    caption, followups, cap_header, cap_body = _link_caption_parts(
+                        entry_url, result["title"], result["uploader"],
+                        result.get("description") or "")
+                    rich = await _try_rich_link(
+                        chat_id, clean_file_path, fmt_type, cap_header, cap_body,
                         thumb_path=result["thumb_path"],
-                        progress_msg=progress_msg,
-                        delete_progress_after=False,  # keep the rolling message across videos
-                        reply_to_message_id=origin_id,
-                        premium_allowed=is_premium_user(user_id),
-                    )
+                        duration=result["duration"],
+                        reply_to_message_id=origin_id)
+                    if not rich:
+                        await process_split_and_upload(
+                            bot_client=app,
+                            premium_client=premium_app,
+                            chat_id=chat_id,
+                            file_path=clean_file_path,
+                            action=fmt_type,
+                            title=result["title"],
+                            uploader=result["uploader"],
+                            duration=result["duration"],
+                            thumb_path=result["thumb_path"],
+                            progress_msg=progress_msg,
+                            delete_progress_after=False,  # keep the rolling message across videos
+                            caption=caption,
+                            reply_to_message_id=origin_id,
+                            premium_allowed=is_premium_user(user_id),
+                        )
+                        if followups:
+                            from modules.direct_forward.common import _send_followups
+                            await _send_followups(app, chat_id, followups)
                     try:
                         from utils.subscription.quota import increment_quota as _iqp2
                         _iqp2(user_id)

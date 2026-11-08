@@ -154,29 +154,37 @@ def _chunk_text(text: str, limit: int) -> list[str]:
 
 
 def _full_text(header_lines: list[str], body: str) -> str:
-    """Header + body as the user-visible text (no Telegram limit applied)."""
+    """The post text first, then the relay header (A then B)."""
     header = "\n".join(line for line in (header_lines or []) if line)
     body = (body or "").strip()
     if header and body:
-        return f"{header}\n\n{body}"
-    return header or body
+        return f"{body}\n\n{header}"
+    return body or header
 
 
 def _compose_caption(header_lines: list[str], body: str) -> tuple[str, list[str]]:
-    """Return (media_caption <= 1024, followup_texts). Telegram media captions
-    cap at 1024 chars; the overflow is sent as a single rich text message
-    (``sendRichMessage``, up to 32768 chars) and only chunked into 4096-char
-    plain messages when rich sending is unavailable."""
+    """Return (media_caption <= 1024, followup_texts).
+
+    Order is **post caption first, relay info last** (A then B). Telegram media
+    captions cap at 1024 chars; on overflow the media keeps the head of the
+    caption and the remainder + relay header follow as one rich text message
+    (``sendRichMessage``, up to 32768 chars), chunked into 4096-char plain
+    messages only when rich sending is unavailable.
+    """
     header = "\n".join(line for line in header_lines if line)
+    body = (body or "").strip()
     if not body:
         return header, []
-    full = f"{header}\n\n{body}" if header else body
+    full = f"{body}\n\n{header}" if header else body
     if len(full) <= TELEGRAM_CAPTION_LIMIT:
         return full, []
-    budget = TELEGRAM_CAPTION_LIMIT - len(header) - 4  # "\n\n" + "…"
-    first_body = body[:max(0, budget)] + "…"
-    remainder = body[max(0, budget):]
-    return f"{header}\n\n{first_body}", ([remainder] if remainder else [])
+    # Keep the caption head on the media; the rest of the post text and the
+    # relay info follow as text so the chat still reads A ... B.
+    budget = max(100, TELEGRAM_CAPTION_LIMIT - 2)
+    first_body = body[:budget] + "…"
+    remainder = body[budget:]
+    tail = f"{remainder}\n\n{header}" if header else remainder
+    return first_body, ([tail] if tail.strip() else [])
 
 
 async def _send_followups(bot_client, chat_id: int, followups: list[str]) -> None:
@@ -212,6 +220,92 @@ async def _try_rich_media(chat_id: int, path: str, is_video: bool,
         chat_id, path, header_lines, body, thumb_path=thumb_path,
         duration=duration, reply_to_message_id=reply_to_message_id)
     return bool(mid)
+
+
+async def deliver_tiktok_photo(bot_client, chat_id: int, item_id: str,
+                               header_lines: list[str], body: str = "",
+                               reply_to_message_id=None,
+                               info: dict | None = None) -> bool:
+    """Deliver a TikTok photo-mode post: all slides + caption, then the
+    soundtrack as its own follow-up message.
+
+    Returns False when the item is not a photo post (or nothing was
+    downloadable), so the caller can fall back to the normal video/audio path.
+    """
+    from utils.downloader.tiktok_photo import fetch_embed_info, download_photo_assets
+
+    loop = asyncio.get_event_loop()
+    try:
+        if info is None:
+            info = await loop.run_in_executor(None, fetch_embed_info, item_id)
+        if not info or not info.get("is_photo"):
+            return False
+        caption_body = (body or "").strip()
+        post_caption = (info.get("caption") or "").strip()
+        if post_caption and post_caption not in caption_body:
+            caption_body = (f"{caption_body}\n\n{post_caption}"
+                            if caption_body else post_caption)
+
+        dest = f"cache/tt_photo_{item_id}"
+        files, audio_path, cover_path = await loop.run_in_executor(
+            None, download_photo_assets, info, dest)
+        if not files:
+            return False
+
+        caption, followups = _compose_caption(header_lines, caption_body)
+        rich = False
+        if len(_full_text(header_lines, caption_body)) > TELEGRAM_CAPTION_LIMIT:
+            if len(files) == 1:
+                rich = bool(await send_rich_media(
+                    chat_id, files[0], header_lines, caption_body,
+                    reply_to_message_id=reply_to_message_id))
+            else:
+                rich = bool(await send_rich_album(
+                    chat_id, [(p, False) for p in files], header_lines,
+                    caption_body, reply_to_message_id=reply_to_message_id))
+        if not rich:
+            if len(files) == 1:
+                await bot_client.send_photo(chat_id=chat_id, photo=files[0],
+                                            caption=caption,
+                                            reply_to_message_id=reply_to_message_id)
+            else:
+                from pyrogram.types import InputMediaPhoto
+                group = [InputMediaPhoto(p, caption=caption if j == 0 else "")
+                         for j, p in enumerate(files)]
+                try:
+                    await bot_client.send_media_group(chat_id=chat_id, media=group)
+                except Exception:
+                    sent_any = False
+                    for j, p in enumerate(files):
+                        try:
+                            await bot_client.send_photo(
+                                chat_id=chat_id, photo=p,
+                                caption=caption if not sent_any else "")
+                            sent_any = True
+                        except Exception as e:
+                            logger.warning(f"[DirectForward/TT] photo {j} failed: {e}")
+            await _send_followups(bot_client, chat_id, followups)
+
+        if audio_path:
+            try:
+                await bot_client.send_audio(
+                    chat_id=chat_id, audio=audio_path,
+                    title=(info.get("audio_title") or "TikTok audio")[:64],
+                    performer=(info.get("audio_artist") or "")[:64] or None,
+                    thumb=cover_path,
+                    caption="🎵 Background audio",
+                )
+            except Exception as e:
+                logger.warning(f"[DirectForward/TT] soundtrack send failed: {e}")
+        logger.info(f"[DirectForward/TT] photo post {item_id}: {len(files)} image(s)"
+                    + (", audio sent" if audio_path else ""))
+        return True
+    finally:
+        try:
+            import shutil
+            shutil.rmtree(f"cache/tt_photo_{item_id}", ignore_errors=True)
+        except Exception:
+            pass
 
 
 async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: str,

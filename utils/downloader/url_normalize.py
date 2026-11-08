@@ -20,7 +20,8 @@ def _is_youtube(url: str) -> bool:
 
 # TikTok embed URL workaround (yt-dlp issue #17403)
 # The embed page bypasses the challenge page.
-_TIKTOK_VIDEO_RE = re.compile(r"https?://(?:www\.)?tiktok\.com/@[^/]+/video/(\d+)", re.IGNORECASE)
+_TIKTOK_VIDEO_RE = re.compile(
+    r"https?://(?:www\.)?tiktok\.com/@[^/]+/(?:video|photo)/(\d+)", re.IGNORECASE)
 
 
 def normalize_url(url: str) -> str:
@@ -33,7 +34,9 @@ def normalize_url(url: str) -> str:
       ``/stories/highlights/<id>/`` form.
     * TikTok share shortlinks ``vt./vm./vn.tiktok.com/<code>`` → the canonical
       ``www.tiktok.com/@user/video/<id>`` URL (see :func:`_resolve_tiktok_short_url`).
-    * TikTok video URLs → embed URLs to bypass challenge page (see :func:`_to_tiktok_embed_url`).
+    * TikTok video AND photo URLs → embed URLs to bypass the challenge page
+      (see :func:`_to_tiktok_embed_url`); photo posts are detected separately
+      and delivered as a slideshow + soundtrack.
     """
     m = re.match(r"^https?://(?:www\.)?instagram\.com/s/([A-Za-z0-9\-_+/=]+)", url or "")
     if m:

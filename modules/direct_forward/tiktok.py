@@ -22,6 +22,7 @@ from .state import (
 )
 from .common import (
     _tt_poll_interval, _download_and_deliver, _enqueue_relay, _await_relays, _header_lines,
+    deliver_tiktok_photo,
 )
 
 logger = logging.getLogger(__name__)
@@ -540,14 +541,40 @@ async def _tt_relay_share(item_id: str, content: dict, queue, chat_id,
     ``download_media`` already skips cookies for embed URLs."""
     loop = asyncio.get_event_loop()
     url = f"https://www.tiktok.com/embed/{item_id}"
+    from utils.downloader.tiktok_photo import fetch_embed_info
     try:
-        author = await loop.run_in_executor(None, _tt_resolve_author, item_id)
+        info = await loop.run_in_executor(None, fetch_embed_info, item_id)
     except Exception:
-        author = None
+        info = None
+    author = (info or {}).get("author") or None
+    if not author:
+        try:
+            author = await loop.run_in_executor(None, _tt_resolve_author, item_id)
+        except Exception:
+            author = None
     header = _header_lines("TikTok", "your TikTok self-DM", author, item_id, url)
-    body = str(content.get("content_name") or "")
+    body = str(content.get("content_name") or "").strip()
+    caption = ((info or {}).get("caption") or "").strip()
+    if caption and caption not in body:
+        body = f"{body}\n\n{caption}" if body else caption
     logger.info(f"[DirectForward/TT] share -> {url}"
                 + (f" (by @{author})" if author else ""))
+    if info and info.get("is_photo"):
+        # Photo-mode / slideshow: images + caption, then the soundtrack as a
+        # separate reply (yt-dlp only exposes the audio for these posts).
+        logger.info(f"[DirectForward/TT] photo post {item_id} "
+                    f"({len(info.get('images') or [])} slide(s))")
+        try:
+            await _await_relays([_enqueue_relay(
+                queue, chat_id,
+                lambda: deliver_tiktok_photo(bot_client, chat_id, item_id,
+                                             header, body, info=info))])
+        except Exception as e:
+            logger.error(f"[DirectForward/TT] photo relay failed for itemId {item_id}: {e}")
+            return False
+        if state is not None:
+            _tt_record_relayed(state, item_id)
+        return True
     try:
         # Await the relay so the caller only records the message once it has
         # actually run — otherwise a restart mid-queue drops it forever (see

@@ -57,11 +57,8 @@ def _md_bold_to_html(text: str) -> str:
 
 
 def build_html(header_lines: list[str], body: str) -> str:
-    """Header lines + body as one rich-HTML document (paragraph per block)."""
+    """Post text first, relay header last, as one rich-HTML document."""
     parts: list[str] = []
-    head = "<br>".join(_md_bold_to_html(line) for line in (header_lines or []) if line)
-    if head:
-        parts.append(f"<p>{head}</p>")
     body = (body or "").strip()
     if body:
         if len(body) > RICH_TEXT_LIMIT:
@@ -71,6 +68,9 @@ def build_html(header_lines: list[str], body: str) -> str:
             para = para.strip()
             if para:
                 parts.append(f"<p>{_md_bold_to_html(para).replace(chr(10), '<br>')}</p>")
+    head = "<br>".join(_md_bold_to_html(line) for line in (header_lines or []) if line)
+    if head:
+        parts.append(f"<p>{head}</p>")
     return "".join(parts)
 
 

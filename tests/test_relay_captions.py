@@ -24,8 +24,8 @@ from utils import rich_media  # noqa: E402
 HDR = ["📥 **TikTok DM** from your TikTok self-DM", "🔗 https://example/1"]
 
 
-def test_full_text_joins_header_and_body():
-    assert common._full_text(["a", "b"], "body") == "a\nb\n\nbody"
+def test_full_text_puts_post_text_first():
+    assert common._full_text(["a", "b"], "body") == "body\n\na\nb"
     assert common._full_text([], "body") == "body"
     assert common._full_text(["a"], "") == "a"
 
@@ -33,7 +33,9 @@ def test_full_text_joins_header_and_body():
 def test_short_caption_stays_a_normal_caption():
     caption, followups = common._compose_caption(HDR, "short text")
     assert followups == []
-    assert "short text" in caption and len(caption) <= 1024
+    assert len(caption) <= 1024
+    # A (post text) before B (relay header)
+    assert caption.index("short text") < caption.index("TikTok DM")
 
 
 def test_long_caption_overflow_is_one_rich_block():
@@ -43,6 +45,9 @@ def test_long_caption_overflow_is_one_rich_block():
     # ONE remainder (rich text handles 32k), not many 4096 chunks
     assert len(followups) == 1
     assert len(followups[0]) > 4096
+    # the media caption starts with the post text, never the relay header
+    assert caption.startswith("x") and "TikTok DM" not in caption
+    assert "TikTok DM" in followups[0]  # header travels with the overflow tail
 
 
 def test_try_rich_media_skips_short_text_without_network():
@@ -58,6 +63,8 @@ def test_build_html_escapes_and_bolds():
     assert "&lt;script&gt;" in doc
     assert "a &amp; b" in doc
     assert doc.count("<p>") == 3
+    # post text paragraph comes before the relay header paragraph
+    assert doc.index("a &amp; b") < doc.index("<b>X DM</b>")
 
 
 def test_build_html_truncates_at_the_api_ceiling():
@@ -98,6 +105,63 @@ def test_ig_share_uses_post_url_for_feed_and_reel_for_clips():
     reel = {"item_type": "clip", "clip": {"media": {
         "code": "R1", "product_type": "clips", "user": {"username": "a"}}}}
     assert instagram._ig_resolve_raw(reel)["url"] == "https://www.instagram.com/reel/R1/"
+
+
+def test_tiktok_photo_url_detection():
+    from utils.downloader.tiktok_photo import (
+        is_tiktok_photo_url, tiktok_photo_item_id)
+    assert tiktok_photo_item_id(
+        "https://www.tiktok.com/@mens.guidance/photo/7467226363544554770") == "7467226363544554770"
+    assert is_tiktok_photo_url("https://www.tiktok.com/@a/photo/123/") is True
+    assert is_tiktok_photo_url("https://www.tiktok.com/@a/video/123") is False
+    assert tiktok_photo_item_id(None) is None
+
+
+def test_deliver_tiktok_photo_sends_slides_then_audio():
+    """Slides carry caption A then relay info B; the soundtrack is a separate
+    follow-up message (the feature the operator asked for)."""
+    import tempfile
+    import types
+    from utils.downloader import tiktok_photo as tp
+
+    calls = []
+
+    class FakeBot:
+        async def send_photo(self, **kw):
+            calls.append(("photo", kw.get("caption")))
+
+        async def send_audio(self, **kw):
+            calls.append(("audio", kw.get("title"), kw.get("performer")))
+
+    def fake_download(info, dest):
+        os.makedirs(dest, exist_ok=True)
+        p = os.path.join(dest, "photo_00.jpg")
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8\xff" + b"0" * 100)
+        a = os.path.join(dest, "audio.m4a")
+        with open(a, "wb") as f:
+            f.write(b"\x00" * 50)
+        return [p], a, None
+
+    orig = tp.download_photo_assets
+    try:
+        tp.download_photo_assets = fake_download
+        info = {"is_photo": True, "images": [{"url": "x"}],
+                "caption": "#post caption", "author": "a",
+                "audio_title": "song", "audio_artist": "artist",
+                "audio_url": "u", "audio_cover": None}
+        ok = asyncio.run(common.deliver_tiktok_photo(
+            FakeBot(), 1, "7467226363544554770",
+            ["🔗 https://www.tiktok.com/@a/photo/7467226363544554770"], "",
+            info=info))
+    finally:
+        tp.download_photo_assets = orig
+
+    assert ok is True
+    assert calls[0][0] == "photo"
+    caption = calls[0][1]
+    assert caption.index("#post caption") < caption.index("🔗")
+    assert calls[1] == ("audio", "song", "artist")
 
 
 def _run():
