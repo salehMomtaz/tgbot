@@ -654,6 +654,44 @@ MessageBody {
   (fresh-cookie retry — `docs/tiktok-download-fix.md`). Do NOT add a
   headless-browser dependency for this; the retry ladder is sufficient.
 
+## Photo mode / slideshows (images + background audio)
+
+yt-dlp models a TikTok photo post as **audio only** — the embed extractor's
+"best" format is the soundtrack (`m4a`), and `/@user/photo/<id>` URLs are not in
+any `_VALID_URL` at all. The images live in the embed page's
+`__FRONTITY_CONNECT_STATE__` JSON:
+
+```
+source.data["/embed/<id>"].videoData {
+  itemInfos.text                  # caption
+  authorInfos.uniqueId            # author
+  imagePostInfo.displayImages[]   # [{urlList:[...], width, height}]  original size
+  musicInfos { playUrl[], musicName, authorName, coversLarger[] }
+}
+```
+
+`utils/downloader/tiktok_photo.py::fetch_embed_info` parses that (one page
+fetch, 300 s TTL cache, one 429 retry) and `download_photo_assets` downloads
+every slide (mirror-by-mirror, magic-byte validated), the soundtrack and the
+audio cover. `direct_forward.common.deliver_tiktok_photo` then delivers:
+
+1. all slides in one album (or a rich collage for captions >1024 chars) with
+   **caption A → relay info B**, then
+2. the soundtrack as its **own follow-up message** (`send_audio`, title/artist
+   from `musicInfos`, cover thumb).
+
+Paths that use it:
+- **self-DM**: `_tt_relay_share` fetches the embed info once (author + caption +
+  images) and calls `deliver_tiktok_photo` for photo posts;
+- **direct links**: `show_format_selection` resolves the shortlink *without* the
+  embed rewrite, detects `/@user/photo/<id>`, delivers immediately and skips the
+  format keyboard. `normalize_url` rewrites `/photo/` to `/embed/<id>` as a
+  fallback so `extract_formats` still works.
+
+Verified 2026-11-08 with `@mens.guidance/photo/7467226363544554770`: 6 slides
+(1080×1920), caption `#founderstory #datingapps`, then a 972 KB audio message
+`you not the same — tilekid`.
+
 ## Where this lives in the bot
 
 - `modules/direct_forward.py::_tiktok_worker` — WS client (async `websockets`,

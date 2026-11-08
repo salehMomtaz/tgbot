@@ -949,6 +949,13 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     (`utils/downloader/errors.py`) instead of the misleading layout error.
 
 22. **DM relays carry the post's own text; long captions use a rich message.**
+    **Order is post caption first (A), relay metadata last (B)** — never the
+    reverse. That ordering lives in `direct_forward.common._compose_caption`
+    (media caption + overflow) and `utils/rich_media.build_html` (rich
+    paragraphs), and in the direct-link builders `_link_caption_parts`
+    (`modules/downloader_handler.py`) and `_instagram_post_caption` (returns
+    `(header_lines, body)`); a test asserts A before B in both the plain and
+    rich paths.
     Every direct-forward relay (Instagram / TikTok / X) attaches the post
     caption, not just the media. `download_media` returns `description`
     (yt-dlp's full caption) and `_download_and_deliver` merges it into the
@@ -970,6 +977,28 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     the original CDN media URL. Never downgrade to a preview/thumbnail when a
     full rendition exists — only a genuinely unavailable original may fall
     back to the preview, with the existing warning text.
+    **Direct links get the same treatment** (`queued_transfer_job` +
+    `playlist_job`): the post `description` is A, `🎥 title / 👤 @uploader /
+    🔗 url` is B, passed as an explicit `caption=` (never the filename), with
+    `_try_rich_link` for >1024 chars and `_send_followups` for the tail.
+
+23. **TikTok photo-mode posts = slides + caption, then the soundtrack.**
+    yt-dlp models a TikTok photo carousel as a single `audio` format (the
+    soundtrack) — images are invisible to it. `utils/downloader/tiktok_photo.py`
+    parses the embed page's `__FRONTITY_CONNECT_STATE__` JSON
+    (`source.data["/embed/<id>"].videoData`: `itemInfos.text`,
+    `imagePostInfos.displayImages[].urlList` (original size),
+    `musicInfos.playUrl/musicName/authorName/coversLarger`) and downloads the
+    slides + audio + cover. `direct_forward.common.deliver_tiktok_photo` sends
+    all slides with the caption (rich collage when >1024) and THEN the audio as
+    its own message (`send_audio` with title/performer/cover). It is used by
+    (a) the self-DM worker automatically (`_tt_relay_share` fetches the embed
+    info once and reuses it for author/caption), and (b) direct links:
+    `show_format_selection` resolves the shortlink WITHOUT the embed rewrite,
+    detects `/@user/photo/<id>`, delivers, and skips the format keyboard.
+    `normalize_url` rewrites `/photo/` to the challenge-free `/embed/` form too.
+    The embed page is TTL-cached (300 s) and retried once on HTTP 429 — one
+    share should cost one page fetch. Do NOT rely on yt-dlp for the images.
 
 
 ## Running / testing
