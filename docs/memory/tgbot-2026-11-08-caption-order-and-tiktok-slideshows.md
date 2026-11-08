@@ -111,3 +111,25 @@ Verified live:
 - the 73 MB / 2338-char video: normal 75 MB video with B caption + rich reply
   carrying the full caption;
 - short/no-caption slide (`ZSpBrvAvG`): media with B caption only, no reply.
+
+## Incident during the roll-out (same day) and recovery
+
+An intermediate deploy (commit `ef6b785`) left `deliver_tiktok_photo` calling
+`send_rich_album` after that import had been removed, so two self-DM slide
+pushes raised `NameError: name 'send_rich_album' is not defined` (05:03, 05:17)
+and the reconciler marked the item as given-up. Fixed by the final
+`utils/rich_media.py` cleanup and verified with the direct-link deliveries
+(05:27/05:34). The failed self-DM share was recovered by writing a TikTok
+replay request (`tools/tiktok_replay.py --since 2026-11-08T04:43`) and
+restarting; the reconciler replayed 4 shares at 05:42:
+- `7703976903874481441` → 2 slides + audio (the one that had failed twice),
+- `7699680404181126407` → video,
+- `7691208872274513184` → 1 slide + audio,
+- `7702130875185614113` → video.
+Verified in the chat: photo 103921 carries the relay header only, 103923 is a
+rich reply to it with the caption first and header last, 103924 is the audio.
+
+Lesson: the `relay_fail_counts` 3-strike cap works, but a *code* bug that
+fails deterministically will burn the strike budget — keep an eye on new
+`NameError`/`ImportError` lines after a deploy, and replay the affected window
+once fixed (`tools/tiktok_replay.py`).
