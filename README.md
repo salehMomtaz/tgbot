@@ -405,10 +405,12 @@ You can DM media to the bot's **own Instagram, X, and TikTok accounts** and have
    re-relays old history.
 - **Relays keep the post's text**, not just the media: the caption/description
    is attached to every Instagram/TikTok/X delivery, **post text first and the
-   bot's relay line/URL last**. When it exceeds Telegram's 1024-character
-   caption limit, the bot sends a rich message with the media first and up to
-   32 k characters of text below (Bot API 10.2). Media is always the highest
-   quality the platform exposes.
+   bot's relay line/URL last**. If the text fits Telegram's 1024-character
+   caption limit it rides on the media; if it doesn't, the media is sent
+   normally (so it stays in your Media tab) with just the relay line as its
+   caption, and the full text follows as one **rich text reply** to that media
+   (up to 32 k characters, no splicing). Media is always the highest quality
+   the platform exposes.
 - **TikTok slideshows (photo mode):** you get every slide with the caption and,
    as a separate follow-up message, the post's background audio track.
 - TikTok uses a persistent IM-WebSocket connection (`websockets`) to your own

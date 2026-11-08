@@ -78,3 +78,36 @@ is used only where the work is genuinely separable.
 - Full suite green; `py_compile` on every tracked Python file.
 - Deployed commit: see `git log` (this note ships with it), `NRestarts`
   incremented by the deploy restart only.
+
+## Correction (same day, after operator feedback)
+
+The first implementation put the long caption **inside** a rich message
+(`sendRichMessage` with inline media). Two problems surfaced:
+
+1. **Media-tab loss** — Telegram does not list a rich message's inline media in
+   the chat's Media tab, so the operator's media history lost those posts.
+2. **Upload cap** — `sendRichMessage` media uploads are capped far below normal
+   media. A 73 MB TikTok video (`7705002907258719509`, 2338-char caption) was
+   rejected with `Request Entity Too Large`, and the code silently fell back to
+   the old split caption. Log proof:
+   `[RichMedia] sendRichMessage rejected: Request Entity Too Large` (04:31:41).
+
+Final design (all relays + direct links):
+- ≤1024 chars → one normal media message, caption `A (post text) + B (header)`.
+- >1024 chars → the media is a **normal media message** (Media tab) whose
+  caption is only **B**; the full `A + B` follows as **one rich TEXT reply**
+  (`sendRichMessage`, no media upload) attached to that media message.
+- Text-only tweets use the same rich text path.
+
+Plumbing: `process_split_and_upload` now returns the first sent `Message`;
+every caller passes its id to `_send_followups(..., reply_to_message_id=...)`.
+`utils/rich_media.py` is text-only (inline-media helpers removed on purpose —
+do not reintroduce them; see AGENTS #22).
+
+Verified live:
+- slide link `vt.tiktok.com/ZSpBhe7ff/` (2 slides, 3226-char caption): media
+  group with B caption, then a rich reply (reply_to = first slide) whose first
+  paragraph is the caption and last paragraph is the header;
+- the 73 MB / 2338-char video: normal 75 MB video with B caption + rich reply
+  carrying the full caption;
+- short/no-caption slide (`ZSpBrvAvG`): media with B caption only, no reply.

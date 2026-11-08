@@ -948,39 +948,45 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     Instagram-specific "did not return this post to an anonymous request" message
     (`utils/downloader/errors.py`) instead of the misleading layout error.
 
-22. **DM relays carry the post's own text; long captions use a rich message.**
+22. **DM relays carry the post's own text; long captions reply as rich text.**
     **Order is post caption first (A), relay metadata last (B)** — never the
     reverse. That ordering lives in `direct_forward.common._compose_caption`
-    (media caption + overflow) and `utils/rich_media.build_html` (rich
-    paragraphs), and in the direct-link builders `_link_caption_parts`
-    (`modules/downloader_handler.py`) and `_instagram_post_caption` (returns
-    `(header_lines, body)`); a test asserts A before B in both the plain and
-    rich paths.
+    and `utils/rich_media.build_html`, and in the direct-link builders
+    `_link_caption_parts` (`modules/downloader_handler.py`) and
+    `_instagram_post_caption` (returns `(header_lines, body)`); tests assert
+    A before B in both the plain and rich paths.
     Every direct-forward relay (Instagram / TikTok / X) attaches the post
     caption, not just the media. `download_media` returns `description`
     (yt-dlp's full caption) and `_download_and_deliver` merges it into the
-    body (deduped, so a share title equal to the caption isn't printed twice);
-    IG native delivery already used `media.caption_text`. Telegram media
-    captions cap at **1024** chars, so when the full text is longer the relay
-    sends **one Bot API 10.2 rich message** (`sendRichMessage`) with the media
-    element FIRST (`<figure><video src="tg://video?id=m0">` /
-    `<img src="tg://photo?id=m0">`) and the whole text below (up to 32768
-    chars) — `utils/rich_media.py`, helpers `_try_rich_media` /
-    `send_rich_album` / `send_rich_text`. Photos are capped at 10 MB, videos at
-    the 2 GB Bot API ceiling (the 4 GB premium MTProto path stays classic send
-    + a rich-text follow-up). Rich sending is best-effort: a rejection falls
-    back to the old 1024-char caption + chunked follow-ups, so the bot works on
-    any Bot API version. **Highest available quality is mandatory**: yt-dlp
+    body (deduped); IG native delivery already used `media.caption_text`.
+    **Long captions never touch the media message and never splice**
+    (2026-11-08 correction — do NOT reintroduce inline rich media):
+    * ≤1024 chars → ONE normal media message with `A + "\n\n" + B`.
+    * >1024 chars → the media is a **normal media message** (so it stays in
+      Telegram's **Media tab**) whose caption is **only B**; the full
+      `A + "\n\n" + B` then goes out as **one rich text reply**
+      (`send_rich_text` → `sendRichMessage` with no media upload) attached to
+      that message via `reply_to_message_id`. `sendRichMessage` media uploads
+      have a much smaller cap than normal media (a 73 MB video was rejected
+      with "Request Entity Too Large") and rich inline media does not appear
+      in the Media tab — this is why the split/rich-media approaches were
+      abandoned. Every caller must pass the media message id:
+      `process_split_and_upload` returns the first sent `Message`; plain
+      `send_photo/send_video/send_audio/send_document` calls are captured too.
+    * Long **text-only** tweets take the same rich text path.
+    `_send_followups(bot_client, chat_id, followups, reply_to_message_id=...)`
+    is the only overflow sender; it chunks into 4096-char plain messages only
+    if the rich call is rejected.
+    **Highest available quality is mandatory**: yt-dlp
     picks `bestvideo+bestaudio`; instagrapi already selects the largest video
     rendition and the largest `image_versions2` candidate (do not "fix" it by
     reading `thumbnail_url` as if it were a thumbnail); X uses `videos[0]` and
     the original CDN media URL. Never downgrade to a preview/thumbnail when a
-    full rendition exists — only a genuinely unavailable original may fall
-    back to the preview, with the existing warning text.
+    full rendition exists.
     **Direct links get the same treatment** (`queued_transfer_job` +
     `playlist_job`): the post `description` is A, `🎥 title / 👤 @uploader /
     🔗 url` is B, passed as an explicit `caption=` (never the filename), with
-    `_try_rich_link` for >1024 chars and `_send_followups` for the tail.
+    the same media-then-rich-reply rule.
 
 23. **TikTok photo-mode posts = slides + caption, then the soundtrack.**
     yt-dlp models a TikTok photo carousel as a single `audio` format (the
