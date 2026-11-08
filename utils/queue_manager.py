@@ -23,6 +23,10 @@ class QueueTask:
     coroutine: Callable[[], Awaitable]    # Zero-argument async function to run when ready
     task_id: str = field(default_factory=lambda: uuid4().hex)
     priority: int = 1                     # subscription priority (0=free, 3=pro)
+    # Called when a QUEUED (not yet running) task is dropped, e.g. by "Abort
+    # Operations". Relay callers use it to resolve the future their worker is
+    # awaiting — a dropped task must never leave that future pending forever.
+    on_cancel: Callable[[], None] | None = None
 
 class DownloadQueue:
     """
@@ -35,7 +39,8 @@ class DownloadQueue:
         self._active = False              # Indicates if a task is currently executing
         self._worker_task: asyncio.Task | None = None  # strong ref (GC + crash visibility)
 
-    async def add_task(self, user_id: int, message, coroutine, priority: int | None = None) -> str:
+    async def add_task(self, user_id: int, message, coroutine, priority: int | None = None,
+                       on_cancel: Callable[[], None] | None = None) -> str:
         """Enqueue a task and run it immediately if the engine is idle.
 
         priority: 0 (free) .. 3 (pro). Higher priority jumps ahead of lower ones.
@@ -64,6 +69,7 @@ class DownloadQueue:
             # `or 1` used to coerce the FREE tier's legitimate priority 0 into
             # 1, so free users were never actually last. Keep 0 when given 0.
             priority=int(priority) if priority is not None else 1,
+            on_cancel=on_cancel,
         )
 
         rejected = False

@@ -78,9 +78,22 @@ async def _admin_callback_dispatch(client: Client, callback_query: CallbackQuery
         await callback_query.answer("Console closed.")
 
     elif data == "admin_abort_queue":
-        queue_len = len(queue._pending)
+        dropped = list(queue._pending)
         queue._pending.clear()
-        queue._active = False
+        # Resolve the future each dropped relay's worker is awaiting. Without
+        # this, a worker blocked in _await_relays never resumed and the DM
+        # relays stayed dead until a restart. Do NOT clear _active: the job
+        # that is currently running is still executing, and the worker's
+        # finally-block resets the flag (clearing it here spawned a SECOND
+        # worker → two parallel downloads).
+        for task in dropped:
+            cb = getattr(task, "on_cancel", None)
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
+        queue_len = len(dropped)
 
         # Stop every long-running background loop for a short grace period.
         # The flag is a *transient pause* (self-clears after

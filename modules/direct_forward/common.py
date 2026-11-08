@@ -413,6 +413,14 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
 _relay_submit_tasks: set = set()
 
 
+class _RelayAborted(Exception):
+    """A queued relay was dropped (Abort Operations / queue-full rejection).
+
+    Deliberately an Exception (not CancelledError): ``_await_relays`` re-raises
+    it and each worker's ``except Exception`` leaves the item un-marked so the
+    next pass retries it — at-least-once survives an operator abort."""
+
+
 def _enqueue_relay(queue, user_chat_id: int, corofn_factory) -> "asyncio.Future":
     """Enqueue one relay job on the shared download queue; return a Future that
     resolves only once the job has actually RUN (or raised).
@@ -428,6 +436,11 @@ def _enqueue_relay(queue, user_chat_id: int, corofn_factory) -> "asyncio.Future"
     claims."""
     loop = asyncio.get_running_loop()
     done: "asyncio.Future" = loop.create_future()
+
+    def _abort() -> None:
+        # Dropped from the queue (Abort Operations) before it could run.
+        if not done.done():
+            done.set_exception(_RelayAborted("relay dropped from the queue"))
 
     async def _run():
         try:
@@ -446,8 +459,14 @@ def _enqueue_relay(queue, user_chat_id: int, corofn_factory) -> "asyncio.Future"
 
     async def _submit():
         try:
-            await queue.add_task(user_id=user_chat_id,
-                                 message=_NullStatusMessage(), coroutine=_run)
+            task_id = await queue.add_task(user_id=user_chat_id,
+                                           message=_NullStatusMessage(),
+                                           coroutine=_run, on_cancel=_abort)
+            if not task_id and not done.done():
+                # add_task rejects (returns "") when the queue depth cap is hit
+                # — the coroutine will never run, so resolve the future instead
+                # of leaving the caller blocked forever.
+                done.set_exception(_RelayAborted("download queue is full"))
         except asyncio.CancelledError:
             if not done.done():
                 done.cancel()

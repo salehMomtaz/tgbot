@@ -100,10 +100,10 @@ def _ig_resolve_raw(item: dict) -> dict | None:
         am = re.search(r"@([A-Za-z0-9_.]+)", aux)
         if am:
             author = am.group(1)
-        if not author and xma_entries:
-            author = xma_entries[0].get("header_title_text")
+        if not author and entries:
+            author = entries[0].get("header_title_text")
         return {"kind": "ig_pk", "pk": int(pk), "author": author,
-                "preview": xma_entries[0].get("preview_url") if xma_entries else None}
+                "preview": entries[0].get("preview_url") if entries else None}
 
     # 3) Direct media attachment (photo / video uploaded into the chat)
     media = item.get("media") or item.get("visual_media")
@@ -943,6 +943,11 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 return
             state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
             state_dirty = False
+            # Reset the burst counter EVERY poll. It was initialised once before
+            # the loop, so after the cap (IG_DIRECT_BACKFILL_MAX_ITEMS) was hit
+            # `burst_pace` returned -1 for the rest of the process lifetime and
+            # the IG backlog never drained until a restart.
+            delivered_in_run = 0
             try:
                 threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
                 if not getattr(_instagram_worker, "_logged_inbox", False):

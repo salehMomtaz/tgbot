@@ -24,6 +24,7 @@ from .state import (
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
     _enqueue_relay, _await_relays, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
+    _full_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -1010,6 +1011,11 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                     fail_counts[mid] = n
                     logger.error(f"[DirectForward/X] message {m['id']} failed (attempt {n}): {e}")
                     if n < 3:
+                        # Persist the strike BEFORE breaking: the save below is
+                        # inside the loop, so an unpersisted counter restarted at
+                        # 1 every poll and the 3-strike give-up never fired —
+                        # one bad tweet wedged the whole X relay forever.
+                        await _state_save_owned(state, {"x"})
                         break  # do not advance past it — retried next poll
                     logger.warning(f"[DirectForward/X] message {m['id']} failed 3x — skipping "
                                    f"to unblock the queue (cursor advanced).")
