@@ -355,7 +355,15 @@ def _tt_apply_replay_request(tt: dict) -> None:
     try:
         with open(_TT_REPLAY_REQUEST, "r", encoding="utf-8") as f:
             req = json.load(f)
+        item_ids = [str(x) for x in (req.get("item_ids") or []) if x]
         watermark = int(req.get("watermark_us") or 0)
+        if item_ids:
+            # Targeted recovery: relay ONLY these itemIds, wherever they sit in
+            # history. The watermark and the relayed-item dedupe are untouched,
+            # so an already-delivered share in any window is never re-sent.
+            tt["replay_item_ids"] = item_ids
+            logger.info(f"[DirectForward/TT] targeted replay request applied — "
+                        f"{len(item_ids)} itemId(s)")
         if watermark > 0:
             tt["history_watermark_us"] = watermark
             if req.get("clear_relayed", True):
@@ -363,7 +371,8 @@ def _tt_apply_replay_request(tt: dict) -> None:
             tt["relay_fail_counts"] = {}
             logger.info("[DirectForward/TT] replay request applied — watermark "
                         f"rewound to {watermark}")
-        os.remove(_TT_REPLAY_REQUEST)
+        if item_ids or watermark > 0:
+            os.remove(_TT_REPLAY_REQUEST)
     except Exception as e:
         logger.warning(f"[DirectForward/TT] could not apply replay request: {e}")
 
@@ -564,13 +573,25 @@ async def _tt_relay_share(item_id: str, content: dict, queue, chat_id,
         # separate reply (yt-dlp only exposes the audio for these posts).
         logger.info(f"[DirectForward/TT] photo post {item_id} "
                     f"({len(info.get('images') or [])} slide(s))")
+        # deliver_tiktok_photo reports "nothing delivered" by RETURNING False
+        # (no downloadable slide), not by raising. Capture that: the queue only
+        # propagates exceptions, so the old code recorded the itemId as relayed
+        # even when nothing was sent — the post was then deduped forever and the
+        # reconciler never retried it.
+        outcome = {"ok": False}
+
+        async def _photo_job():
+            outcome["ok"] = await deliver_tiktok_photo(
+                bot_client, chat_id, item_id, header, body, info=info)
+
         try:
-            await _await_relays([_enqueue_relay(
-                queue, chat_id,
-                lambda: deliver_tiktok_photo(bot_client, chat_id, item_id,
-                                             header, body, info=info))])
+            await _await_relays([_enqueue_relay(queue, chat_id, _photo_job)])
         except Exception as e:
             logger.error(f"[DirectForward/TT] photo relay failed for itemId {item_id}: {e}")
+            return False
+        if not outcome["ok"]:
+            logger.error(f"[DirectForward/TT] photo relay delivered nothing for itemId "
+                         f"{item_id} — left for backlog retry")
             return False
         if state is not None:
             _tt_record_relayed(state, item_id)
@@ -624,7 +645,6 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
     retries per item so one poison share cannot wedge the cursor."""
     loop = asyncio.get_event_loop()
     tt = state.setdefault("tiktok", {})
-    _tt_apply_replay_request(tt)
 
     conv_id = tt.get("conv_id")
     source_id = int(tt.get("source_id") or 0)
@@ -636,6 +656,14 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
         conv_id, source_id = conv["conv_id"], conv["source_id"]
         tt["conv_id"], tt["source_id"] = conv_id, source_id
 
+    # Apply AFTER the conversation resolved: the request file is consumed on
+    # apply, so a failed conv lookup (stale session) must not swallow it.
+    _tt_apply_replay_request(tt)
+    if tt.get("replay_item_ids"):
+        # Persist the recovery list BEFORE the first relay: the request file is
+        # already gone, so a crash mid-pass would otherwise lose the remainder.
+        await _state_save_owned(state, {"tiktok"})
+
     backfill_min = max(1, int(getattr(config, "TIKTOK_DIRECT_BACKFILL_MINUTES", 1440)))
     watermark = int(tt.get("history_watermark_us") or 0)
     if watermark <= 0:
@@ -645,6 +673,11 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
     relayed = list(tt.get("relayed_item_ids") or [])
     relayed_set = set(relayed)
     fails = dict(tt.get("relay_fail_counts") or {})
+    # Targeted recovery (tools/tiktok_replay.py --ids): itemIds to relay
+    # regardless of the watermark. Dedupe still applies, so nothing that was
+    # already delivered is re-sent.
+    replay_pending = {str(x) for x in (tt.get("replay_item_ids") or []) if x}
+    replay_found: set[str] = set()
 
     msgs: list[dict] = []
     cursor = 0
@@ -662,7 +695,13 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
             truncated = False
             break
         msgs.extend(page)
-        if min(m["ts_us"] for m in page) <= watermark:
+        for m in page:
+            iid = _tt_share_item_id(m.get("content"))
+            if iid and iid in replay_pending:
+                replay_found.add(iid)
+        # Keep walking past the watermark only while a targeted itemId has not
+        # been located yet (bounded by _TT_HISTORY_PAGES).
+        if min(m["ts_us"] for m in page) <= watermark and not (replay_pending - replay_found):
             truncated = False
             break
         cursor = min((m["cursor_ts_us"] for m in page if m["cursor_ts_us"]), default=0)
@@ -678,13 +717,15 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
 
     new_watermark = watermark
     for m in msgs:
-        if m["ts_us"] <= watermark:
-            continue
         item_id = _tt_share_item_id(m.get("content"))
+        in_replay = bool(item_id) and item_id in replay_pending
+        if m["ts_us"] <= watermark and not in_replay:
+            continue
         if not item_id:
             new_watermark = max(new_watermark, m["ts_us"])
             continue
         if item_id in relayed_set:
+            replay_pending.discard(item_id)   # already delivered — never re-send
             new_watermark = max(new_watermark, m["ts_us"])
             continue
         if fails.get(item_id, 0) >= _TT_HISTORY_MAX_FAILS:
@@ -693,6 +734,7 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
             relayed_set.add(item_id)
             relayed.append(item_id)
             fails.pop(item_id, None)
+            replay_pending.discard(item_id)
             new_watermark = max(new_watermark, m["ts_us"])
             continue
         try:
@@ -705,6 +747,7 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
             relayed_set.add(item_id)
             relayed.append(item_id)
             fails.pop(item_id, None)
+            replay_pending.discard(item_id)
             new_watermark = max(new_watermark, m["ts_us"])
         else:
             fails[item_id] = fails.get(item_id, 0) + 1
@@ -714,10 +757,31 @@ async def _tt_reconcile_backlog(cookies: dict[str, str], wid: str, queue,
                 relayed_set.add(item_id)
                 relayed.append(item_id)
                 fails.pop(item_id, None)
+                replay_pending.discard(item_id)
                 new_watermark = max(new_watermark, m["ts_us"])
                 continue
             # Keep the watermark before the failed share so the next pass retries it.
+            if in_replay and m["ts_us"] <= watermark:
+                # Targeted recovery of an older item: its failure must not block
+                # the OTHER requested itemIds (they are an explicit set, not a
+                # chronological cursor). It stays in replay_pending and is
+                # retried on the next pass; the watermark is below it anyway.
+                continue
             break
+
+    # An itemId requested for targeted replay that the history walk never saw
+    # was deleted/private — stop asking for it (but only when the walk really
+    # covered the whole window; a truncated walk may simply not have reached it).
+    if not truncated and replay_pending:
+        missing = replay_pending - replay_found
+        if missing:
+            logger.warning("[DirectForward/TT] replay: itemId(s) absent from history "
+                           f"(deleted/private?): {', '.join(sorted(missing)[:10])}")
+            replay_pending -= missing
+    if replay_pending:
+        tt["replay_item_ids"] = sorted(replay_pending)
+    else:
+        tt.pop("replay_item_ids", None)
 
     tt["history_watermark_us"] = int(new_watermark)
     tt["relayed_item_ids"] = relayed[-_TT_RELAYED_CAP:]
@@ -861,7 +925,10 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
                              seen, prime=True)
         except Exception as e:
             logger.warning(f"[DirectForward/TT] priming connect failed: {e}")
-        return
+        # Do NOT return here: the supervisor starts this worker exactly ONCE
+        # (asyncio.gather), so returning left TikTok dead until a second
+        # restart — the console "enable" toggle only restarts the bot once.
+        # Fall through to the normal relay loop (prime already recorded).
 
     logger.info(f"[DirectForward/TT] listening for TikTok self-DM pushes "
                 f"(reconnect jittered ±{config.TIKTOK_DIRECT_POLL_JITTER_PCT}%).")
@@ -880,7 +947,12 @@ async def _tiktok_worker(bot_client, premium_client, chat_id: int, queue) -> Non
 
 
 async def test_tiktok_connection() -> str:
-    """Admin-console self-test: jar presence, sessionid, wid + access_key."""
+    """Admin-console self-test: jar, sessionid, wid, and live HTTP IM inbox.
+
+    Deliberately does NOT connect the IM WebSocket: a ``wid``/access_key proves
+    the socket *credentials* are derivable, not that the socket is connected.
+    The HTTP inbox + history read below is the strongest non-intrusive proof
+    (the live worker owns the only WS connection)."""
     cookies = _tt_jar_cookies()
     if not cookies:
         return ("❌ **TikTok**: no `cookies/tiktok/ttcookies.txt` jar. Upload one "
@@ -909,7 +981,7 @@ async def test_tiktok_connection() -> str:
         hist = f"history read FAILED ({type(e).__name__})"
     return (f"✅ **TikTok**: jar OK, `sessionid` present, wid `{wid}`, "
             f"access_key `{ak}`.\n"
-            f"• IM WebSocket: can authenticate\n"
+            f"• IM WebSocket credentials: derivable (socket probed by the live worker, not here)\n"
             f"• Self-DM backlog: {hist}\n"
             f"• Relays retry missed shares every "
             f"`TIKTOK_DIRECT_RECONCILE_SECONDS` (default 900 s).")
