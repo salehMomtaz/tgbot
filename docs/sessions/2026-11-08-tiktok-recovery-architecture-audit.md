@@ -126,3 +126,141 @@ run; the only absent one is the deleted post.
   TikTok "WS connected + cmd-1001 sent", no traceback.
 
 (Continued in §7+ — audit findings, validation, secret scan.)
+
+## 7. Fifteen-day operational error groups
+
+Log coverage available on this box is 2026-10-28 15:50 → now (11 days; older
+rotations are gone). 1,300 warning/error lines collapse to these signatures:
+
+| signature | n | classification |
+|---|---|---|
+| `upload.SaveBigFilePart` "waiting N seconds" (pyrogram) | 1,139 | **expected/external** — Telegram upload throttle |
+| `Unable to connect / Connection failed` (pyrogram) | 79 | **expected/external** — network blips, self-heals |
+| CookieRefresh "headless profile seen as a NEW device (ttwid/datr/ig_did/mid differ)" | 16 | **expected** — device-identity exclusion working as designed |
+| `[DirectForward/X] … No video could be found in this tweet` | 8 | **expected/external** — text-only tweets; the *relay* was broken (see F-04, fixed) |
+| `[DirectForward/TT] could not resolve author … skipped` | 7 | **already resolved** (2026-11-07, `cd14fea`); chat scan proves delivery |
+| `[DirectForward/X] self-DM conversation fetch failed` | 5 | **expected/external** — transient X API; retried |
+| Cookie jar "last warm 26-30d ago" | 9 | **deferred** — IG session freshness; operator jar upload |
+| `[TikTokPhoto] embed <id> -> HTTP ?` | 4 | **expected/external** — the deleted post (203008) |
+| `[DirectForward/X] … relaying text-only` | 3 | **fixed** (F-04) |
+| `send_rich_album is not defined` | 3 | **already resolved** at HEAD (`62c350f`); F-01 hardened the silent-success sibling |
+| `[TikTok] Video not available 203008` | 3 | **expected/external** — deleted source |
+| `item … failed: name 'xma_entries' is not defined` | 2 | **fixed** (F-05) — real IG relay loss on 11-08 03:30/03:37 |
+| `model fallback fetch failed: 'urls'` | 2 | **deferred** — twikit model quirk; the GraphQL walk is the primary path and handled it |
+| `backlog: giving up on itemId … after 3 failed relays` | 2 | **expected** — deliberate 3-strike abandonment (one is the deleted post) |
+| `Instagram post read failed: Instagram required/refused` | 2 | **expected/external** — login-walled IG post, documented message |
+
+## 8. Source coverage checklist
+
+| batch | files | status |
+|---|---|---|
+| entry/config | `main.py`, `config.py`, `.env.example`, `requirements.txt`, `utils/updater.py` | ✅ |
+| downloader runtime | `modules/downloader_handler.py`, `utils/downloader/*` | ✅ |
+| streaming/subscription | `stream_handler.py`, `stream_interceptor.py`, `modules/subscription/*` | ✅ |
+| admin console | `modules/admin/*` | ✅ |
+| friend media | `modules/friend_media/*` | ✅ |
+| extras | `modules/github|youtube|translate|web/*` | ✅ |
+| direct-forward | `tiktok/instagram/twitter/common/state/supervisor`, `xchat_bridge.mjs`, bridge wrapper | ✅ |
+| utilities | `queue_manager`, `uploader_handler`, `cookie_manager/refresher/history`, `logger/*`, `security`, `rich_media/stream`, `filenames`, `shared`, `gate`, `pot_provider`, `ig_anti_detect`, `premium_session` | ✅ |
+| operations | `install.sh`, `run.sh`, `uninstall.sh`, `deploy/*.service`, `cmd/tgbot-monitor/*`, `utils/system_monitor.py` | ✅ |
+| tests | all 9 `tests/test_*.py` | ✅ |
+
+Mechanical scans run as leads: `py_compile` (clean), `pyflakes` (19 findings →
+all undefined names fixed; remainder are unused locals, P3), `ruff --select
+F,E9,B`, `vulture`, plus targeted greps for TODO/FIXME, removed-runtime
+references (Bale/aiogram/admin_webapp/MQTT: **0 runtime hits**), config drift and
+protected-cache files.
+
+## 9. Findings (deduplicated)
+
+Format: `ID | severity | status | file:line | evidence | impact | recommendation | risk/effort`
+
+| ID | sev | status | file:line | evidence | impact | recommendation | risk/effort |
+|---|---|---|---|---|---|---|---|
+| F-01 | P1 | fixed | `modules/direct_forward/tiktok.py:562` | `deliver_tiktok_photo` returns False on "no files"; queue propagates only exceptions | photo post recorded as relayed → deduped forever | capture the return value | low/low |
+| F-02 | P1 | fixed | `tiktok.py:859` | prime branch ended with `return`; supervisor starts the worker once | TikTok relay dead after first enable until a 2nd restart | fall through to the loop | low/low |
+| F-03 | P1 | fixed | `modules/direct_forward/twitter.py:722` | `_full_text` used, not imported (pyflakes) | NameError on every text-only tweet | import it + test | low/low |
+| F-04 | P1 | fixed | `twitter.py:1012` | `break` before the only `_state_save_owned` | strike counter reset each poll → X cursor wedged forever | persist before break | low/low |
+| F-05 | P1 | fixed | `modules/direct_forward/instagram.py:103` | `xma_entries` undefined (pyflakes); log 11-08 03:30/03:37 | pk-only story/highlight relay crashes | use `entries` | low/low |
+| F-06 | P1 | fixed | `modules/admin/callback_dispatch.py:81` | `_pending.clear()` + `_active=False`, futures resolved only inside the task | Abort left workers blocked forever + double worker | `on_cancel` hook; leave `_active` | low/low |
+| F-07 | P1 | fixed | `modules/direct_forward/common.py:455` | `add_task` returns "" on depth cap; future never resolved | relay caller waits forever | resolve with `_RelayAborted` | low/low |
+| F-08 | P1 | fixed | `utils/gate.py:42` | corrupt DB → `return default_db`, next mutation persists it | silent wipe of authorized/blacklist/premium | quarantine copy + loud log | low/low |
+| F-09 | P1 | fixed | `utils/cookie_refresher.py:405` | deleted `direct_ig_session.json` on every IG refresh (log 07:40) | new randomized device per day → AGENTS #13 churn/ban risk | clear only when sessionid changes | low/low |
+| F-10 | P2 | fixed | `modules/admin/register.py:526` | `startswith("waiting_for_replace_")` also matches per-site state; first handler breaks the group | per-site jar upload unreachable | exclude the per-site prefix | low/low |
+| F-11 | P2 | fixed | `tools/tiktok_replay.py:132` | `--since` clears `relayed_item_ids` and rewinds the watermark | uncontrolled duplicate replay | new `--ids` targeted mode | low/low |
+| F-12 | P2 | fixed | `tiktok.py:627` | replay request deleted before the conv resolved | stale session swallows the request | apply after conv resolve | low/low |
+| F-13 | P2 | fixed | `tiktok.py:882` | "IM WebSocket: can authenticate" derived from wid only | misleading health check | honest wording | low/low |
+| F-14 | P2 | fixed | `utils/downloader/download.py:308` | `e` used after its except block (PEP 3110) | UnboundLocalError on empty yt-dlp message | use `error_msg` | low/low |
+| F-15 | P2 | fixed | `tools/start_xchat_bridge.sh:126` | `BRIDGE_RUNNING=1` forever after a Deno `exit` | X relay silently dead until unit restart | `kill -0` liveness check | low/low |
+| F-16 | P2 | fixed | `modules/direct_forward/instagram.py:937` | `delivered_in_run` initialised once, never reset | IG backlog never drains after the cap | reset per poll | low/low |
+| F-17 | P3 | fixed | `xchat_bridge.mjs:75` | `writeFileSync(STATE, …)` non-atomic | truncated cursor → re-prime past backlog | tmp + rename | low/low |
+| F-18 | P2 | deferred | `modules/direct_forward/instagram.py:998` | `activity[act_key] = act_now` saved before the relay | an item that fails is not retried until the thread sees new activity | restore the prior stamp when any item failed | medium/medium |
+| F-19 | P2 | deferred | `modules/friend_media/instagram.py:770` | watermark advances to newest pk when `delivered` (any success) | a mid-batch failure is skipped forever | advance per delivered pk | medium/medium |
+| F-20 | P2 | deferred | `utils/ig_anti_detect.py:552` | `cold_start_jitter` awaits blocking instagrapi calls on the loop | freezes pyrogram + X/TikTok for 60-90 s per IG login | `run_in_executor` | low/medium |
+| F-21 | P2 | deferred | `modules/direct_forward/instagram.py:521` | `_ig_resolve_user_id` (private API) called inline in `_ig_process_message` | 2-4 s loop stall per IG DM | executor + cache | low/medium |
+| F-22 | P2 | deferred | `utils/cookie_refresher.py:75`, `utils/cookie_history.py:79`, `utils/ig_anti_detect.py:99` | `#HttpOnly_` lines skipped before the prefix test, so the HttpOnly branch is unreachable | Chrome-exported jars lose HttpOnly cookies (incl. `sessionid` fingerprint) | strip the prefix before the `#` skip | low/low |
+| F-23 | P2 | deferred | `modules/admin/callback_dispatch.py:558` | restore/savebackup ignore `cookie_key`, always use the YT backup | a stale IG "restore" button copies the YouTube backup over the IG jar | per-jar backup paths | low/medium |
+| F-24 | P2 | deferred | `run.sh:78` | unconditional `pip install -r requirements.txt` before `exec` | a PyPI blip at boot crash-loops the unit | guard/fail-soft | medium/low |
+| F-25 | P2 | deferred | `uninstall.sh:58` | does not disable `tgbot-xchat-bridge`, remove `build/`, `node_modules/`, the LE hook | incomplete uninstall leaves a running unit | mirror install.sh | low/low |
+| F-26 | P3 | deferred | `utils/system_monitor.py:43` | pidfile check is `os.kill(pid,0)` only; docstring claims a cmdline check | recycled PID → monitor never spawns | implement the `/proc` cmdline check | low/low |
+| F-27 | P3 | deferred | `utils/logger/queued_channel.py:112` | `plain` fallback reuses the rich (>4096) text | the documented plain fallback cannot succeed for long entries | truncate the plain text | low/low |
+| F-28 | P3 | deferred | 9 sites | unused locals (`pyflakes`) | none at runtime | remove when touched | low/low |
+
+### Dead code with proof
+
+Zero non-definition references (`grep -rn` across tracked `*.py`, excluding
+`learn/`): `utils/shared.py::get_setting_bytes`, `utils/shared.py::wait_for_stop`,
+`utils/security.py::is_safe_username`, `utils/cookie_history.py::format_events`,
+`modules/direct_forward/instagram.py::_ig_jar_mtime`,
+`tools/tiktok_replay.py::STATE_FILE`, `utils/ig_anti_detect.py` `loop_holder`.
+Duplicates that can drift (do **not** mass-delete): `_activity_stamp` (common.py
+vs state.py), `_has_real_cookie_line` (admin/cookies.py vs cookie_manager), three
+image-magic predicates (`thumbnails.py`, `tiktok_photo.py`,
+`direct_forward/common.py`). Removals deliberately deferred: several are
+re-exported by `modules/direct_forward/__init__.py` and the AGENTS invariant list
+still names them.
+
+## 10. Validation evidence
+
+```
+venv/bin/python -m py_compile $(git ls-files '*.py')      → OK
+for f in tests/test_*.py; do venv/bin/python "$f"; done   → 9/9 files, 68 tests pass
+bash -n install.sh run.sh uninstall.sh tools/start_xchat_bridge.sh → OK
+node --check xchat_bridge.mjs                              → OK
+cd cmd/tgbot-monitor && go test ./...                      → ok tgbot/monitor
+import smoke of every edited module                        → IMPORT_OK
+git diff --check                                           → OK
+executable bits install.sh/run.sh/uninstall.sh/bridge      → 100755
+```
+
+## 11. Deployment health
+
+| check | result |
+|---|---|
+| `systemctl is-active tgbot` | active |
+| MainPID / NRestarts | 21271 / 4 (one per deliberate code deploy) |
+| startup | 6 handler tasks ×2 sessions, POT healthy on `127.0.0.1:4417`, supervisor 3 platforms, IG resumed persisted session, TikTok WS connected |
+| new tracebacks after deploy | none beyond the expected deleted-post `203008` |
+| queue | idle, no stuck worker |
+| TikTok recovery state | `replay_pending=None`, `relayed=19`, `fails={}`, watermark unchanged |
+
+## 12. Secrets
+
+* `git ls-files | grep -E '\.(env|session)$|cookies/|database\.json|direct_forward_state|direct_ig_session|telethon_session'` → **empty**.
+* `git status` before commit showed only source, tests and docs; no jar, session,
+  state or env file.
+* No secret value was printed during the session; the Telethon probe reported
+  only counts and itemIds.
+* `.env` remains git-ignored; the session report contains no credentials.
+
+## 13. Deferred work, by impact
+
+1. **F-18** IG thread-activity watermark before the relay (one failed item waits
+   for new thread activity). Default: restore the previous stamp on any failure.
+2. **F-19** Friend-Media IG watermark advance (a failed mid-batch post is skipped).
+3. **F-20/F-21** two blocking instagrapi calls on the event loop (60-90 s and
+   2-4 s stalls).
+4. **F-23** per-jar cookie restore/savebackup.
+5. **F-22** `#HttpOnly_` parsing in the refresher/history/sessionid fingerprint.
+6. **F-24/F-25** boot-time `pip install` hardening and uninstall symmetry.
+7. **F-26/F-27/F-28** P3 cleanups.
