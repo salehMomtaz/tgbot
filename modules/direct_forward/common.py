@@ -13,7 +13,7 @@ import shutil
 
 import config
 
-from utils.rich_media import send_rich_media, send_rich_text
+from utils.rich_media import send_rich_text
 
 logger = logging.getLogger(__name__)
 
@@ -163,13 +163,14 @@ def _full_text(header_lines: list[str], body: str) -> str:
 
 
 def _compose_caption(header_lines: list[str], body: str) -> tuple[str, list[str]]:
-    """Return (media_caption <= 1024, followup_texts).
+    """Return (media_caption, followup_texts).
 
-    Order is **post caption first, relay info last** (A then B). Telegram media
-    captions cap at 1024 chars; on overflow the media keeps the head of the
-    caption and the remainder + relay header follow as one rich text message
-    (``sendRichMessage``, up to 32768 chars), chunked into 4096-char plain
-    messages only when rich sending is unavailable.
+    Short text (≤1024) rides on the media itself as ``A (post text) + B
+    (relay header)``. Longer text is NOT spliced onto the media: the media is
+    sent as a normal media message (so it stays in Telegram's Media tab) with
+    only the relay header as its caption, and the full ``A + B`` text follows
+    as a **rich text reply** to that media message (we had learned the hard way
+    that media inside a rich message disappears from the Media tab).
     """
     header = "\n".join(line for line in header_lines if line)
     body = (body or "").strip()
@@ -178,48 +179,30 @@ def _compose_caption(header_lines: list[str], body: str) -> tuple[str, list[str]
     full = f"{body}\n\n{header}" if header else body
     if len(full) <= TELEGRAM_CAPTION_LIMIT:
         return full, []
-    # Keep the caption head on the media; the rest of the post text and the
-    # relay info follow as text so the chat still reads A ... B.
-    budget = max(100, TELEGRAM_CAPTION_LIMIT - 2)
-    first_body = body[:budget] + "…"
-    remainder = body[budget:]
-    tail = f"{remainder}\n\n{header}" if header else remainder
-    return first_body, ([tail] if tail.strip() else [])
+    return header, [f"{body}\n\n{header}" if header else body]
 
 
-async def _send_followups(bot_client, chat_id: int, followups: list[str]) -> None:
-    """Send caption overflow: ONE rich message (32k) per part, with a plain
-    4096-char chunking fallback when the Bot API rejects rich content."""
+async def _send_followups(bot_client, chat_id: int, followups: list[str],
+                          reply_to_message_id=None) -> None:
+    """Send caption overflow as ONE rich message replying to the delivered
+    media (32k chars), falling back to 4096-char chunks when rich is rejected."""
     for text in followups:
         if not text:
             continue
         if len(text) <= TELEGRAM_RICH_TEXT_LIMIT:
-            if await send_rich_text(chat_id, [], text):
+            if await send_rich_text(chat_id, [], text,
+                                    reply_to_message_id=reply_to_message_id):
                 continue
+        first = True
         for i in range(0, len(text), TELEGRAM_TEXT_LIMIT):
             chunk = text[i:i + TELEGRAM_TEXT_LIMIT]
             try:
-                await bot_client.send_message(chat_id=chat_id, text=chunk)
+                await bot_client.send_message(
+                    chat_id=chat_id, text=chunk,
+                    reply_to_message_id=(reply_to_message_id if first else None))
+                first = False
             except Exception as e:
                 logger.warning(f"[DirectForward] follow-up message failed: {e}")
-
-
-async def _try_rich_media(chat_id: int, path: str, is_video: bool,
-                          header_lines: list[str], body: str,
-                          thumb_path: str | None = None,
-                          duration: int | None = None,
-                          reply_to_message_id=None) -> bool:
-    """Send media + full text as ONE rich message when the text exceeds the
-    normal caption cap. Returns False when the caller should use the classic
-    send path (short text, oversized file, or a Bot API rejection)."""
-    if not path or not os.path.exists(path):
-        return False
-    if len(_full_text(header_lines, body)) <= TELEGRAM_CAPTION_LIMIT:
-        return False
-    mid = await send_rich_media(
-        chat_id, path, header_lines, body, thumb_path=thumb_path,
-        duration=duration, reply_to_message_id=reply_to_message_id)
-    return bool(mid)
 
 
 async def deliver_tiktok_photo(bot_client, chat_id: int, item_id: str,
@@ -253,38 +236,32 @@ async def deliver_tiktok_photo(bot_client, chat_id: int, item_id: str,
             return False
 
         caption, followups = _compose_caption(header_lines, caption_body)
-        rich = False
-        if len(_full_text(header_lines, caption_body)) > TELEGRAM_CAPTION_LIMIT:
-            if len(files) == 1:
-                rich = bool(await send_rich_media(
-                    chat_id, files[0], header_lines, caption_body,
-                    reply_to_message_id=reply_to_message_id))
-            else:
-                rich = bool(await send_rich_album(
-                    chat_id, [(p, False) for p in files], header_lines,
-                    caption_body, reply_to_message_id=reply_to_message_id))
-        if not rich:
-            if len(files) == 1:
-                await bot_client.send_photo(chat_id=chat_id, photo=files[0],
-                                            caption=caption,
-                                            reply_to_message_id=reply_to_message_id)
-            else:
-                from pyrogram.types import InputMediaPhoto
-                group = [InputMediaPhoto(p, caption=caption if j == 0 else "")
-                         for j, p in enumerate(files)]
-                try:
-                    await bot_client.send_media_group(chat_id=chat_id, media=group)
-                except Exception:
-                    sent_any = False
-                    for j, p in enumerate(files):
-                        try:
-                            await bot_client.send_photo(
-                                chat_id=chat_id, photo=p,
-                                caption=caption if not sent_any else "")
-                            sent_any = True
-                        except Exception as e:
-                            logger.warning(f"[DirectForward/TT] photo {j} failed: {e}")
-            await _send_followups(bot_client, chat_id, followups)
+        sent_msg = None
+        if len(files) == 1:
+            sent_msg = await bot_client.send_photo(
+                chat_id=chat_id, photo=files[0], caption=caption,
+                reply_to_message_id=reply_to_message_id)
+        else:
+            from pyrogram.types import InputMediaPhoto
+            group = [InputMediaPhoto(p, caption=caption if j == 0 else "")
+                     for j, p in enumerate(files)]
+            try:
+                sent = await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent_msg = sent[0] if sent else None
+            except Exception:
+                sent_any = False
+                for j, p in enumerate(files):
+                    try:
+                        m = await bot_client.send_photo(
+                            chat_id=chat_id, photo=p,
+                            caption=caption if not sent_any else "")
+                        if sent_msg is None:
+                            sent_msg = m
+                        sent_any = True
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/TT] photo {j} failed: {e}")
+        await _send_followups(bot_client, chat_id, followups,
+                              reply_to_message_id=getattr(sent_msg, "id", None))
 
         if audio_path:
             try:
@@ -363,21 +340,19 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
 
         kind = classify_media_file(file_path)
 
+        sent_msg = None
         if kind == "image":
             photo_path = ensure_photo_path(file_path)
-            if photo_path and await _try_rich_media(
-                    chat_id, photo_path, False, header_lines, body):
-                logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} "
-                            f"(photo, rich caption)")
-                return
             if photo_path:
-                await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
+                sent_msg = await bot_client.send_photo(
+                    chat_id=chat_id, photo=photo_path, caption=caption)
             else:
                 # Unconvertible image (exotic codec): deliver as a document
                 # rather than guessing an extension Telegram will reject.
-                await bot_client.send_document(chat_id=chat_id, document=file_path, caption=caption)
+                sent_msg = await bot_client.send_document(
+                    chat_id=chat_id, document=file_path, caption=caption)
         elif kind == "audio":
-            await bot_client.send_audio(
+            sent_msg = await bot_client.send_audio(
                 chat_id=chat_id,
                 audio=file_path,
                 caption=caption,
@@ -387,14 +362,7 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 duration=int(result.get("duration") or 0) or None,
             )
         elif kind == "video":
-            if await _try_rich_media(
-                    chat_id, file_path, True, header_lines, body,
-                    thumb_path=result.get("thumb_path"),
-                    duration=int(result.get("duration") or 0) or None):
-                logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} "
-                            f"(video, rich caption)")
-                return
-            await process_split_and_upload(
+            sent_msg = await process_split_and_upload(
                 bot_client=bot_client,
                 premium_client=premium_client,
                 chat_id=chat_id,
@@ -412,7 +380,7 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
         else:
             # Unknown container: send it as a file. Guessing (send_photo) is
             # what produced the dropped relay.
-            await process_split_and_upload(
+            sent_msg = await process_split_and_upload(
                 bot_client=bot_client,
                 premium_client=premium_client,
                 chat_id=chat_id,
@@ -427,7 +395,8 @@ async def _download_and_deliver(bot_client, premium_client, chat_id: int, url: s
                 caption=caption,
                 premium_allowed=True,
             )
-        await _send_followups(bot_client, chat_id, followups)
+        await _send_followups(bot_client, chat_id, followups,
+                              reply_to_message_id=getattr(sent_msg, "id", None))
         logger.info(f"[DirectForward] ✅ relayed {url} -> {chat_id} ({kind})")
     finally:
         task_dir = f"cache/{cache_id}"

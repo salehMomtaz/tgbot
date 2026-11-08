@@ -38,23 +38,18 @@ def test_short_caption_stays_a_normal_caption():
     assert caption.index("short text") < caption.index("TikTok DM")
 
 
-def test_long_caption_overflow_is_one_rich_block():
+def test_long_caption_keeps_media_normal_and_replies_with_rich_text():
+    """Long text must NOT be spliced onto the media: the media is a normal
+    media message (Media-tab visible) carrying only the relay header, and the
+    full A + B text follows as one rich reply."""
     body = "x" * 8000
     caption, followups = common._compose_caption(HDR, body)
-    assert len(caption) <= 1024
-    # ONE remainder (rich text handles 32k), not many 4096 chunks
+    assert caption.startswith("📥")            # B only, exactly the header
+    assert body[:50] not in caption            # post text never on the media
     assert len(followups) == 1
-    assert len(followups[0]) > 4096
-    # the media caption starts with the post text, never the relay header
-    assert caption.startswith("x") and "TikTok DM" not in caption
-    assert "TikTok DM" in followups[0]  # header travels with the overflow tail
-
-
-def test_try_rich_media_skips_short_text_without_network():
-    # No file / short text must short-circuit before any Bot API call.
-    assert asyncio.run(common._try_rich_media(1, "/nonexistent.mp4", True, HDR, "hi")) is False
-    assert asyncio.run(common._try_rich_media(1, "/nonexistent.mp4", True, HDR,
-                                              "y" * 2000)) is False
+    assert followups[0].startswith("xxx")      # A first
+    assert followups[0].rstrip().endswith(HDR[-1])  # B last
+    assert len(followups[0]) > 4096             # one rich block, no splicing
 
 
 def test_build_html_escapes_and_bolds():

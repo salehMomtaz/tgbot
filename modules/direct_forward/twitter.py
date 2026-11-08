@@ -15,6 +15,7 @@ from typing import Any
 
 import config
 from utils.shared import DOWNLOAD_CACHE, wait_if_stopped, mark_worker_alive
+from utils.rich_media import send_rich_text
 
 from .state import (
     _load_state, _state_save_owned, _cursor,
@@ -23,9 +24,7 @@ from .state import (
 from .common import (
     URL_RE, _poll_interval, _compose_caption, _send_followups, _download_and_deliver,
     _enqueue_relay, _await_relays, _video_upload_kwargs, _x_media_payload_ok, _header_lines,
-    _try_rich_media, _full_text,
 )
-from utils.rich_media import send_rich_album
 
 logger = logging.getLogger(__name__)
 
@@ -611,35 +610,34 @@ async def _x_deliver_share_photos(client, bot_client, chat_id, photo_urls, heade
             files.append(path)
         if not files:
             raise RuntimeError("no share photos could be fetched")
+        sent_msg = None
         if len(files) == 1:
-            if await _try_rich_media(chat_id, files[0], False, header_lines, body):
-                logger.info(f"[DirectForward/X] ✅ relayed share photo with rich caption -> {chat_id}")
-                return
-            await bot_client.send_photo(chat_id=chat_id, photo=files[0], caption=caption)
+            sent_msg = await bot_client.send_photo(
+                chat_id=chat_id, photo=files[0], caption=caption)
         else:
-            if len(_full_text(header_lines, body)) > 1024 and await send_rich_album(
-                    chat_id, [(p, False) for p in files], header_lines, body):
-                logger.info(f"[DirectForward/X] ✅ relayed {len(files)} share photo(s) "
-                            f"with rich caption -> {chat_id}")
-                return
             from pyrogram.types import InputMediaPhoto
             group = [InputMediaPhoto(p, caption=caption if j == 0 else "") for j, p in enumerate(files)]
             try:
-                await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent = await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent_msg = sent[0] if sent else None
             except Exception:
                 # One corrupt item inside the group can fail the whole call —
                 # send the survivors individually instead of dropping them all.
                 sent_any = False
                 for j, p in enumerate(files):
                     try:
-                        await bot_client.send_photo(chat_id=chat_id, photo=p,
-                                                    caption=caption if not sent_any else "")
+                        m = await bot_client.send_photo(
+                            chat_id=chat_id, photo=p,
+                            caption=caption if not sent_any else "")
+                        if sent_msg is None:
+                            sent_msg = m
                         sent_any = True
                     except Exception as e:
                         logger.warning(f"[DirectForward/X] photo {j} individual send failed: {e}")
                 if not sent_any:
                     raise
-        await _send_followups(bot_client, chat_id, followups)
+        await _send_followups(bot_client, chat_id, followups,
+                              reply_to_message_id=getattr(sent_msg, "id", None))
         logger.info(f"[DirectForward/X] ✅ relayed {len(files)} share photo(s) -> {chat_id}")
     finally:
         for p in files:
@@ -662,15 +660,15 @@ async def _x_deliver_dm_attachment(client, bot_client, chat_id, media_url, is_ph
     with open(path, "wb") as f:
         f.write(data)
     try:
-        if await _try_rich_media(chat_id, path, not is_photo, header_lines, body):
-            logger.info("[DirectForward/X] ✅ DM attachment relayed (rich caption)")
-            return
         if is_photo:
-            await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
+            sent_msg = await bot_client.send_photo(
+                chat_id=chat_id, photo=path, caption=caption)
         else:
-            await bot_client.send_video(chat_id=chat_id, video=path,
-                                        caption=caption, **_video_upload_kwargs(path))
-        await _send_followups(bot_client, chat_id, followups)
+            sent_msg = await bot_client.send_video(
+                chat_id=chat_id, video=path, caption=caption,
+                **_video_upload_kwargs(path))
+        await _send_followups(bot_client, chat_id, followups,
+                              reply_to_message_id=getattr(sent_msg, "id", None))
     finally:
         for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
             try:
@@ -721,12 +719,13 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
             # text-only notice so the operator still gets the tweet.
             logger.warning(f"[DirectForward/X] tweet {url}: no video and no photo fallback "
                            f"— relaying text-only")
-            note = (f"{caption}\n\n"
+            full = _full_text(header_lines, body)
+            note = (f"{full}\n\n"
                     f"⚠️ *No downloadable media* — this tweet exposes no video "
                     f"stream to yt-dlp and the photo fallback failed.")
-            await bot_client.send_message(chat_id=chat_id, text=note)
-            for chunk in followups:
-                await bot_client.send_message(chat_id=chat_id, text=chunk)
+            if not await send_rich_text(chat_id, [], note):
+                for i in range(0, len(note), 4096):
+                    await bot_client.send_message(chat_id=chat_id, text=note[i:i + 4096])
             return
 
         audios = (data or {}).get("audios") or []
@@ -784,19 +783,17 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     chat_id=chat_id,
                     text=f"{caption}\n\n⚠️ *Download failed* — the media could not be located on disk.")
                 return
+            sent_msg = None
             if kind == "image":
                 photo_path = ensure_photo_path(file_path)
-                if photo_path and await _try_rich_media(
-                        chat_id, photo_path, False, header_lines, body):
-                    logger.info(f"[DirectForward/X] ✅ relayed tweet {url} "
-                                f"(photo, rich caption) -> {chat_id}")
-                    return
                 if photo_path:
-                    await bot_client.send_photo(chat_id=chat_id, photo=photo_path, caption=caption)
+                    sent_msg = await bot_client.send_photo(
+                        chat_id=chat_id, photo=photo_path, caption=caption)
                 else:
-                    await bot_client.send_document(chat_id=chat_id, document=file_path, caption=caption)
+                    sent_msg = await bot_client.send_document(
+                        chat_id=chat_id, document=file_path, caption=caption)
             elif kind == "audio":
-                await bot_client.send_audio(
+                sent_msg = await bot_client.send_audio(
                     chat_id=chat_id, audio=file_path, caption=caption,
                     title=(result.get("title") or "Media")[:64],
                     performer=(result.get("uploader") or "")[:64] or None,
@@ -804,14 +801,7 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     duration=int(result.get("duration") or 0) or None,
                 )
             else:
-                if kind == "video" and await _try_rich_media(
-                        chat_id, file_path, True, header_lines, body,
-                        thumb_path=result.get("thumb_path"),
-                        duration=int(result.get("duration") or 0) or None):
-                    logger.info(f"[DirectForward/X] ✅ relayed tweet {url} "
-                                f"(video, rich caption) -> {chat_id}")
-                    return
-                await process_split_and_upload(
+                sent_msg = await process_split_and_upload(
                     bot_client=bot_client,
                     premium_client=premium_client,
                     chat_id=chat_id,
@@ -826,7 +816,8 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                     caption=caption,
                     premium_allowed=True,
                 )
-            await _send_followups(bot_client, chat_id, followups)
+            await _send_followups(bot_client, chat_id, followups,
+                                  reply_to_message_id=getattr(sent_msg, "id", None))
             logger.info(f"[DirectForward/X] ✅ relayed tweet {url} (top {top['quality']}) -> {chat_id}")
             return
 

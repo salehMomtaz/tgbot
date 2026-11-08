@@ -24,9 +24,8 @@ from .state import (
 from .common import (
     URL_RE, IG_POST_RE, _poll_interval, _compose_caption,
     _send_followups, _download_and_deliver, _enqueue_relay, _await_relays, _fetch_bytes,
-    _video_upload_kwargs, _header_lines, _try_rich_media, _full_text,
+    _video_upload_kwargs, _header_lines,
 )
-from utils.rich_media import send_rich_album
 
 logger = logging.getLogger(__name__)
 
@@ -276,25 +275,17 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
             files.append((path, is_video))
         if not files:
             raise RuntimeError(f"IG media {pk}: all {len(targets)} resource(s) were empty/invalid")
+        sent_msg = None
         if len(files) == 1:
             path, is_video = files[0]
-            if await _try_rich_media(chat_id, path, is_video, header_lines, body,
-                                     duration=int(getattr(media, "video_duration", 0) or 0) or None):
-                logger.info(f"[DirectForward/IG] ✅ native relayed {url} "
-                            f"(single, rich caption)")
-                return True
             if is_video:
-                await bot_client.send_video(chat_id=chat_id, video=path,
-                                            caption=caption, **_video_upload_kwargs(path))
+                sent_msg = await bot_client.send_video(
+                    chat_id=chat_id, video=path, caption=caption,
+                    **_video_upload_kwargs(path))
             else:
-                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
+                sent_msg = await bot_client.send_photo(
+                    chat_id=chat_id, photo=path, caption=caption)
         else:
-            if len(_full_text(header_lines, body)) > 1024:
-                if await send_rich_album(chat_id, [(p, v) for p, v in files],
-                                         header_lines, body):
-                    logger.info(f"[DirectForward/IG] ✅ native relayed {url} "
-                                f"(album, rich caption)")
-                    return True
             from pyrogram.types import InputMediaPhoto, InputMediaVideo
             group = [
                 (InputMediaVideo(p, caption=caption if j == 0 else "",
@@ -303,7 +294,8 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                 for j, (p, is_video) in enumerate(files)
             ]
             try:
-                await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent = await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent_msg = sent[0] if sent else None
             except Exception:
                 # One corrupt item still inside the group can fail the whole
                 # call (MEDIA_EMPTY). Send the survivors individually instead
@@ -312,18 +304,23 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                 for j, (p, is_video) in enumerate(files):
                     try:
                         if is_video:
-                            await bot_client.send_video(chat_id=chat_id, video=p,
-                                                        caption=caption if not sent_any else "",
-                                                        **_video_upload_kwargs(p))
+                            m = await bot_client.send_video(
+                                chat_id=chat_id, video=p,
+                                caption=caption if not sent_any else "",
+                                **_video_upload_kwargs(p))
                         else:
-                            await bot_client.send_photo(chat_id=chat_id, photo=p,
-                                                        caption=caption if not sent_any else "")
+                            m = await bot_client.send_photo(
+                                chat_id=chat_id, photo=p,
+                                caption=caption if not sent_any else "")
+                        if sent_msg is None:
+                            sent_msg = m
                         sent_any = True
                     except Exception as e:
                         logger.warning(f"[DirectForward/IG] item {j} individual send failed: {e}")
                 if not sent_any:
                     raise
-        await _send_followups(bot_client, chat_id, followups)
+        await _send_followups(bot_client, chat_id, followups,
+                              reply_to_message_id=getattr(sent_msg, "id", None))
         note = " (clips fallback)" if (mt == 2 and product_type == "clips") else ""
         logger.info(f"[DirectForward/IG] ✅ native relayed {url}{note} (media_type={mt}, {len(files)} file(s))")
         return True
@@ -568,17 +565,16 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
                 f.write(data)
             dm_text = (item.get("text") or "").strip()
             header = _header_lines("Instagram", sender_label, None, None, None)
-            if await _try_rich_media(chat_id, path, not is_photo, header, dm_text):
-                logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> "
-                            f"direct attachment delivered (rich caption)")
-                return
             caption, followups = _compose_caption(header, dm_text)
             if is_photo:
-                await bot_client.send_photo(chat_id=chat_id, photo=path, caption=caption)
+                sent_msg = await bot_client.send_photo(
+                    chat_id=chat_id, photo=path, caption=caption)
             else:
-                await bot_client.send_video(chat_id=chat_id, video=path,
-                                            caption=caption, **_video_upload_kwargs(path))
-            await _send_followups(bot_client, chat_id, followups)
+                sent_msg = await bot_client.send_video(
+                    chat_id=chat_id, video=path, caption=caption,
+                    **_video_upload_kwargs(path))
+            await _send_followups(bot_client, chat_id, followups,
+                                  reply_to_message_id=getattr(sent_msg, "id", None))
             for candidate in (path, f"{os.path.splitext(path)[0]}_thumb.jpg"):
                 try:
                     os.remove(candidate)

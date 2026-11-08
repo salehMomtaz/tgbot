@@ -269,6 +269,7 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
 
     parts_list = []
 
+    first_msg = None
     try:
         part_num = 1
         loop = asyncio.get_event_loop()
@@ -298,7 +299,7 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
             if progress_msg is not None:
                 await progress_msg.edit_text(f"📤 Uploading part {part_num}...")
 
-            await send_single_media(
+            sent = await send_single_media(
                 bot_client=bot_client,
                 premium_client=premium_client,
                 chat_id=chat_id,
@@ -317,6 +318,10 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 reply_to_message_id=reply_to_message_id,
                 premium_allowed=premium_allowed,
             )
+            if part_num == 1:
+                # Returned to the caller so a long-caption rich reply can be
+                # attached to the media message itself.
+                first_msg = sent
 
             if part_path != file_path:
                 try:
@@ -349,3 +354,4 @@ async def process_split_and_upload(bot_client: Client, premium_client: Client, c
                 except Exception:
                     pass
         raise
+    return first_msg
