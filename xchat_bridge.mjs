@@ -28,7 +28,7 @@ import {
   eciesUnwrap,
   decryptBody,
 } from "./node_modules/emusks/src/helpers/xchat-crypto.js";
-import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 
 const JAR = Deno.env.get("X_COOKIES") || "cookies/twitter/xcookies.txt";
 const PIN = Deno.env.get("XCHAT_PIN") || "";
@@ -73,8 +73,12 @@ function loadState() {
 }
 
 function saveState(state) {
+  // Atomic: a truncated state file parses as {} → `since` undefined → the
+  // bridge re-primes to the NEWEST sequence and silently skips the backlog.
   mkdirSync("cache", { recursive: true });
-  writeFileSync(STATE, JSON.stringify(state));
+  const tmp = `${STATE}.tmp.${Deno.pid}`;
+  writeFileSync(tmp, JSON.stringify(state));
+  renameSync(tmp, STATE);
 }
 
 // Decode a MessageEntryHolder byte blob (the plaintext of a message create event).

@@ -123,6 +123,16 @@ while true; do
         fi
         SIG="${XCHAT_PIN}|${JAR_MTIME}|${XCHAT_POLL_MIN_SECONDS:-10}|${XCHAT_POLL_MAX_SECONDS:-600}"
 
+        # The sidecar can exit on its own (Deno.exit on a fatal error). Without
+        # this liveness check BRIDGE_RUNNING stayed 1 forever, so the X relay
+        # was silently dead until the whole unit was restarted.
+        if [[ "$BRIDGE_RUNNING" -eq 1 ]] && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+            echo "[xchat-bridge] sidecar (pid $BRIDGE_PID) exited — restarting"
+            BRIDGE_PID=""
+            BRIDGE_RUNNING=0
+            ENV_SIG=""
+        fi
+
         if [[ "$BRIDGE_RUNNING" -eq 0 ]]; then
             echo "[xchat-bridge] gates satisfied — starting sidecar"
         elif [[ "$SIG" != "$ENV_SIG" ]]; then

@@ -390,6 +390,8 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
             if not updates:
                 logger.warning(f"[CookieRefresh] no usable cookies extracted from {url}")
                 return False
+            from utils.ig_anti_detect import sessionid_sig
+            sig_before = sessionid_sig(cookie_path)
             changed_written = cookie_manager.overlay_cookies(
                 cookie_path, updates, actor="cookie_refresher")
             if changed_written is None or changed_written < 0:
@@ -402,13 +404,17 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
             cookie_manager.touch_cookie_success(cookie_path)
 
             logger.info(f"[CookieRefresh] {os.path.basename(cookie_path)} refreshed via headless ({changed_written} cookies overlaid, {len(new_cookies)} total)")
-            # Also clear direct_ig_session.json if IG was refreshed, so next DM login uses fresh sessionid
-            if cookie_path == config.IG_COOKIES:
+            # Clear direct_ig_session.json ONLY when the jar's sessionid value
+            # actually changed. Deleting it on every refresh forced the next
+            # instagrapi login to mint a fresh randomized device — the device
+            # churn that got the account suspended (AGENTS invariant #13).
+            # A rotation of OTHER cookies (the normal case) keeps the session.
+            if cookie_path == config.IG_COOKIES and sessionid_sig(cookie_path) != sig_before:
                 for stale in ("direct_ig_session.json", "direct_ig_session.json.bak"):
                     try:
                         if os.path.exists(stale):
                             os.remove(stale)
-                            logger.info(f"[CookieRefresh] cleared {stale} after IG refresh")
+                            logger.info(f"[CookieRefresh] sessionid changed — cleared {stale}")
                     except:
                         pass
             return True

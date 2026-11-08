@@ -523,7 +523,13 @@ def register_admin_handlers(app: Client):
         filters.document &
         filters.private &
         filters.create(lambda _, __, m: bool(m.from_user) and m.from_user.id == config.SYSTEM_CREATOR_ID) &
-        filters.create(lambda _, __, m: bool(m.from_user) and USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_")),
+        filters.create(lambda _, __, m: bool(m.from_user) and USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_")
+                       # ...but NOT the per-site state: it starts with the same
+                       # prefix, and this handler is registered FIRST, so it used
+                       # to consume the document, pop the state, fail the
+                       # COOKIE_MAP lookup and break the group → per-site uploads
+                       # were unreachable.
+                       and not USER_STATES.get(m.from_user.id, "").startswith("waiting_for_replace_per_site_")),
         group=0
     )
     async def admin_cookie_replace_document_handler(client: Client, message: Message):

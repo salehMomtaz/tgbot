@@ -237,6 +237,7 @@ TIKTOK_DIRECT_POLL_SECONDS = get_env_int("TIKTOK_DIRECT_POLL_SECONDS", 300)
 TIKTOK_DIRECT_POLL_JITTER_PCT = get_env_int("TIKTOK_DIRECT_POLL_JITTER_PCT", 40)
 TIKTOK_DIRECT_RECONCILE_SECONDS = get_env_int("TIKTOK_DIRECT_RECONCILE_SECONDS", 900)
 TIKTOK_DIRECT_BACKFILL_MINUTES = get_env_int("TIKTOK_DIRECT_BACKFILL_MINUTES", 1440)
+TIKTOK_DIRECT_BACKFILL_MINUTES = get_env_int("TIKTOK_DIRECT_BACKFILL_MINUTES", 1440)
 
 # =========================================================================
 # System monitor (utils/system_monitor.py) — a lightweight, bot-independent

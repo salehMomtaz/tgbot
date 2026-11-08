@@ -304,7 +304,11 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
 
         if info is None:
             cookie_manager.commit(snap_in_play, success=False, error_text=last_attempt_error)
-            raise RuntimeError(_classify_ytdl_error(last_attempt_error or e, url))
+            # `e` is deleted when its except-block exits (PEP 3110), so the old
+            # `last_attempt_error or e` raised UnboundLocalError on an empty
+            # yt-dlp message. error_msg is a plain local and always bound here.
+            raise RuntimeError(_classify_ytdl_error(
+                last_attempt_error or error_msg or "unknown error", url))
 
     # The winning attempt's snapshot is merged back on success (no-op when
     # the win was a no-auth attempt: snap_in_play is None).

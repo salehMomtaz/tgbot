@@ -1,7 +1,34 @@
 import json
+import logging
 import os
 import threading
+import time
 from config import SYSTEM_CREATOR_ID, DB_FILE
+
+logger = logging.getLogger(__name__)
+
+
+def _quarantine_corrupt_db() -> str | None:
+    """Copy an unparseable database aside before defaults are written over it.
+
+    ``load_database`` used to swallow a JSON error and return defaults; the very
+    next mutation then persisted that empty DB over the real file, silently
+    wiping ``authorized`` / ``blacklisted`` / ``premium_users`` with no
+    evidence. Keeping a timestamped copy makes the failure loud and recoverable
+    (restore + fix the JSON), which is the whole point of the atomic writer.
+    """
+    try:
+        dst = f"{DB_FILE}.corrupt.{int(time.time())}"
+        with open(DB_FILE, "rb") as src, open(dst, "wb") as out:
+            out.write(src.read())
+        os.chmod(dst, 0o600)
+        logger.error("database.json is corrupt — preserved a copy at %s before "
+                     "continuing with defaults; restore it to recover the user lists", dst)
+        return dst
+    except Exception as e:  # noqa: BLE001
+        logger.error("database.json is corrupt AND could not be backed up: %r", e)
+        return None
+
 
 def load_database() -> dict:
     """Load authorized, blacklisted users, and settings from database."""
@@ -39,7 +66,9 @@ def load_database() -> dict:
             if "premium_users" not in data:
                 data["premium_users"] = []
             return data
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        logger.error("Could not parse %s: %r", DB_FILE, e)
+        _quarantine_corrupt_db()
         return default_db
 
 def save_database(data: dict):
