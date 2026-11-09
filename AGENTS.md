@@ -491,6 +491,30 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
       on later jittered polls instead of one scrape-shaped run.
     Do NOT reintroduce a second IG client, a periodic login retry, or
     mtime-gated re-login. Regression tests: `tests/test_ig_session_gate.py`.
+
+    **HARD STOP after a rejected session (2026-11-09, operator requirement).**
+    `utils/ig_session_guard.py` keeps a persistent latch at
+    `cache/ig_session_dead.json`, keyed on the jar's **sessionid VALUE** and
+    protected from the cache cleaner. While it is armed, **zero** authenticated
+    Instagram calls are allowed from the DM worker, Friend Media, the cookie
+    refresher, or the yt-dlp jar handoff — no `account_info` probe, no
+    `login_by_sessionid`, no browser visit. `mark_dead()` returns True only for
+    the first detector, so the operator gets **one** notification even across
+    restarts; a new sessionid auto-clears the latch. `_ig_login` must never
+    "try the sessionid" after a rejected *persisted* session that carries the
+    SAME sessionid as the jar (that fallback produced the 2026-11-09 10:53
+    `account_info` 403 → `login_by_sessionid` → `Exceeded 30 redirects`
+    sequence); an *older* persisted session is not probed at all — the fresh
+    jar gets exactly one bootstrap login. Both IG workers share a bootstrap
+    lock and persist the SAME `direct_ig_session.json`, so a fresh jar mints
+    ONE Android identity, not one per worker. The headless cookie refresher no
+    longer visits instagram.com (`COOKIE_REFRESH_IG=false` by default): a fresh
+    Chromium profile per run is a new-device signal, and instagrapi's
+    write-back already rotates the jar's session cookies. The relay watchdog
+    treats a latched IG as intentional silence. Regression tests:
+    `tests/test_ig_session_guard.py`, `tests/test_ig_login_no_retry.py`.
+    Suspension forensics + the new-account checklist:
+    `docs/memory/tgbot-2026-11-09-ig-hard-stop-and-suspension-forensics.md`.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links

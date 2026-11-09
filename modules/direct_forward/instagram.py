@@ -7,13 +7,13 @@ Mirrors the original modules/direct_forward.py Instagram worker exactly.
 import asyncio
 import logging
 import os
-import random
 import re
 import time
 
 import config
 from utils import cookie_history
 from utils import ig_anti_detect
+from utils import ig_session_guard
 from utils.shared import wait_if_stopped, mark_worker_alive
 
 from .state import (
@@ -419,9 +419,21 @@ def _ig_sessionid_from_jar() -> str | None:
 
 
 def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
-    """Authenticate the instagrapi client. Order:
-    1. resume persisted session settings (cheapest, zero challenges),
-    2. login by the sessionid from the shared IG cookie jar.
+    """Authenticate the instagrapi client under the operator's hard rule:
+
+    * while the persistent session-dead latch is armed, raise
+      :class:`IGSessionDead` **without touching the network** (no
+      ``account_info`` probe, no ``login_by_sessionid``);
+    * a rejected persisted session whose sessionid is the SAME as the jar's
+      means the jar's session is dead too: latch and stop. Do NOT "try the
+      sessionid" — that fallback is what produced the 2026-11-09 10:53 second
+      attempt and instagrapi's ``Exceeded 30 redirects`` ladder
+      (``user_info_v1`` -> ``_user_short_from_private_stream`` ->
+      ``user_short_gql``) against an already-rejected session;
+    * a persisted session from an OLDER jar (different sessionid) is not proof
+      of death: exactly ONE bootstrap login is allowed for the fresh session;
+    * no persisted session at all: the same single bootstrap login;
+    * an auth-classified bootstrap failure arms the latch and stops.
 
     There is deliberately NO username/password fallback: password login hammers
     ``accounts/login/`` and deepens Instagram's 429 rate-limit (the exact
@@ -429,36 +441,87 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
     method entirely — a stale sessionid means "upload a fresh igcookies.txt and
     pass the checkpoint in the official app", never re-entering credentials.
     """
-    if os.path.exists("direct_ig_session.json") and os.path.getsize("direct_ig_session.json") > 0:
-        try:
-            cl.load_settings("direct_ig_session.json")
-            # Validate the persisted session WITHOUT calling login(): instagrapi's
-            # login() demands both username+password, but a good persisted session
-            # needs neither — account_info() alone proves it's alive.
-            cl.account_info()  # forces a session check
-            logger.info(f"{log_prefix} Resumed persisted direct session.")
-            cookie_history.record(None, "ig_login_ok", platform="instagram",
-                                  actor=log_prefix.strip("[]"),
-                                  note="resumed persisted direct_ig_session.json")
-            return
-        except Exception as e:
-            logger.info(f"{log_prefix} Persisted session unusable ({e}); trying sessionid.")
-            cookie_history.record(None, "ig_session_dead", platform="instagram",
-                                  actor=log_prefix.strip("[]"),
-                                  note=f"persisted session unusable: {e}")
+    actor = log_prefix.strip("[]")
+    dead = ig_session_guard.read_latch()
+    if dead:
+        raise ig_session_guard.IGSessionDead(
+            f"IG session latched dead ({dead.get('reason')}) — zero Instagram "
+            f"traffic until a fresh igcookies.txt is uploaded")
 
     sessionid = _ig_sessionid_from_jar()
     if not sessionid:
         cookie_history.record(None, "ig_relogin_failed", platform="instagram",
-                              actor=log_prefix.strip("[]"),
+                              actor=actor,
                               note="no sessionid in jar — upload a fresh igcookies.txt")
         raise RuntimeError(
             "No sessionid in igcookies.txt. Upload a fresh igcookies.txt "
             "(Admin → Cookies) — there is no password login fallback by design.")
-    if cl.login_by_sessionid(sessionid):
+
+    # One bootstrap at a time across both IG workers (DM + Friend Media), so a
+    # fresh jar mints ONE Android device identity instead of one per worker.
+    with ig_session_guard.bootstrap_lock():
+        if ig_session_guard.read_latch():
+            raise ig_session_guard.IGSessionDead(
+                "IG session latched dead while waiting for the bootstrap lock")
+
+        persisted = "direct_ig_session.json"
+        if os.path.exists(persisted) and os.path.getsize(persisted) > 0:
+            if not ig_session_guard.persisted_matches_jar(persisted):
+                # The persisted device identity belongs to an OLDER jar. Do not
+                # probe that old (likely dead) session at all — bootstrap the
+                # fresh sessionid instead. Probing it was one of the extra
+                # touches the operator forbade.
+                logger.info(f"{log_prefix} persisted session belongs to an older "
+                            f"jar — bootstrapping the fresh sessionid (no probe of "
+                            f"the old session).")
+            else:
+                try:
+                    cl.load_settings(persisted)
+                    # Validate the persisted session WITHOUT calling login():
+                    # instagrapi's login() demands both username+password, but a
+                    # good persisted session needs neither — account_info()
+                    # proves it's alive.
+                    cl.account_info()
+                    logger.info(f"{log_prefix} Resumed persisted direct session.")
+                    cookie_history.record(None, "ig_login_ok", platform="instagram",
+                                          actor=actor,
+                                          note="resumed persisted direct_ig_session.json")
+                    return
+                except Exception as e:
+                    if not ig_session_guard.is_auth_failure(e):
+                        # Transient (timeout/network/5xx): do NOT burn a login
+                        # attempt against Instagram for a blip.
+                        raise
+                    # The persisted device session and the jar carry the SAME
+                    # sessionid. It was rejected; a login_by_sessionid retry
+                    # would only replay the dead session. Latch and stop.
+                    ig_session_guard.mark_dead(e, actor)
+                    cookie_history.record(None, "ig_session_dead",
+                                          platform="instagram", actor=actor,
+                                          note=f"persisted+jar session rejected: {e}")
+                    raise ig_session_guard.IGSessionDead(
+                        f"IG session rejected ({e})") from e
+
+        # Exactly ONE bootstrap login for this (fresh) sessionid.
+        try:
+            ok = cl.login_by_sessionid(sessionid)
+        except Exception as e:
+            if ig_session_guard.is_auth_failure(e):
+                ig_session_guard.mark_dead(e, actor)
+                cookie_history.record(None, "ig_session_dead", platform="instagram",
+                                      actor=actor,
+                                      note=f"bootstrap login rejected: {e}")
+                raise ig_session_guard.IGSessionDead(
+                    f"IG session rejected ({e})") from e
+            raise
+        if not ok:
+            ig_session_guard.mark_dead("login_by_sessionid returned False", actor)
+            raise ig_session_guard.IGSessionDead(
+                "login_by_sessionid returned False (session rejected)")
         logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
+        ig_session_guard.clear("bootstrap login succeeded")
         cookie_history.record(None, "ig_login_ok", platform="instagram",
-                              actor=log_prefix.strip("[]"),
+                              actor=actor,
                               note="logged in via sessionid from igcookies.txt")
         # Persist the live session tokens Instagram just re-issued back into the
         # shared jar so it stays warm (instagrapi discards them).
@@ -466,11 +529,6 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
             ig_anti_detect.write_back_session(cl, config.IG_COOKIES)
         except Exception as wb:
             logger.warning(f"{log_prefix} session write-back failed: {wb}")
-        return
-    raise RuntimeError(
-        "login_by_sessionid failed (session expired/checkpointed). Upload a "
-        "fresh igcookies.txt (Admin → Cookies) or pass the checkpoint in the "
-        "official app — no password login fallback by design.")
 
 
 async def _ig_react_to(cl, loop, thread_id, item_id) -> None:
@@ -780,6 +838,11 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
     cl = _make_client()
     login_attempt = 0
     while True:
+        if not getattr(config, "IG_AUTH_ENABLED", True):
+            # Paused by the operator (Admin → 🔐 IG Auth). No Instagram traffic;
+            # the watchdog already ignores IG silence while paused.
+            logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — IG worker idle.")
+            return
         try:
             # Sessionid-only: there is no password login fallback (it deepened the
             # 429). A failing sessionid raises (caught below) → backoff/alert.
@@ -803,49 +866,55 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] cold-start jitter skipped: {e}")
             break
+        except ig_session_guard.IGSessionDead as e:
+            # The latch is armed (this boot or a previous one). ZERO further
+            # Instagram traffic: no probe, no login, no repeat notification.
+            logger.error(f"[DirectForward/IG] {e} — no further Instagram traffic "
+                         f"until a fresh igcookies.txt is uploaded.")
+            await _ig_wait_for_fresh_jar(cl, loop)
+            cl = _make_client()
         except (ChallengeRequired, PleaseWaitFewMinutes) as e:
-            # For testing, shorten freeze to 60s instead of 4h; the gap recovery (200 items) will
-            # still deliver the stalled batch once login succeeds. If you see repeated PleaseWait,
-            # the durable fix is still to pass the challenge in the official app.
-            # NOTE: IG_DIRECT_CHALLENGE_FREEZE_TEST exists for developer iteration
-            # only and must never be enabled in production — the freeze is what
-            # protects the account from a checkpoint retry storm.
-            if getattr(config, "IG_DIRECT_CHALLENGE_FREEZE_TEST", False):
-                freeze = random.uniform(60, 120)
-            else:
-                freeze = random.uniform(3 * 3600, 5 * 3600)
-            logger.error(f"[DirectForward/IG] Instagram challenged the login: {e}. "
-                         f"Pausing this worker for ~{freeze / 3600:.1f}h. "
-                         f"Open the official Instagram app on the bot account and pass the "
-                         f"checkpoint there, then restart the bot for a clean resume.")
-            try:
-                await bot_client.send_message(
-                    chat_id=chat_id,
-                    text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
-                          f"The IG direct-forward worker hit a manual-verification "
-                          f"checkpoint during login and is pausing ~{freeze / 3600:.1f}h "
-                          f"to avoid making it worse.\n\n"
-                          f"Open the official Instagram app on the bot account and pass the "
-                          f"verification there, then restart the bot. Instagram: `{e}`"),
-                )
-            except Exception as alert_err:
-                logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
-            await asyncio.sleep(freeze)
+            # A checkpoint is a cookie/session problem: arm the persistent latch
+            # (no timed retry storm) and wait for a fresh sessionid. The alert
+            # goes out only when this call armed the latch.
+            newly = ig_session_guard.mark_dead(e, "DirectForward/IG")
+            logger.error(f"[DirectForward/IG] Instagram challenged the session: {e}. "
+                         f"All authenticated IG traffic is stopped until a fresh "
+                         f"igcookies.txt is uploaded.")
+            if newly:
+                try:
+                    await _post_ig_alert(
+                        bot_client, chat_id,
+                        (f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
+                         f"The IG worker hit a manual-verification checkpoint (`{e}`).\n\n"
+                         f"**All Instagram traffic is now stopped** — no probes, no "
+                         f"login attempts, no cookie-refresher visits — until you "
+                         f"upload a fresh `igcookies.txt`:\n"
+                         f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
+                         f"Open the official Instagram app, pass the verification, then "
+                         f"export a NEW session and upload it."))
+                except Exception as alert_err:
+                    logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
+            await _ig_wait_for_fresh_jar(cl, loop)
             cl = _make_client()
         except Exception as e:
             login_attempt += 1
             cl = _make_client()
             if _ig_auth_failure(e):
-                # Session rejected → NO automated re-login (operator requirement).
+                # Safety net for an auth failure that escaped _ig_login (e.g. a
+                # challenge raised by the warmup). Arm the latch, notify once.
+                newly = ig_session_guard.mark_dead(e, "DirectForward/IG")
                 logger.error(f"[DirectForward/IG] login failed (session rejected): {e}. "
                              f"NO automated re-login (by design) — waiting for fresh igcookies.txt upload.")
-                if login_attempt == 1:
+                if newly:
                     try:
                         await _post_ig_alert(
                             bot_client, chat_id,
                             (f"💀 **Instagram session is dead**\n\n"
                              f"The IG cookie jar's `sessionid` was rejected (`{e}`).\n\n"
-                             f"DM relaying and Friend Media archives are paused. "
+                             f"**All Instagram traffic is now stopped** (DM relaying, "
+                             f"Friend Media archives, cookie refresher, yt-dlp jar "
+                             f"handoff). No further attempts will be made.\n\n"
                              f"Upload a fresh `igcookies.txt` to resume:\n"
                              f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
                              f"Recent jar changes: Admin Console → 🍪 Cookie Jars → Instagram → 📜 History."))
@@ -1163,45 +1232,46 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     await _state_save_owned(state, {"ig"})
                 cl.dump_settings("direct_ig_session.json")
             except (ChallengeRequired, PleaseWaitFewMinutes) as e:
-                # Do NOT hammer a challenged session: re-trying hourly only deepens
-                # the flag. Freeze for hours; the durable fix is a human passing
-                # the checkpoint in the official app, then restarting the bot.
-                # Same test escape hatch as the login-time checkpoint branch, so the
-                # two sites behave consistently.
-                if getattr(config, "IG_DIRECT_CHALLENGE_FREEZE_TEST", False):
-                    freeze = random.uniform(60, 120)
-                else:
-                    freeze = random.uniform(3 * 3600, 5 * 3600)
+                # A checkpoint is a session/cookie problem. Operator rule: stop,
+                # notify once, wait for a fresh jar — NO timed retry, because a
+                # retry against a flagged session deepens enforcement.
+                newly = ig_session_guard.mark_dead(e, "DirectForward/IG")
                 logger.error(f"[DirectForward/IG] Instagram challenged the session: {e}. "
-                             f"Pausing this worker for ~{freeze / 3600:.1f}h. "
-                             f"Open the official Instagram app on the bot account and pass the "
-                             f"checkpoint there, then restart the bot for a clean resume.")
-                try:
-                    await bot_client.send_message(
-                        chat_id=chat_id,
-                        text=(f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
-                              f"The IG direct-forward worker hit a manual-verification "
-                              f"checkpoint while polling and is pausing ~{freeze / 3600:.1f}h "
-                              f"to avoid making it worse.\n\n"
-                              f"Open the official Instagram app on the bot account and pass the "
-                              f"verification there, then restart the bot. Instagram: `{e}`"),
-                    )
-                except Exception as alert_err:
-                    logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
-                await asyncio.sleep(freeze)
-            except LoginRequired:
+                             f"All authenticated IG traffic is stopped until a fresh "
+                             f"igcookies.txt is uploaded.")
+                if newly:
+                    try:
+                        await _post_ig_alert(
+                            bot_client, chat_id,
+                            (f"⚠️ **Instagram checkpoint on the bot account!**\n\n"
+                             f"The IG worker hit a manual-verification checkpoint while "
+                             f"polling (`{e}`).\n\n"
+                             f"**All Instagram traffic is now stopped** — no probes, no "
+                             f"login attempts, no refresher visits — until you upload a "
+                             f"fresh `igcookies.txt`:\n"
+                             f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
+                             f"Open the official Instagram app, pass the verification, then "
+                             f"export a NEW session and upload it."))
+                    except Exception as alert_err:
+                        logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
+                await _ig_wait_for_fresh_jar(cl, loop)
+                relogin_failures = 0
+            except LoginRequired as e:
                 relogin_failures += 1
+                newly = ig_session_guard.mark_dead(e, "DirectForward/IG")
                 cookie_history.record(None, "ig_session_dead", platform="instagram",
                                       actor="DirectForward/IG",
                                       note=f"poll hit LoginRequired (attempt {relogin_failures})")
                 logger.error(f"[DirectForward/IG] session expired — NO automated re-login (by design). "
                              f"Waiting for fresh igcookies.txt upload. (failure #{relogin_failures})")
-                if relogin_failures == 1:
+                if newly:
                     await _post_ig_alert(
                         bot_client, chat_id,
                         (f"💀 **Instagram session is dead**\n\n"
                          f"The IG cookie jar's `sessionid` is no longer accepted.\n\n"
-                         f"DM relaying and Friend Media archives are paused. "
+                         f"**All Instagram traffic is now stopped** (DM relaying, Friend "
+                         f"Media archives, cookie refresher, yt-dlp jar handoff). No "
+                         f"further attempts will be made.\n\n"
                          f"Upload a fresh `igcookies.txt` to resume:\n"
                          f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
                          f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "

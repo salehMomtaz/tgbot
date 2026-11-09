@@ -24,6 +24,7 @@ from typing import List
 import config
 from utils import cookie_history
 from utils import cookie_manager
+from utils import ig_session_guard
 
 logger = logging.getLogger(__name__)
 
@@ -115,13 +116,28 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
     if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
         logger.info(f"[CookieRefresh] skip {cookie_path} — missing/empty")
         return False
-    # IG is paused (IG_AUTH_ENABLED=false, e.g. account suspended/appealing):
-    # do NOT visit instagram.com at all — a headless visit is an authenticated
-    # device touch and the whole point of the pause is to stop those.
-    if cookie_path.endswith("igcookies.txt") and not getattr(config, "IG_AUTH_ENABLED", True):
-        logger.info("[CookieRefresh] skip igcookies.txt — IG_AUTH_ENABLED=false "
-                    "(Instagram paused; not visiting the site)")
-        return False
+    # Instagram is special-cased and OFF by default (2026-11-09):
+    # a headless Chromium launches with a FRESH profile every run, so Instagram
+    # sees the operator's sessionid arrive from a brand-new device fingerprint
+    # every cycle (the log even says "headless profile seen as a NEW device").
+    # Combined with the Android private-API client and yt-dlp, one sessionid was
+    # being used by 3-4 distinct "devices" from a datacenter IP — a textbook
+    # account-takeover/automation signal. instagrapi's own write-back keeps the
+    # jar's sessionid/csrftoken/ds_user_id/mid/rur warm, so the browser visit is
+    # not needed for the bot. COOKIE_REFRESH_IG=true re-enables it deliberately.
+    if cookie_path.endswith("igcookies.txt"):
+        if not getattr(config, "IG_AUTH_ENABLED", True):
+            logger.info("[CookieRefresh] skip igcookies.txt — IG_AUTH_ENABLED=false "
+                        "(Instagram paused; not visiting the site)")
+            return False
+        if ig_session_guard.is_dead():
+            logger.info("[CookieRefresh] skip igcookies.txt — session latched dead; "
+                        "no Instagram traffic until a fresh jar is uploaded")
+            return False
+        if not getattr(config, "COOKIE_REFRESH_IG", False):
+            logger.info("[CookieRefresh] skip igcookies.txt — browser refresh disabled "
+                        "(COOKIE_REFRESH_IG=false; instagrapi write-back keeps the jar warm)")
+            return False
     # Quick check: if the jar was freshly written via yt-dlp or admin
     # (<24h), skip the OTHER sites to save RAM — but NEVER skip IG here.
     # Instagram's auth is tightly bound to mid/rur/csrftoken rotation, and

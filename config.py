@@ -139,6 +139,14 @@ COOKIE_STALE_WARNING_DAYS = get_env_int("COOKIE_STALE_WARNING_DAYS", 21)
 # 4 tabs at once would be ~1.2 GB → OOM on 4 GB box, so sequential is mandatory.
 COOKIE_REFRESH_ENABLED = os.getenv("COOKIE_REFRESH_ENABLED", "true").lower() in ("true", "1", "yes")
 COOKIE_REFRESH_HOURS = get_env_int("COOKIE_REFRESH_HOURS", 24)
+# Instagram is EXCLUDED from the headless refresher by default (2026-11-09).
+# Each headless run launches a fresh Chromium profile, so the operator's
+# sessionid is presented from a NEW device fingerprint every cycle — device
+# churn on a session that is also used by the Android private API and yt-dlp.
+# instagrapi's write-back already keeps sessionid/csrftoken/ds_user_id/mid/rur
+# warm. Set COOKIE_REFRESH_IG=true only if you deliberately want the browser
+# visit (and accept the extra device signal).
+COOKIE_REFRESH_IG = os.getenv("COOKIE_REFRESH_IG", "false").lower() in ("true", "1", "yes")
 
 # =========================================================================
 # Direct-forward: relay media you DM to the bot's own Instagram / X accounts
@@ -198,13 +206,9 @@ IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
 # client that logged in on its own with a freshly randomized device identity —
 # the device-churn/auto-login pattern that gets IG accounts suspended. Polling
 # is the only IG session path (operator requirement: no auto-login systems).
-# TESTING ONLY — shortens the Instagram checkpoint freeze (normally 3-5h) to
-# 60-120s so a developer can iterate without waiting out the anti-detection
-# backoff. Both checkpoint sites (login + polling) honour it, so behaviour is
-# consistent. It must never be enabled in production: the freeze is what
-# protects the account from a checkpoint retry storm.
-# Leave false in production.
-IG_DIRECT_CHALLENGE_FREEZE_TEST = os.getenv("IG_DIRECT_CHALLENGE_FREEZE_TEST", "false").lower() in ("true", "1", "yes")
+# (IG_DIRECT_CHALLENGE_FREEZE_TEST was removed 2026-11-09: a checkpoint now
+# arms the persistent session-dead latch in utils/ig_session_guard.py — zero
+# retries, one notification, wait for a fresh jar. There is no timed freeze.)
 # Emoji the bot's Instagram account reacts with on each DM it receives from the
 # paired contact (acknowledges receipt in the IG thread). Instagram supports a
 # fixed reaction set (❤ 👍 😂 😮 😢 😡 🎉 🔥 💯 …); "✅" is NOT a valid IG DM

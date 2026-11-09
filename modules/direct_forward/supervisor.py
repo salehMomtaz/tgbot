@@ -35,11 +35,16 @@ async def _relay_watchdog(bot_client, chat_id: int, platforms: list) -> None:
     while True:
         try:
             for key, label in platforms:
-                # IG intentionally paused (IG_AUTH_ENABLED=false): the worker
-                # stops on purpose, so its silence is NOT a stall — don't alert.
-                if key == "ig" and not getattr(config, "IG_AUTH_ENABLED", True):
-                    alerted.discard(key)
-                    continue
+                # IG intentionally paused (IG_AUTH_ENABLED=false) OR hard-stopped
+                # by the session-dead latch: the worker is silent on purpose, so
+                # its silence is NOT a stall — don't alert (the operator already
+                # got the one "session is dead" notification).
+                if key == "ig":
+                    from utils import ig_session_guard
+                    if (not getattr(config, "IG_AUTH_ENABLED", True)
+                            or ig_session_guard.is_dead()):
+                        alerted.discard(key)
+                        continue
                 silent = worker_silent_seconds(key)
                 if silent is None:
                     continue

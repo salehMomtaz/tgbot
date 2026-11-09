@@ -85,17 +85,33 @@ def test_burst_pace_cap_sentinel():
 def test_ig_auth_pause_disables_ytdlp_jar():
     """While IG auth is paused, yt-dlp must never be handed the IG sessionid."""
     from utils.downloader import cookies as dl_cookies
+    from utils import ig_session_guard
 
     old = config.IG_AUTH_ENABLED
-    try:
-        config.IG_AUTH_ENABLED = False
-        assert dl_cookies._resolve_jar_path(
-            "https://www.instagram.com/reel/abc/") is None
-        config.IG_AUTH_ENABLED = True
-        assert dl_cookies._resolve_jar_path(
-            "https://www.instagram.com/reel/abc/") == config.IG_COOKIES
-    finally:
-        config.IG_AUTH_ENABLED = old
+    old_jar = config.IG_COOKIES
+    old_latch = ig_session_guard.LATCH_PATH
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            # Isolate from the live box's real jar and latch.
+            config.IG_COOKIES = os.path.join(d, "igcookies.txt")
+            ig_session_guard.LATCH_PATH = os.path.join(d, "ig_session_dead.json")
+            _write_jar(config.IG_COOKIES, "AAA")
+
+            config.IG_AUTH_ENABLED = False
+            assert dl_cookies._resolve_jar_path(
+                "https://www.instagram.com/reel/abc/") is None
+            config.IG_AUTH_ENABLED = True
+            assert dl_cookies._resolve_jar_path(
+                "https://www.instagram.com/reel/abc/") == config.IG_COOKIES
+
+            # A known-dead session is a hard stop even with IG_AUTH_ENABLED=true.
+            ig_session_guard.mark_dead("login_required", "test")
+            assert dl_cookies._resolve_jar_path(
+                "https://www.instagram.com/reel/abc/") is None
+        finally:
+            config.IG_AUTH_ENABLED = old
+            config.IG_COOKIES = old_jar
+            ig_session_guard.LATCH_PATH = old_latch
 
 
 def _run() -> int:

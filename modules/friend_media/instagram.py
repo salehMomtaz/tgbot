@@ -33,6 +33,8 @@ import asyncio
 import logging
 import config
 
+from utils import ig_session_guard
+
 from . import common
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,10 @@ def _ig_breaker_open() -> bool:
     re-armed the breaker on mtime and the bot re-attempted login with the
     dead session (proven 2026-10-03..08 in cookies/history.jsonl).
     """
+    # The persistent latch is the cross-restart source of truth; the in-process
+    # breaker is only a fast local cache.
+    if ig_session_guard.is_dead():
+        return True
     if not _IG_BREAKER["tripped_at"]:
         return False
     sig = _jar_sessionid_sig()
@@ -136,6 +142,10 @@ def _ig_breaker_open() -> bool:
 def _ig_breaker_trip(reason: str):
     now = time.time()
     sig = _jar_sessionid_sig()
+    # Arm the cross-restart hard stop. Returns True only on the first detection
+    # for this sessionid, so the operator gets ONE notification even if the bot
+    # restarts repeatedly while the jar stays dead.
+    ig_session_guard.mark_dead(reason, "FriendMedia/IG")
     if not _IG_BREAKER["tripped_at"] or _IG_BREAKER.get("sid_sig") != sig:
         logger.warning(f"[FriendMedia:ig] IG session unusable ({reason}) — "
                        f"pausing IG archives until a fresh igcookies.txt is "
@@ -200,6 +210,14 @@ async def _ig_client():
         raise IGUnavailable(
             "Instagram is paused (IG_AUTH_ENABLED=false) — re-enable via "
             "Admin → 🔐 IG Auth after uploading a fresh igcookies.txt")
+    # Hard stop (operator requirement 2026-11-09): once the session is known
+    # dead, make ZERO Instagram calls — no client build, no account_info probe.
+    # The latch auto-clears when the jar's sessionid value changes.
+    if ig_session_guard.is_dead():
+        raise IGUnavailable(
+            f"IG archives paused (session dead: {ig_session_guard.dead_reason()}) "
+            f"— upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars "
+            f"(no automated probe/login)")
     if _ig_breaker_open():
         raise IGUnavailable(
             f"IG archives paused (session dead: {_IG_BREAKER['reason'] or 'auth failure'}) "
@@ -284,54 +302,73 @@ async def _ig_client():
             # for). Now rebuilds RESUME a persisted session (the DM worker's
             # device identity preferred; one read-only account_info() proves
             # it alive). A sessionid login happens AT MOST ONCE for a NEW jar
-            # and never retries the same rejected sessionid.
-            for _path in ("direct_ig_session.json", _FM_SESSION):
-                if os.path.exists(_path) and os.path.getsize(_path) > 0:
-                    try:
-                        c.load_settings(_path)
-                        c.account_info()  # read-only liveness proof
-                        logger.info(f"[FriendMedia:ig] resumed session from {_path}")
-                        return c
-                    except Exception as e:
-                        if _ig_auth_failure(e):
-                            # Same sessionid the DM worker uses — it is dead.
-                            # The breaker trips; a fresh jar re-arms it.
-                            raise
-                        logger.warning(f"[FriendMedia:ig] {_path} unusable ({e}); trying next")
-
+            # and never retries the same rejected sessionid. The bootstrap lock
+            # serializes this with the DM worker so a fresh jar mints exactly
+            # ONE device identity.
             global _IG_BOOT_SIG
-            sig = _jar_sessionid_sig()
-            if not sig:
-                raise RuntimeError(
-                    "no sessionid in cookies/instagram/igcookies.txt — "
-                    "re-upload a fresh jar via Admin → 🍪 Cookie Jars")
-            if sig == _IG_BOOT_SIG:
-                raise RuntimeError(
-                    "sessionid unchanged since the last failed login — waiting for an "
-                    "operator jar upload (no automated re-login by design)")
-            sid = _ig_sessionid_from_jar()
-            try:
-                ok = c.login_by_sessionid(sid)
-            except Exception:
-                _IG_BOOT_SIG = sig  # never retry this sessionid
-                raise
-            if not ok:
-                _IG_BOOT_SIG = sig
-                raise RuntimeError("login_by_sessionid failed (session expired?) — "
-                                   "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
-            _IG_BOOT_SIG = ""
-            try:
-                c.dump_settings(_FM_SESSION)
-                os.chmod(_FM_SESSION, 0o600)
-            except Exception as dump_err:
-                logger.warning(f"[FriendMedia:ig] could not persist session: {dump_err}")
-            # Persist the live session tokens Instagram just re-issued back into
-            # the shared jar so it stays warm (instagrapi discards them).
-            try:
-                ig_anti_detect.write_back_session(c, _IG_JAR)
-            except Exception as wb:
-                logger.warning(f"[FriendMedia:ig] session write-back failed: {wb}")
-            return c
+            with ig_session_guard.bootstrap_lock():
+                if ig_session_guard.is_dead():
+                    raise RuntimeError(
+                        f"IG session dead ({ig_session_guard.dead_reason()}) — "
+                        f"upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars")
+
+                for _path in ("direct_ig_session.json", _FM_SESSION):
+                    if os.path.exists(_path) and os.path.getsize(_path) > 0:
+                        if not ig_session_guard.persisted_matches_jar(_path):
+                            # Device identity from an OLDER jar: do not probe
+                            # that old (likely dead) session; bootstrap the
+                            # fresh sessionid instead.
+                            logger.info(f"[FriendMedia:ig] {_path} belongs to an "
+                                        f"older jar — skipping its probe")
+                            continue
+                        try:
+                            c.load_settings(_path)
+                            c.account_info()  # read-only liveness proof
+                            logger.info(f"[FriendMedia:ig] resumed session from {_path}")
+                            return c
+                        except Exception as e:
+                            if _ig_auth_failure(e):
+                                # The persisted device session and the jar carry
+                                # the SAME sessionid: it was rejected, so it is
+                                # dead, not stale. Do NOT replay it.
+                                raise
+                            logger.warning(f"[FriendMedia:ig] {_path} unusable ({e}); trying next")
+
+                sig = _jar_sessionid_sig()
+                if not sig:
+                    raise RuntimeError(
+                        "no sessionid in cookies/instagram/igcookies.txt — "
+                        "re-upload a fresh jar via Admin → 🍪 Cookie Jars")
+                if sig == _IG_BOOT_SIG:
+                    raise RuntimeError(
+                        "sessionid unchanged since the last failed login — waiting for an "
+                        "operator jar upload (no automated re-login by design)")
+                sid = _ig_sessionid_from_jar()
+                try:
+                    ok = c.login_by_sessionid(sid)
+                except Exception:
+                    _IG_BOOT_SIG = sig  # never retry this sessionid
+                    raise
+                if not ok:
+                    _IG_BOOT_SIG = sig
+                    raise RuntimeError("login_by_sessionid failed (session expired?) — "
+                                       "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
+                _IG_BOOT_SIG = ""
+                # Share ONE device identity with the DM worker: persist to the
+                # shared file, never mint a second Android identity for the same
+                # sessionid.
+                try:
+                    c.dump_settings("direct_ig_session.json")
+                    os.chmod("direct_ig_session.json", 0o600)
+                except Exception as dump_err:
+                    logger.warning(f"[FriendMedia:ig] could not persist session: {dump_err}")
+                # Persist the live session tokens Instagram just re-issued back
+                # into the shared jar so it stays warm (instagrapi discards them).
+                try:
+                    ig_anti_detect.write_back_session(c, _IG_JAR)
+                except Exception as wb:
+                    logger.warning(f"[FriendMedia:ig] session write-back failed: {wb}")
+                return c
 
         loop = asyncio.get_event_loop()
         try:

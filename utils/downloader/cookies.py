@@ -9,6 +9,7 @@ import urllib.parse
 import config
 import utils.shared as shared
 from utils import cookie_manager
+from utils import ig_session_guard
 from .url_normalize import _apply_pot_options
 
 
@@ -31,6 +32,10 @@ def _resolve_jar_path(url: str) -> str | None:
         # login-walled media is skipped until the operator uploads a fresh jar
         # and re-enables IG auth (Admin → 🔐 IG Auth).
         if not getattr(config, "IG_AUTH_ENABLED", True):
+            return None
+        # Hard stop: a known-dead/suspended sessionid must never be handed to
+        # yt-dlp either (it would replay the rejected session from the VPS IP).
+        if ig_session_guard.is_dead():
             return None
         cookie_path = config.IG_COOKIES
     elif "tiktok.com" in url_lower:
