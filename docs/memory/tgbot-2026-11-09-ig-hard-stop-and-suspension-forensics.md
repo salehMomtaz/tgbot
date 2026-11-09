@@ -125,19 +125,46 @@ New `utils/ig_session_guard.py`:
 - The relay watchdog treats a latched IG as intentional silence (no false
   "stalled" DM).
 
-### Removing the device/volume triggers
+### One identity + auto-geo + volume (2026-11-09 follow-up)
 
-- `COOKIE_REFRESH_IG=false` (new config, default **false**): the headless
-  browser no longer touches instagram.com. instagrapi's write-back already
-  rotates `sessionid`/`csrftoken`/`ds_user_id`/`mid`/`rur`.
-- Friend Media now persists the **shared** `direct_ig_session.json` instead of
-  minting a second Android identity; the bootstrap is serialized by a lock so a
-  fresh jar produces one device, not two.
+- **ONE device identity only.** Both IG workers use `direct_ig_session.json`;
+  `friend_media_ig_session.json` was deleted and is never created again. A
+  fresh jar now KEEPS the persisted uuids/device identity and only replaces the
+  session cookies — `modules/admin/cookies.py` no longer deletes the session
+  file on upload, and `_ig_login` loads the device identity without probing the
+  stale session.
+- **yt-dlp never gets the IG jar** unless `IG_YTDLP_AUTH_ENABLED=true` (default
+  **false**). A web transport on the same sessionid is a second identity;
+  public posts/reels still download anonymously.
+- **Geo auto-detection** (`utils/ig_geo.py`): the egress IP is resolved via
+  ipinfo.io (ip-api.com fallback) and cached for 7 days in `cache/ig_geo.json`.
+  On this box it resolves to **CZ / 420 / cs_CZ / Europe/Prague (+3600s)**.
+  Any non-empty `IG_DIRECT_*` value overrides one field. No more US headers on
+  a CZ connection.
+- **Volume dial**: `IG_DIRECT_POLL_SECONDS` default **900** (jittered ±40%) →
+  ~4 idle `direct_v2/inbox` requests/hour instead of 12. An idle poll is ONE
+  request; the thread-activity watermark already makes an unchanged thread cost
+  zero extra calls. `warmup` reduced to one step (2 calls); the cold-start
+  jitter adds 3. `COOKIE_REFRESH_IG=false` (headless browser never touches IG).
 - `.env` on this box: `FRIEND_MEDIA_IG_ENABLED=false` (the archiver was the
   dominant API consumer: ~200 calls/hour for 10 friends). Telegram archiving is
   untouched.
 - Current jar is pre-latched dead; the bot will stay completely silent on IG
   until a fresh sessionid is uploaded.
+
+### Polling: what else can be done
+
+- **Current (cheap) path**: 1 authenticated inbox request per poll, 900 s ±40%
+  jitter. That is ~96 requests/day while idle, versus 288/day at 300 s.
+- **MQTT push (the real app's channel)**: would remove idle polling entirely —
+  the app receives new-message frames over a persistent MQTT connection. It is
+  the only genuinely more efficient method. A future implementation MUST attach
+  to the SAME instagrapi client/device identity (reuse `direct_ig_session.json`,
+  the proxy and the TLS transport); a second client/login is exactly the
+  device-churn mistake removed on 2026-11-06. Complex and risky — not now.
+- **Zero-IG option**: the Telegram bot already accepts links directly. If the
+  goal is just relaying media, sending the link to the bot in Telegram needs no
+  Instagram session and carries no suspension risk at all.
 
 ### Tests
 
@@ -151,12 +178,15 @@ New `utils/ig_session_guard.py`:
 
 ## Before reconnecting a new account (operator checklist)
 
-1. **Use a residential proxy in the account's country** and set
-   `DIRECT_FORWARD_PROXY` to it BEFORE the first login. This is the single
-   biggest mitigation; a datacenter IP will reproduce the same outcome.
-2. **Pin geo to the account's real region**, not US: `IG_DIRECT_COUNTRY`,
-   `IG_DIRECT_COUNTRY_CODE`, `IG_DIRECT_LOCALE`, `IG_DIRECT_TZ_OFFSET`,
-   `IG_DIRECT_TZ_NAME`. Mismatch (CZ IP + US headers) is a red flag.
+1. **Residential proxy is ideal but optional.** The operator cannot afford the
+   traffic, so the fallback is: the geo, identity and volume signals are now
+   clean, and the residual risk is the datacenter ASN itself. The only truly
+   zero-IG-risk alternative is to send links to the Telegram bot directly (it
+   already accepts links) — no IG session, no polling, no suspension surface.
+2. **Geo is auto-detected** (CZ/Prague on this box). No manual values needed.
+   Only set `IG_DIRECT_COUNTRY`/`IG_DIRECT_COUNTRY_CODE`/`IG_DIRECT_LOCALE`/
+   `IG_DIRECT_TZ_OFFSET`/`IG_DIRECT_TZ_NAME` if the account's real home region
+   differs from the VPS.
 3. Create the session on the **same egress** (or at least the same country) the
    bot will use; do not move a session between countries.
 4. **Never reuse a session that hit a checkpoint/suspension.** Export a NEW
@@ -164,8 +194,7 @@ New `utils/ig_session_guard.py`:
    a day before connecting the bot.
 5. Keep `FRIEND_MEDIA_IG_ENABLED=false` for at least the first days; enable it
    only after the DM relay has been stable. The archiver is the volume bomb.
-6. Consider raising `IG_DIRECT_POLL_SECONDS` from 300 to 900–1800 (fewer,
-   less-regular inbox polls).
+6. Keep `IG_DIRECT_POLL_SECONDS` at 900–1800 for the first week.
 7. Do not run the account's app and the bot's API client as competing
    identities during the first day if possible.
 

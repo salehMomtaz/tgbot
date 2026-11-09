@@ -471,10 +471,12 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     (~24 "new phones"/day) while the DM worker polled from a different persisted
     device — `cookies/history.jsonl` recorded **578** `instagrapi_writeback`
     overlays at the watcher cadence. Now:
-    - Friend Media rebuilds RESUME a persisted session (`direct_ig_session.json`
-      preferred → `friend_media_ig_session.json`) validated by a read-only
-      `account_info()`; it never re-logs in on rebuild and applies
-      `DIRECT_FORWARD_PROXY` for IP parity.
+    - Friend Media rebuilds RESUME the SAME persisted session file as the DM
+      worker (`direct_ig_session.json` — the one and only device identity)
+      validated by a read-only `account_info()`; it never re-logs in on rebuild
+      and applies `DIRECT_FORWARD_PROXY` for IP parity. `friend_media_ig_session.json`
+      was deleted 2026-11-09: it minted a SECOND Android identity for the same
+      sessionid (device churn). Do not recreate it.
     - The one-time bootstrap login is gated by `_IG_BOOT_SIG` (sessionid sig) and
       never retries the same rejected sessionid; the Friend Media breaker
       re-arms ONLY when the sig changes (the old 1-hour cooldown auto-probe is
@@ -507,13 +509,26 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     sequence); an *older* persisted session is not probed at all — the fresh
     jar gets exactly one bootstrap login. Both IG workers share a bootstrap
     lock and persist the SAME `direct_ig_session.json`, so a fresh jar mints
-    ONE Android identity, not one per worker. The headless cookie refresher no
+    ONE Android identity, not one per worker. `friend_media_ig_session.json`
+    is GONE (deleted 2026-11-09): a second Android identity for the same
+    sessionid is device churn. A fresh jar KEEPS the persisted uuids/device
+    identity and only replaces the session cookies (the admin no longer deletes
+    `direct_ig_session.json` on upload). The headless cookie refresher no
     longer visits instagram.com (`COOKIE_REFRESH_IG=false` by default): a fresh
     Chromium profile per run is a new-device signal, and instagrapi's
-    write-back already rotates the jar's session cookies. The relay watchdog
-    treats a latched IG as intentional silence. Regression tests:
-    `tests/test_ig_session_guard.py`, `tests/test_ig_login_no_retry.py`.
-    Suspension forensics + the new-account checklist:
+    write-back already rotates the jar's session cookies. yt-dlp never receives
+    the IG jar unless `IG_YTDLP_AUTH_ENABLED=true` (default **false**) — a web
+    transport on the same sessionid is a second identity; public posts/reels
+    still download anonymously. **Geo/locale/timezone are auto-detected from
+    the egress IP** by `utils/ig_geo.py` (ipinfo.io → ip-api.com, 7-day cache
+    in `cache/ig_geo.json`); a Prague VPS resolves to CZ / 420 / cs_CZ /
+    Europe/Prague (+3600s), and any non-empty `IG_DIRECT_*` value overrides one
+    field. `IG_DIRECT_POLL_SECONDS` (default 900, jittered) is the IG volume
+    dial; an idle poll is ONE `direct_v2/inbox` request and the activity
+    watermark makes an unchanged thread cost zero extra calls. The relay
+    watchdog treats a latched IG as intentional silence. Regression tests:
+    `tests/test_ig_session_guard.py`, `tests/test_ig_login_no_retry.py`,
+    `tests/test_ig_geo.py`. Suspension forensics + the new-account checklist:
     `docs/memory/tgbot-2026-11-09-ig-hard-stop-and-suspension-forensics.md`.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay

@@ -834,7 +834,7 @@ in a single message (previously the subscription prompt was a second message).
   requirements.txt / install.sh changes in this session.
 - **Cookie refresher invariants** (Phase 26): one Chromium at a time
   (~300 MB peak — safe on 4 GB+8swap), 24 h ± 1 h cadence, atomic Netscape
-  write `0o444`, clears `direct_ig_session.json` for IG, proxy-aware.
+  write `0o444`, keeps `direct_ig_session.json` (device identity) for IG and bootstraps the fresh sessionid, proxy-aware.
 - **Service lifecycle**: `tgbot.service` is installed but NOT enabled by
   install.sh (must `sudo systemctl enable --now tgbot` after first success);
   `tgbot-xchat-bridge.service` IS enabled (resident supervisor);
