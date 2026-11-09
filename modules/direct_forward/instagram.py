@@ -1021,21 +1021,113 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
 
-    # MQTToT hybrid push REMOVED 2026-11-06 (operator requirement: no
-    # secondary login path). It built a SECOND instagrapi client with a
-    # freshly randomized device identity and logged in on its own — exactly
-    # the device-churn / auto-login pattern that got the IG account
-    # suspended repeatedly and finally banned. Polling is the only IG
-    # session path; do not reintroduce a second client.
+    # ------------------------------------------------------------------
+    # MQTT push (2026-11-09). The 2026-11-06 hybrid was removed because it
+    # built a SECOND client with its own randomized device identity and logged
+    # in on its own. This implementation is deliberately different:
+    #   * it reuses the ALREADY authenticated `cl` (same sessionid, phone_id,
+    #     user_agent, locale, proxy) — no IGClient(), no login call anywhere;
+    #   * the reader thread performs no HTTP; only `direct_subscribe()` does
+    #     one request, and an auth rejection arms the session-dead latch;
+    #   * the worker owns a BOUNDED reconnect policy; a plain network failure
+    #     falls back to the normal polling loop instead of retrying forever.
+    # If push is disabled or cannot connect, behaviour is exactly the old
+    # jittered polling loop.
+    # ------------------------------------------------------------------
+    mqtt_enabled = bool(getattr(config, "IG_DIRECT_MQTT_ENABLED", False))
+    mqtt_fallback = max(300, getattr(config, "IG_DIRECT_MQTT_FALLBACK_SECONDS", 1800) or 1800)
+    mqtt_max_reconnects = max(1, getattr(config, "IG_DIRECT_MQTT_MAX_RECONNECTS", 3) or 3)
+    mqtt_ping = max(5, getattr(config, "IG_DIRECT_MQTT_PING_SECONDS", 15) or 15)
+    wake = asyncio.Event()
+    rt = None
+    mqtt_reconnects = 0
+    mqtt_gave_up = False
+
+    async def _stop_mqtt():
+        nonlocal rt
+        if rt is None:
+            return
+        old, rt = rt, None
+        try:
+            await loop.run_in_executor(None, old.stop)
+        except Exception as e:
+            logger.warning(f"[DirectForward/IG] MQTT stop failed: {e}")
+
+    async def _ensure_mqtt() -> bool:
+        """(Re)connect the push channel with bounded retries. NEVER logs in."""
+        nonlocal rt, mqtt_reconnects, mqtt_gave_up
+        if not mqtt_enabled or mqtt_gave_up:
+            return False
+        from .ig_realtime import IGRealtime
+        while True:
+            candidate = IGRealtime(cl, loop, on_push=wake.set, on_down=wake.set,
+                                   ping_seconds=mqtt_ping)
+            try:
+                await loop.run_in_executor(None, candidate.start)
+                rt = candidate
+                mqtt_reconnects = 0
+                return True
+            except Exception as e:
+                try:
+                    candidate.stop()
+                except Exception:
+                    pass
+                if ig_session_guard.is_auth_failure(e):
+                    newly = ig_session_guard.mark_dead(e, "DirectForward/IG")
+                    logger.error(f"[DirectForward/IG] MQTT subscribe was rejected ({e}) — "
+                                 f"arming the session-dead latch. NO login attempted.")
+                    if newly:
+                        try:
+                            await _post_ig_alert(
+                                bot_client, chat_id,
+                                (f"💀 **Instagram session is dead**\n\n"
+                                 f"The MQTT push channel rejected the sessionid (`{e}`).\n\n"
+                                 f"**All Instagram traffic is now stopped** — no polling, "
+                                 f"no login attempts, no further MQTT connects. Upload a "
+                                 f"fresh `igcookies.txt` to resume:\n"
+                                 f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**."))
+                        except Exception as alert_err:
+                            logger.warning(f"[DirectForward/IG] MQTT dead-session alert failed: {alert_err}")
+                    return False
+                mqtt_reconnects += 1
+                if mqtt_reconnects >= mqtt_max_reconnects:
+                    mqtt_gave_up = True
+                    logger.error(f"[DirectForward/IG] MQTT push failed {mqtt_reconnects}x "
+                                 f"({e}) — falling back to the jittered polling loop. "
+                                 f"NO login attempted.")
+                    return False
+                backoff = min(300.0, 30.0 * (2 ** (mqtt_reconnects - 1)))
+                backoff *= random.uniform(0.8, 1.2)
+                logger.warning(f"[DirectForward/IG] MQTT push connect failed ({e}); "
+                               f"retry {mqtt_reconnects}/{mqtt_max_reconnects} in "
+                               f"{backoff:.0f}s (no login).")
+                await asyncio.sleep(backoff)
+
+    if mqtt_enabled:
+        logger.info("[DirectForward/IG] MQTT push enabled — the inbox is polled "
+                    "only when a push arrives, plus a reconciliation poll every "
+                    f"{mqtt_fallback}s. Same device identity; no login on this path.")
+        await _ensure_mqtt()
 
     relogin_failures = 0  # consecutive mid-poll re-login failures (alert gate)
     delivered_in_run = 0  # DM items actually relayed by THIS worker run (backfill cap, burst_pace)
     try:
         while True:
             if not getattr(config, "IG_AUTH_ENABLED", True):
+                await _stop_mqtt()
                 logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — stopping the "
                             "worker (IG paused). No Instagram API calls will be made.")
                 return
+            if ig_session_guard.is_dead():
+                await _stop_mqtt()
+                logger.error("[DirectForward/IG] session latched dead — no polling and "
+                             "no push connects until a fresh igcookies.txt is uploaded.")
+                await _ig_wait_for_fresh_jar(cl, loop)
+                mqtt_reconnects = 0
+                mqtt_gave_up = False
+                if mqtt_enabled and getattr(config, "IG_AUTH_ENABLED", True):
+                    await _ensure_mqtt()
+                continue
             state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
             state_dirty = False
             # Reset the burst counter EVERY poll. It was initialised once before
@@ -1280,6 +1372,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                              f"export a NEW session and upload it."))
                     except Exception as alert_err:
                         logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
+                await _stop_mqtt()
                 await _ig_wait_for_fresh_jar(cl, loop)
                 relogin_failures = 0
             except LoginRequired as e:
@@ -1302,6 +1395,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                          f"**Admin Console → 🍪 Cookie Jars → Instagram → ✏️ Replace**.\n\n"
                          f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "
                          f"Instagram → 📜 History."))
+                await _stop_mqtt()
                 await _ig_wait_for_fresh_jar(cl, loop)
                 relogin_failures = 0  # fresh session — re-arm the one-shot alert
             except Exception as e:
@@ -1313,8 +1407,36 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             # exiting the loop (see utils/shared.wait_if_stopped).
             mark_worker_alive("ig")
             await wait_if_stopped()
-            await asyncio.sleep(_ig_poll_interval())
+
+            if mqtt_enabled and not mqtt_gave_up:
+                if rt is None or not rt.healthy:
+                    await _stop_mqtt()
+                    await _ensure_mqtt()
+                if ig_session_guard.is_dead():
+                    continue  # the loop top waits for a fresh jar
+                if mqtt_gave_up or rt is None or not rt.healthy:
+                    # Push unavailable: keep the normal polling relay alive.
+                    await asyncio.sleep(_ig_poll_interval())
+                    continue
+                # Wait for a push. Refresh the watchdog heartbeat every 60 s
+                # locally (NO HTTP) so a long idle period is not a "stall".
+                deadline = time.time() + mqtt_fallback
+                while time.time() < deadline and rt is not None and rt.healthy:
+                    await wait_if_stopped()
+                    try:
+                        await asyncio.wait_for(wake.wait(), timeout=60)
+                        break
+                    except asyncio.TimeoutError:
+                        mark_worker_alive("ig")
+                wake.clear()
+                if rt is None or not rt.healthy:
+                    await _stop_mqtt()  # reader died; reconnect next iteration
+            else:
+                await asyncio.sleep(_ig_poll_interval())
     finally:
-        # No background tasks are spawned by this worker. The MQTToT hybrid
-        # was removed 2026-11-06 (it logged in with a second device identity).
-        pass
+        # Stop the push reader on every exit path (IG paused, auth failure,
+        # cancellation). No background task is left behind.
+        try:
+            await _stop_mqtt()
+        except BaseException:
+            pass

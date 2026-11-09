@@ -481,9 +481,16 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
       never retries the same rejected sessionid; the Friend Media breaker
       re-arms ONLY when the sig changes (the old 1-hour cooldown auto-probe is
       gone).
-    - The MQTToT hybrid listener was **REMOVED** (`IG_DIRECT_MQTT_ENABLED`
-      deleted, `tools/test_ig_mqtt.py` deleted): it was a SECOND client with its
-      own randomized device identity that logged in on its own.
+    - The 2026-11-06 MQTToT hybrid listener was **REMOVED**: it was a SECOND
+      client with its own randomized device identity that logged in on its own.
+      The 2026-11-09 `IG_DIRECT_MQTT_ENABLED` push path is the safe
+      replacement: `modules/direct_forward/ig_realtime.py` wraps the **SAME**
+      authenticated `cl` (same sessionid/phone_id/user_agent/proxy), never
+      calls a login method, subscribes once (`direct_subscribe` = the only HTTP
+      request), and its reader thread performs no HTTP. The worker owns a
+      bounded reconnect (default 3, jittered backoff) and falls back to the
+      polling loop; an auth-classified failure arms the session-dead latch.
+      Never reintroduce a second client or any auto-login in this path.
     - `utils/downloader/cookies.py` never hands the IG jar to yt-dlp while
       `IG_AUTH_ENABLED=false` (yt-dlp's no-auth ladder still serves public
       media; only login-walled media is skipped).
@@ -491,8 +498,9 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
       150): `burst_pace(n_items, delivered_in_run)` returns `-1` at the cap and
       the worker stops cleanly with the cursor behind the remainder, resuming
       on later jittered polls instead of one scrape-shaped run.
-    Do NOT reintroduce a second IG client, a periodic login retry, or
-    mtime-gated re-login. Regression tests: `tests/test_ig_session_gate.py`.
+    Do NOT reintroduce a second IG client (the MQTT push path must reuse the
+    same client), a periodic login retry, or mtime-gated re-login. Regression
+    tests: `tests/test_ig_session_gate.py`, `tests/test_ig_realtime.py`.
 
     **HARD STOP after a rejected session (2026-11-09, operator requirement).**
     `utils/ig_session_guard.py` keeps a persistent latch at

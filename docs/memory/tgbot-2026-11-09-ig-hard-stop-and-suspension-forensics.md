@@ -156,12 +156,23 @@ New `utils/ig_session_guard.py`:
 
 - **Current (cheap) path**: 1 authenticated inbox request per poll, 900 s ±40%
   jitter. That is ~96 requests/day while idle, versus 288/day at 300 s.
-- **MQTT push (the real app's channel)**: would remove idle polling entirely —
-  the app receives new-message frames over a persistent MQTT connection. It is
-  the only genuinely more efficient method. A future implementation MUST attach
-  to the SAME instagrapi client/device identity (reuse `direct_ig_session.json`,
-  the proxy and the TLS transport); a second client/login is exactly the
-  device-churn mistake removed on 2026-11-06. Complex and risky — not now.
+- **MQTT push — IMPLEMENTED 2026-11-09** (`IG_DIRECT_MQTT_ENABLED`, default
+  false; enabled in this box's `.env` so a fresh jar activates it). The real
+  app's channel is a persistent MQTToT/IRIS connection; while it is healthy the
+  worker polls only when a push arrives, plus a reconciliation poll every
+  `IG_DIRECT_MQTT_FALLBACK_SECONDS` (default 1800 s). Safety model:
+  - wraps the **same authenticated `cl`** (same `sessionid`, `phone_id`,
+    `user_agent`, locale, proxy) — no `IGClient()`, no login call anywhere;
+  - `direct_subscribe()` is the ONLY HTTP request (one inbox read for
+    `seq_id`/`snapshot_at_ms`); the reader thread only reads the socket, sends
+    PINGREQ every 15 s and signals the asyncio loop;
+  - typing/presence/seen events are ignored;
+  - the worker owns a **bounded** reconnect (default 3, jittered backoff). A
+    plain network failure falls back to the polling loop; an auth-classified
+    failure (including MQTT CONNACK 4/5) arms the session-dead latch and stops
+    everything. There is no recursive login.
+  - Tests: `tests/test_ig_realtime.py` (same-client use, no login call in the
+    AST, noise filter, auth classification).
 - **Zero-IG option**: the Telegram bot already accepts links directly. If the
   goal is just relaying media, sending the link to the bot in Telegram needs no
   Instagram session and carries no suspension risk at all.

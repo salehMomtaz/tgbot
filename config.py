@@ -210,14 +210,26 @@ IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "").strip()
 # 900 = one authenticated request every ~15 min when idle; the self-DM thread's
 # activity watermark already makes an unchanged thread cost ZERO extra calls.
 IG_DIRECT_POLL_SECONDS = get_env_int("IG_DIRECT_POLL_SECONDS", 900)
+# MQTT (MQTToT/IRIS) push: the real app's DM channel. When enabled, the worker
+# holds one push connection using the SAME authenticated client/device identity
+# and polls only when a push arrives (plus a reconciliation poll every
+# IG_DIRECT_MQTT_FALLBACK_SECONDS). The push path NEVER logs in and NEVER
+# creates a second device. A failed connection is retried at most
+# IG_DIRECT_MQTT_MAX_RECONNECTS times, then falls back to polling.
+IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in ("true", "1", "yes")
+IG_DIRECT_MQTT_FALLBACK_SECONDS = get_env_int("IG_DIRECT_MQTT_FALLBACK_SECONDS", 1800)
+IG_DIRECT_MQTT_MAX_RECONNECTS = get_env_int("IG_DIRECT_MQTT_MAX_RECONNECTS", 3)
+IG_DIRECT_MQTT_PING_SECONDS = get_env_int("IG_DIRECT_MQTT_PING_SECONDS", 15)
 # Login-walled Instagram content through yt-dlp uses the SAME sessionid from a
 # DIFFERENT (web) transport — a second device identity. Keep this false to
 # preserve ONE identity; public posts/reels still download anonymously.
 IG_YTDLP_AUTH_ENABLED = os.getenv("IG_YTDLP_AUTH_ENABLED", "false").lower() in ("true", "1", "yes")
-# MQTToT hybrid push was REMOVED 2026-11-06: it created a SECOND instagrapi
-# client that logged in on its own with a freshly randomized device identity —
-# the device-churn/auto-login pattern that gets IG accounts suspended. Polling
-# is the only IG session path (operator requirement: no auto-login systems).
+# The 2026-11-06 MQTToT hybrid was REMOVED because it created a SECOND
+# instagrapi client that logged in on its own with a freshly randomized device
+# identity. The 2026-11-09 push path (IG_DIRECT_MQTT_ENABLED above) is
+# different and safe: it reuses the ALREADY authenticated client (same
+# sessionid/phone_id/user_agent), never calls a login method, and has a bounded
+# reconnect policy. Do NOT reintroduce a second client or any auto-login.
 # (IG_DIRECT_CHALLENGE_FREEZE_TEST was removed 2026-11-09: a checkpoint now
 # arms the persistent session-dead latch in utils/ig_session_guard.py — zero
 # retries, one notification, wait for a fresh jar. There is no timed freeze.)

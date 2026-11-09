@@ -131,6 +131,9 @@ def is_auth_failure(exc: BaseException) -> bool:
         "checkpoint", "login wall", "challenge_required",
         "checkpoint_required", "user_has_logged_out",
         "please wait a few minutes",
+        # MQTT CONNACK 4 = bad credentials, 5 = not authorized. Both mean the
+        # session is rejected; latch immediately instead of retrying the socket.
+        "mqtt connect failed: 4", "mqtt connect failed: 5",
     ))
 
 
