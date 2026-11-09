@@ -521,7 +521,10 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     is GONE (deleted 2026-11-09): a second Android identity for the same
     sessionid is device churn. A fresh jar KEEPS the persisted uuids/device
     identity and only replaces the session cookies (the admin no longer deletes
-    `direct_ig_session.json` on upload). The headless cookie refresher no
+    `direct_ig_session.json` on upload). **Exception:** if the jar's
+    `ds_user_id` differs from the persisted account id, the device identity is
+    NOT reused — a different account always gets its own fresh device (never
+    link two accounts in Instagram's graph). The headless cookie refresher no
     longer visits instagram.com (`COOKIE_REFRESH_IG=false` by default): a fresh
     Chromium profile per run is a new-device signal, and instagrapi's
     write-back already rotates the jar's session cookies. yt-dlp never receives

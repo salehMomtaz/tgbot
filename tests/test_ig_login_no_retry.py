@@ -74,14 +74,19 @@ class Sandbox:
         os.chdir(self._old_cwd)
         self._dir.cleanup()
 
-    def write_jar(self, sid: str):
+    def write_jar(self, sid: str, account: str | None = None):
         with open(self.jar, "w", encoding="utf-8") as f:
             f.write("# Netscape HTTP Cookie File\n")
             f.write(f".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\t{sid}\n")
+            if account:
+                f.write(f".instagram.com\tTRUE\t/\tTRUE\t0\tds_user_id\t{account}\n")
 
-    def write_persisted(self, sid: str):
+    def write_persisted(self, sid: str, account: str | None = None):
+        data: dict = {"cookies": {"sessionid": sid}}
+        if account:
+            data["authorization_data"] = {"ds_user_id": account}
         with open("direct_ig_session.json", "w", encoding="utf-8") as f:
-            json.dump({"cookies": {"sessionid": sid}}, f)
+            json.dump(data, f)
 
 
 def test_dead_persisted_session_with_same_sessionid_is_not_retried():
@@ -156,6 +161,17 @@ def test_transient_network_error_never_arms_the_latch():
             raise AssertionError("the transient error must propagate for a backoff")
         assert cl.calls == ["load_settings", "account_info"], cl.calls
         assert not ig_session_guard.is_dead(), "a blip must not demand a fresh jar"
+
+
+def test_a_different_account_gets_a_fresh_device_identity():
+    with Sandbox() as s:
+        s.write_jar("NEW", account="222")
+        s.write_persisted("OLD", account="111")
+        cl = FakeClient()
+        igmod._ig_login(cl)
+        # The old account's device identity must NOT be loaded into the new one.
+        assert cl.calls == ["login_by_sessionid"], cl.calls
+        assert not ig_session_guard.is_dead()
 
 
 def test_ig_poll_interval_uses_the_ig_specific_knob():

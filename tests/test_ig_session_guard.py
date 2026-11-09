@@ -108,6 +108,26 @@ def test_persisted_session_matches_jar():
         assert ig_session_guard.persisted_sessionid(os.path.join(s._dir.name, "nope")) is None
 
 
+def test_different_account_never_reuses_the_device_identity():
+    with _GuardSandbox() as s:
+        _write_jar(s.jar, "AAA",
+                   extra=".instagram.com\tTRUE\t/\tTRUE\t0\tds_user_id\t111\n")
+        settings = os.path.join(s._dir.name, "direct_ig_session.json")
+        with open(settings, "w", encoding="utf-8") as f:
+            json.dump({"authorization_data": {"ds_user_id": "111"}}, f)
+        assert ig_session_guard.same_account_as_jar(settings) is True
+
+        with open(settings, "w", encoding="utf-8") as f:
+            json.dump({"authorization_data": {"ds_user_id": "222"}}, f)
+        assert ig_session_guard.same_account_as_jar(settings) is False, \
+            "a different account must get its own device identity"
+
+        # Unknown ids must not trigger a false reset.
+        with open(settings, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        assert ig_session_guard.same_account_as_jar(settings) is True
+
+
 def test_clear_is_idempotent():
     with _GuardSandbox() as s:
         _write_jar(s.jar, "AAA")

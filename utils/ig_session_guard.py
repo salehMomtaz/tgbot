@@ -106,6 +106,45 @@ def persisted_sessionid(path: str) -> str | None:
         return None
 
 
+def _cookie_value(path: str, name: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                if raw.startswith("#") or not raw.strip():
+                    continue
+                parts = raw.rstrip("\n").split("\t")
+                if len(parts) >= 7 and parts[5] == name and parts[6]:
+                    return parts[6]
+    except Exception:
+        pass
+    return None
+
+
+def jar_account_id(jar_path: str | None = None) -> str | None:
+    """Return the ``ds_user_id`` cookie from the jar (the account it belongs to)."""
+    return _cookie_value(jar_path or _jar_path(), "ds_user_id")
+
+
+def persisted_account_id(path: str) -> str | None:
+    """Return the account id stored in an instagrapi settings file."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        auth = data.get("authorization_data") or {}
+        return str(auth.get("ds_user_id") or (data.get("cookies") or {}).get("ds_user_id") or "") or None
+    except Exception:
+        return None
+
+
+def same_account_as_jar(path: str, jar_path: str | None = None) -> bool:
+    """True unless the persisted device identity clearly belongs to ANOTHER
+    account. A different account must get its own fresh device identity — reusing
+    the old device would link the two accounts in Instagram's graph."""
+    p_acc = persisted_account_id(path)
+    j_acc = jar_account_id(jar_path)
+    return not (p_acc and j_acc and p_acc != j_acc)
+
+
 def persisted_matches_jar(path: str, jar_path: str | None = None) -> bool:
     """True when a persisted instagrapi session uses the SAME sessionid as the
     jar (i.e. it is not "older" than the jar — a failure means the jar's

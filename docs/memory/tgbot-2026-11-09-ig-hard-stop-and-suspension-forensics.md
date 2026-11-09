@@ -133,6 +133,10 @@ New `utils/ig_session_guard.py`:
   session cookies — `modules/admin/cookies.py` no longer deletes the session
   file on upload, and `_ig_login` loads the device identity without probing the
   stale session.
+- **Cross-account safety:** if the jar's `ds_user_id` differs from the
+  persisted session's account id, the persisted device identity is NOT reused.
+  A different account gets its own fresh device — never link two accounts in
+  Instagram's graph.
 - **yt-dlp never gets the IG jar** unless `IG_YTDLP_AUTH_ENABLED=true` (default
   **false**). A web transport on the same sessionid is a second identity;
   public posts/reels still download anonymously.

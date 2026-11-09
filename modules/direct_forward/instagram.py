@@ -467,7 +467,15 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
 
         persisted = "direct_ig_session.json"
         if os.path.exists(persisted) and os.path.getsize(persisted) > 0:
-            if not ig_session_guard.persisted_matches_jar(persisted):
+            if not ig_session_guard.same_account_as_jar(persisted):
+                # The persisted device identity belongs to a DIFFERENT account.
+                # Reusing it would link the two accounts in Instagram's graph;
+                # this account gets its own fresh device identity instead (a
+                # one-time, expected change when switching accounts).
+                logger.warning(f"{log_prefix} persisted device identity belongs to a "
+                               f"different account — NOT reusing it; this account gets "
+                               f"its own fresh device identity.")
+            elif not ig_session_guard.persisted_matches_jar(persisted):
                 # The persisted session belongs to an OLDER jar. Keep its DEVICE
                 # identity (uuids/device_settings) — that is the ONE identity
                 # this account must keep using — but do NOT probe the stale

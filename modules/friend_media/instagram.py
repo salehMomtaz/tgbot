@@ -316,6 +316,11 @@ async def _ig_client():
 
                 for _path in (_SHARED_SESSION,):
                     if os.path.exists(_path) and os.path.getsize(_path) > 0:
+                        if not ig_session_guard.same_account_as_jar(_path):
+                            logger.warning(f"[FriendMedia:ig] {_path} device identity "
+                                           f"belongs to a different account — using a "
+                                           f"fresh device for this account")
+                            continue
                         if not ig_session_guard.persisted_matches_jar(_path):
                             # Device identity from an OLDER jar: keep the ONE
                             # device identity (uuids) but do NOT probe the stale
