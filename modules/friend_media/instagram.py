@@ -40,11 +40,11 @@ from . import common
 logger = logging.getLogger(__name__)
 
 _IG_JAR = "cookies/instagram/igcookies.txt"
-# Persisted device identity for the one-time bootstrap login (see _build).
-# The DM worker's direct_ig_session.json is PREFERRED when present, so both
-# workers share ONE Instagram device identity instead of minting a new phone
-# every rebuild (that churn is what got the account suspended).
-_FM_SESSION = "friend_media_ig_session.json"
+# ONE DEVICE IDENTITY (2026-11-09): both IG workers use the SAME persisted
+# instagrapi session file — direct_ig_session.json. A second file
+# (friend_media_ig_session.json) minted a second Android identity for the same
+# sessionid, which is a device-churn signal. Do not reintroduce it.
+_SHARED_SESSION = "direct_ig_session.json"
 _IG_CLIENT_TTL = 1800  # seconds
 # sessionid signature of the last FAILED bootstrap login: never retry the
 # same rejected session — only an operator jar upload (new signature) may.
@@ -260,13 +260,15 @@ async def _ig_client():
             except Exception as e:
                 logger.warning(f"[FriendMedia:ig] transport install degraded: {e}")
             try:
+                from utils import ig_geo
+                geo = ig_geo.resolve()
                 ig_anti_detect.pin_geo(
                     c,
-                    country=getattr(config, "IG_DIRECT_COUNTRY", "US") or "US",
-                    country_code=getattr(config, "IG_DIRECT_COUNTRY_CODE", 1) or 1,
-                    locale=getattr(config, "IG_DIRECT_LOCALE", "en_US") or "en_US",
-                    timezone_offset=getattr(config, "IG_DIRECT_TZ_OFFSET", -14400),
-                    timezone_name=getattr(config, "IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00",
+                    country=geo["country"],
+                    country_code=geo["country_code"],
+                    locale=geo["locale"],
+                    timezone_offset=geo["timezone_offset"],
+                    timezone_name=geo["timezone_name"],
                 )
             except Exception as e:
                 logger.warning(f"[FriendMedia:ig] geo pin degraded: {e}")
@@ -312,14 +314,21 @@ async def _ig_client():
                         f"IG session dead ({ig_session_guard.dead_reason()}) — "
                         f"upload a fresh igcookies.txt via Admin → 🍪 Cookie Jars")
 
-                for _path in ("direct_ig_session.json", _FM_SESSION):
+                for _path in (_SHARED_SESSION,):
                     if os.path.exists(_path) and os.path.getsize(_path) > 0:
                         if not ig_session_guard.persisted_matches_jar(_path):
-                            # Device identity from an OLDER jar: do not probe
-                            # that old (likely dead) session; bootstrap the
-                            # fresh sessionid instead.
-                            logger.info(f"[FriendMedia:ig] {_path} belongs to an "
-                                        f"older jar — skipping its probe")
+                            # Device identity from an OLDER jar: keep the ONE
+                            # device identity (uuids) but do NOT probe the stale
+                            # session; login_by_sessionid below replaces its
+                            # cookies with the fresh sessionid.
+                            try:
+                                c.load_settings(_path)
+                                logger.info(f"[FriendMedia:ig] {_path} belongs to an "
+                                            f"older jar — keeping its device identity "
+                                            f"and bootstrapping the fresh sessionid")
+                            except Exception as e:
+                                logger.warning(f"[FriendMedia:ig] could not load the "
+                                               f"device identity ({e}); using a fresh one")
                             continue
                         try:
                             c.load_settings(_path)

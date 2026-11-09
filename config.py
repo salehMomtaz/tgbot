@@ -197,11 +197,23 @@ IG_DIRECT_FROM_USERNAME = os.getenv("IG_DIRECT_FROM_USERNAME", "")  # YOUR IG ha
 # plain Python requests TLS fingerprint (a dead giveaway); these pin the
 # session to a real Chrome fingerprint and the account's home region.
 IG_DIRECT_TRANSPORT_IMPERSONATE = os.getenv("IG_DIRECT_TRANSPORT_IMPERSONATE", "chrome136") or "chrome136"
-IG_DIRECT_COUNTRY = os.getenv("IG_DIRECT_COUNTRY", "US") or "US"
-IG_DIRECT_COUNTRY_CODE = get_env_int("IG_DIRECT_COUNTRY_CODE", 1) or 1
-IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "en_US") or "en_US"
-IG_DIRECT_TZ_OFFSET = get_env_int("IG_DIRECT_TZ_OFFSET", -14400)
-IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00"
+# Geo/locale/timezone are AUTO-DETECTED from the box's egress IP by
+# utils/ig_geo.py (country code, locale, timezone + UTC offset). An explicit
+# value here OVERRIDES detection for that one field. Leave empty for auto —
+# a CZ VPS with US headers is a visible mismatch Instagram correlates on.
+IG_DIRECT_COUNTRY = os.getenv("IG_DIRECT_COUNTRY", "").strip()
+IG_DIRECT_COUNTRY_CODE = os.getenv("IG_DIRECT_COUNTRY_CODE", "").strip()
+IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "").strip()
+IG_DIRECT_TZ_OFFSET = os.getenv("IG_DIRECT_TZ_OFFSET", "").strip()
+IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "").strip()
+# IG inbox poll cadence (seconds, jittered ±DIRECT_FORWARD_POLL_JITTER_PCT%).
+# 900 = one authenticated request every ~15 min when idle; the self-DM thread's
+# activity watermark already makes an unchanged thread cost ZERO extra calls.
+IG_DIRECT_POLL_SECONDS = get_env_int("IG_DIRECT_POLL_SECONDS", 900)
+# Login-walled Instagram content through yt-dlp uses the SAME sessionid from a
+# DIFFERENT (web) transport — a second device identity. Keep this false to
+# preserve ONE identity; public posts/reels still download anonymously.
+IG_YTDLP_AUTH_ENABLED = os.getenv("IG_YTDLP_AUTH_ENABLED", "false").lower() in ("true", "1", "yes")
 # MQTToT hybrid push was REMOVED 2026-11-06: it created a SECOND instagrapi
 # client that logged in on its own with a freshly randomized device identity —
 # the device-churn/auto-login pattern that gets IG accounts suspended. Polling

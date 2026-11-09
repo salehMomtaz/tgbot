@@ -88,6 +88,7 @@ def test_ig_auth_pause_disables_ytdlp_jar():
     from utils import ig_session_guard
 
     old = config.IG_AUTH_ENABLED
+    old_yt = getattr(config, "IG_YTDLP_AUTH_ENABLED", False)
     old_jar = config.IG_COOKIES
     old_latch = ig_session_guard.LATCH_PATH
     with tempfile.TemporaryDirectory() as d:
@@ -98,18 +99,27 @@ def test_ig_auth_pause_disables_ytdlp_jar():
             _write_jar(config.IG_COOKIES, "AAA")
 
             config.IG_AUTH_ENABLED = False
+            config.IG_YTDLP_AUTH_ENABLED = True
             assert dl_cookies._resolve_jar_path(
                 "https://www.instagram.com/reel/abc/") is None
+
+            # ONE IDENTITY: even with IG auth on, yt-dlp gets no jar unless the
+            # operator explicitly opts into login-walled content.
             config.IG_AUTH_ENABLED = True
+            config.IG_YTDLP_AUTH_ENABLED = False
+            assert dl_cookies._resolve_jar_path(
+                "https://www.instagram.com/reel/abc/") is None
+            config.IG_YTDLP_AUTH_ENABLED = True
             assert dl_cookies._resolve_jar_path(
                 "https://www.instagram.com/reel/abc/") == config.IG_COOKIES
 
-            # A known-dead session is a hard stop even with IG_AUTH_ENABLED=true.
+            # A known-dead session is a hard stop even with both switches on.
             ig_session_guard.mark_dead("login_required", "test")
             assert dl_cookies._resolve_jar_path(
                 "https://www.instagram.com/reel/abc/") is None
         finally:
             config.IG_AUTH_ENABLED = old
+            config.IG_YTDLP_AUTH_ENABLED = old_yt
             config.IG_COOKIES = old_jar
             ig_session_guard.LATCH_PATH = old_latch
 

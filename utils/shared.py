@@ -33,7 +33,8 @@ ABORT_AUTO_CLEAR_SECONDS = 30
 #: admin Abort). Deleting xchat_bridge_state.json makes the Deno bridge
 #: re-prime last_seq to newest and silently SKIP the entire backlog.
 PROTECTED_CACHE_FILES = {"xchat_bridge_state.json", "xchat_inbox.jsonl",
-                         "friend_media_state.json", "ig_session_dead.json"}
+                         "friend_media_state.json", "ig_session_dead.json",
+                         "ig_geo.json"}
 
 
 def signal_all_stop() -> None:

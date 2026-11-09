@@ -97,17 +97,15 @@ def _write_cookie_jar(cookie_key: str, file_path: str, content: str,
         file_path, "admin_replace", actor=actor,
         note=(f"replaced jar (prev sha {prev_sha16})" if prev_sha16
               else "initial jar write"))
-    # Instagram: fresh jar invalidates the persisted private-API session.
-    # If we keep direct_ig_session.json, the next _ig_login will try to resume
-    # that stale session first (account_info -> 403), waste a cycle, then fall
-    # back to sessionid. Deleting it makes the next login go straight to the
-    # new sessionid you just uploaded (the one you verified via Cookie-Editor
-    # injection). This is why you saw "maybe stuck on a copy from before".
+    # Instagram: a fresh jar invalidates the persisted private-API SESSION, but
+    # it must NOT invalidate the DEVICE IDENTITY (2026-11-09, one-identity rule).
+    # `_ig_login` compares the persisted sessionid with the jar's: a mismatch is
+    # treated as "older jar", the uuids/device_settings are kept, the stale
+    # session is never probed, and login_by_sessionid replaces its cookies with
+    # the fresh sessionid. Deleting direct_ig_session.json here would mint a NEW
+    # Android identity on every jar upload — device churn, exactly what got the
+    # account suspended. Keep the file.
     if cookie_key == "igcookies":
-        for stale in ("direct_ig_session.json", "direct_ig_session.json.bak"):
-            try:
-                if os.path.exists(stale):
-                    os.remove(stale)
-                    logger.info(f"[Cookies] Removed stale {stale} after igcookies upload — next IG login will use fresh sessionid")
-            except Exception:
-                pass
+        logger.info("[Cookies] igcookies replaced — keeping direct_ig_session.json "
+                    "device identity; the next login bootstraps the fresh sessionid "
+                    "without probing the old session")

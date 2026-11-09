@@ -33,6 +33,12 @@ def _resolve_jar_path(url: str) -> str | None:
         # and re-enables IG auth (Admin → 🔐 IG Auth).
         if not getattr(config, "IG_AUTH_ENABLED", True):
             return None
+        # ONE IDENTITY RULE (2026-11-09): yt-dlp is a DIFFERENT (web) transport
+        # using the same sessionid — a second device identity Instagram can
+        # correlate. Keep login-walled IG content off unless explicitly opted
+        # in; public posts/reels still download anonymously.
+        if not getattr(config, "IG_YTDLP_AUTH_ENABLED", False):
+            return None
         # Hard stop: a known-dead/suspended sessionid must never be handed to
         # yt-dlp either (it would replay the rejected session from the VPS IP).
         if ig_session_guard.is_dead():

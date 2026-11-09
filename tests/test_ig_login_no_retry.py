@@ -122,9 +122,10 @@ def test_fresh_session_from_an_older_persisted_session_allows_one_login():
         s.write_persisted("OLD")  # persisted device session is from an older jar
         cl = FakeClient(account_info_exc=LoginRequired("login_required"))
         igmod._ig_login(cl)
-        # The OLD persisted session must not be probed at all — straight to the
-        # single bootstrap login for the fresh sessionid.
-        assert cl.calls == ["login_by_sessionid"], cl.calls
+        # The OLD persisted session must NOT be probed (no account_info), but its
+        # device identity IS loaded so the account keeps ONE identity across jar
+        # uploads; then exactly one bootstrap login for the fresh sessionid.
+        assert cl.calls == ["load_settings", "login_by_sessionid"], cl.calls
         assert not ig_session_guard.is_dead(), "a successful bootstrap clears the latch"
 
 
@@ -155,6 +156,23 @@ def test_transient_network_error_never_arms_the_latch():
             raise AssertionError("the transient error must propagate for a backoff")
         assert cl.calls == ["load_settings", "account_info"], cl.calls
         assert not ig_session_guard.is_dead(), "a blip must not demand a fresh jar"
+
+
+def test_ig_poll_interval_uses_the_ig_specific_knob():
+    old = getattr(config, "IG_DIRECT_POLL_SECONDS", None)
+    old_j = getattr(config, "DIRECT_FORWARD_POLL_JITTER_PCT", 40)
+    try:
+        config.IG_DIRECT_POLL_SECONDS = 900
+        config.DIRECT_FORWARD_POLL_JITTER_PCT = 0
+        assert igmod._ig_poll_interval() == 900
+        config.IG_DIRECT_POLL_SECONDS = 1800
+        assert igmod._ig_poll_interval() == 1800
+    finally:
+        if old is None:
+            del config.IG_DIRECT_POLL_SECONDS
+        else:
+            config.IG_DIRECT_POLL_SECONDS = old
+        config.DIRECT_FORWARD_POLL_JITTER_PCT = old_j
 
 
 def _run() -> int:

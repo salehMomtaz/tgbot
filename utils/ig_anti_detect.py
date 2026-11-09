@@ -436,13 +436,17 @@ def pin_geo(cl, country: str = "US", country_code: int = 1,
                 f"{timezone_name} ({timezone_offset})")
 
 
-def warmup(cl, steps: int = 3) -> None:
+def warmup(cl, steps: int = 1) -> None:
     """Paced, benign read-only calls right after login.
 
     The first real inbox poll is the account's first visible activity on a
     fresh IP (and, after the checkpoint, on a fresh session) — warming up with
     a couple of ordinary reads and human pacing makes the transition look like
     an app open, not a bot starting a job.
+
+    Default is ONE step (2 calls): the cold-start jitter that follows already
+    adds three more paced reads. Every restart used to burn 6 warmup calls on
+    top of those; API volume is what Instagram's automation model watches.
     """
     def _do(label, fn):
         try:

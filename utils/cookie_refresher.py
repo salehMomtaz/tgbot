@@ -186,11 +186,18 @@ async def _refresh_one(cookie_path: str, url: str, wait_hint: str = None,
                 browser = await p.chromium.launch(headless=True, args=launch_args, proxy={"server": proxy_server} if "://" in proxy_server else {"server": f"http://{proxy_server}"})
             else:
                 browser = await p.chromium.launch(headless=True, args=launch_args)
-            # Single context, single page
+            # Single context, single page. The locale follows the egress
+            # country (utils/ig_geo.py) so the browser does not claim en_US
+            # from a CZ datacenter.
+            try:
+                from utils import ig_geo
+                _locale = ig_geo.resolve()["locale"]
+            except Exception:
+                _locale = "en_US"
             context = await browser.new_context(
                 user_agent=getattr(config, "YTDLP_USER_AGENT", "") or "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
-                locale=getattr(config, "IG_DIRECT_LOCALE", "en_US") or "en_US",
+                locale=_locale,
             )
             await context.add_cookies(playwright_cookies)
             page = await context.new_page()

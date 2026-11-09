@@ -7,6 +7,7 @@ Mirrors the original modules/direct_forward.py Instagram worker exactly.
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 
@@ -22,7 +23,7 @@ from .state import (
     _bump_cursor,
 )
 from .common import (
-    URL_RE, IG_POST_RE, _poll_interval, _compose_caption,
+    URL_RE, IG_POST_RE, _compose_caption,
     _send_followups, _download_and_deliver, _enqueue_relay, _await_relays, _fetch_bytes,
     _video_upload_kwargs, _header_lines,
 )
@@ -467,13 +468,20 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
         persisted = "direct_ig_session.json"
         if os.path.exists(persisted) and os.path.getsize(persisted) > 0:
             if not ig_session_guard.persisted_matches_jar(persisted):
-                # The persisted device identity belongs to an OLDER jar. Do not
-                # probe that old (likely dead) session at all — bootstrap the
-                # fresh sessionid instead. Probing it was one of the extra
-                # touches the operator forbade.
-                logger.info(f"{log_prefix} persisted session belongs to an older "
-                            f"jar — bootstrapping the fresh sessionid (no probe of "
-                            f"the old session).")
+                # The persisted session belongs to an OLDER jar. Keep its DEVICE
+                # identity (uuids/device_settings) — that is the ONE identity
+                # this account must keep using — but do NOT probe the stale
+                # session. login_by_sessionid below replaces its cookies with
+                # the fresh sessionid. Probing the old session was one of the
+                # extra touches the operator forbade.
+                try:
+                    cl.load_settings(persisted)
+                    logger.info(f"{log_prefix} persisted session is from an older "
+                                f"jar — keeping its device identity and "
+                                f"bootstrapping the fresh sessionid (no probe).")
+                except Exception as e:
+                    logger.warning(f"{log_prefix} could not load the persisted "
+                                   f"device identity ({e}); using a fresh one.")
             else:
                 try:
                     cl.load_settings(persisted)
@@ -721,6 +729,22 @@ def _ig_auth_failure(exc: Exception) -> bool:
     ))
 
 
+def _ig_poll_interval() -> float:
+    """Effective delay between IG inbox sweeps: base ± jitter.
+
+    IG has its OWN cadence (``IG_DIRECT_POLL_SECONDS``, default 900) instead of
+    the shared ``DIRECT_FORWARD_POLL_SECONDS`` (300) used by X: an idle poll
+    costs one authenticated ``direct_v2/inbox`` request, and API volume is what
+    Instagram's automation model watches. The activity watermark already makes
+    an unchanged thread cost ZERO extra calls, so 900 s is the main volume dial.
+    """
+    base = max(120, getattr(config, "IG_DIRECT_POLL_SECONDS", 900) or 900)
+    jitter_pct = max(0, min(90, getattr(config, "DIRECT_FORWARD_POLL_JITTER_PCT", 40)))
+    if jitter_pct:
+        base *= random.uniform(1 - jitter_pct / 100, 1 + jitter_pct / 100)
+    return base
+
+
 def _ig_jar_mtime() -> float:
     """Return the mtime of the IG cookie jar, or 0 if missing."""
     try:
@@ -798,13 +822,15 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         except Exception as e:
             logger.warning(f"[DirectForward/IG] transport install degraded: {e}")
         try:
+            from utils import ig_geo
+            geo = ig_geo.resolve()
             ig_anti_detect.pin_geo(
                 c,
-                country=getattr(config, "IG_DIRECT_COUNTRY", "US") or "US",
-                country_code=getattr(config, "IG_DIRECT_COUNTRY_CODE", 1) or 1,
-                locale=getattr(config, "IG_DIRECT_LOCALE", "en_US") or "en_US",
-                timezone_offset=getattr(config, "IG_DIRECT_TZ_OFFSET", -14400),
-                timezone_name=getattr(config, "IG_DIRECT_TZ_NAME", "GMT-04:00") or "GMT-04:00",
+                country=geo["country"],
+                country_code=geo["country_code"],
+                locale=geo["locale"],
+                timezone_offset=geo["timezone_offset"],
+                timezone_name=geo["timezone_name"],
             )
         except Exception as e:
             logger.warning(f"[DirectForward/IG] geo pin degraded: {e}")
@@ -924,7 +950,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             else:
                 # Transient (network/timeout/429) — bounded backoff, do NOT
                 # demand a jar re-upload for a blip.
-                backoff = min(_poll_interval() * (2 ** (min(login_attempt, 5) - 1)), 3600)
+                backoff = min(_ig_poll_interval() * (2 ** (min(login_attempt, 5) - 1)), 3600)
                 logger.warning(f"[DirectForward/IG] login failed transiently: {e}. "
                                f"Retrying in ~{backoff / 60:.0f}m.")
                 await asyncio.sleep(backoff)
@@ -1280,14 +1306,14 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 relogin_failures = 0  # fresh session — re-arm the one-shot alert
             except Exception as e:
                 logger.error(f"[DirectForward/IG] poll error: {e}")
-                await asyncio.sleep(min(600, _poll_interval()))
+                await asyncio.sleep(min(600, _ig_poll_interval()))
 
             # A completed poll cycle = the worker is alive (watchdog heartbeat).
             # A set abort flag PAUSES here until it self-clears, instead of
             # exiting the loop (see utils/shared.wait_if_stopped).
             mark_worker_alive("ig")
             await wait_if_stopped()
-            await asyncio.sleep(_poll_interval())
+            await asyncio.sleep(_ig_poll_interval())
     finally:
         # No background tasks are spawned by this worker. The MQTToT hybrid
         # was removed 2026-11-06 (it logged in with a second device identity).
