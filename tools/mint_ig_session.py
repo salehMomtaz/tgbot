@@ -60,7 +60,7 @@ def main() -> int:
     from instagrapi.exceptions import (
         ChallengeRequired, PleaseWaitFewMinutes, TwoFactorRequired,
     )
-    from utils import ig_anti_detect
+    from utils import ig_anti_detect, ig_session_guard
 
     try:
         from importlib.metadata import version as _pkg_version
@@ -156,6 +156,11 @@ def main() -> int:
         ig_anti_detect.write_back_session(cl, config.IG_COOKIES)
     except Exception as e:
         print(f"⚠ session write-back failed: {e}")
+
+    # A successful app-native login is a deliberate operator action: clear the
+    # hard-stop latch even if Instagram reused the SAME sessionid (it does
+    # sometimes, which left the bot waiting forever after a mint).
+    ig_session_guard.clear("app-native session minted")
 
     sid = getattr(cl, "sessionid", "") or ""
     print("\n✓ app-native session minted")

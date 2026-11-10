@@ -605,7 +605,18 @@ def write_back_session(cl, jar_path: str) -> None:
         cookies = getattr(cl.private, "cookies", None)
         updates: dict[tuple[str, str], str] = {}
         for name in ("sessionid", "csrftoken", "ds_user_id", "mid", "rur"):
-            val = cookies.get(name) if cookies is not None else None
+            val = None
+            if cookies is not None:
+                try:
+                    val = cookies.get(name)
+                except Exception:
+                    # Instagram sets e.g. rur on more than one domain/path;
+                    # RequestsCookieJar.get raises CookieConflict there. Pick
+                    # the instagram.com cookie explicitly instead.
+                    for c in cookies:
+                        if c.name == name and "instagram.com" in (c.domain or ""):
+                            val = c.value
+                            break
             if val:
                 updates[(".instagram.com", name)] = str(val)
         if not updates:
