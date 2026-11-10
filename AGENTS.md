@@ -562,6 +562,22 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     The root-cause research (stale US geo, public/private identity split, app
     version 428 vs 449, browser→Android session provenance, datacenter IP):
     `docs/memory/tgbot-2026-11-10-instagram-automation-warning-research.md`.
+
+    **Session provenance + proxy economics (2026-11-10).** A Chrome-exported
+    `sessionid` is a WEB session; driving it through the Android private API is
+    the "browser session used by a different device" pattern Instagram flags.
+    Do NOT try to fix it by editing cookies: `rur` is server-signed, and
+    `ig_did`/`datr` are browser-only cookies the private API never sends. The
+    only supported way to create a session is
+    `tools/mint_ig_session.py` — it reuses the persisted Android device, applies
+    `apply_identity()`, performs ONE interactive login (password + 2FA), and
+    writes the live cookies back; no retries, no credentials on disk. DevTools
+    "Android device" emulation does NOT create an app session. For metered
+    residential proxies use **split egress**: `DIRECT_FORWARD_PROXY` for the
+    small authenticated API/MQTT calls, `IG_CDN_DIRECT=true` (default) so the
+    signed CDN media download goes direct from the VPS. The account's identity
+    IP is the API IP — keep the browser and bot on the same egress or accept
+    two IPs. A datacenter/VPN IP remains the residual risk no code removes.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links

@@ -211,6 +211,12 @@ IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "").strip()
 # curl_cffi impersonation. This prevents the 2017-Safari public identity that
 # instagrapi 2.x otherwise sends alongside the Android private session.
 IG_PUBLIC_USER_AGENT = os.getenv("IG_PUBLIC_USER_AGENT", "").strip()
+# Split egress for Instagram: authenticated API/MQTT calls use
+# DIRECT_FORWARD_PROXY (small JSON, the account's identity IP), while the
+# signed CDN media downloads go DIRECT from the VPS (large bytes, no session).
+# Keep true to make an expensive residential proxy affordable; set false only
+# if the CDN rejects direct downloads.
+IG_CDN_DIRECT = os.getenv("IG_CDN_DIRECT", "true").lower() in ("true", "1", "yes")
 # IG inbox poll cadence (seconds, jittered ±DIRECT_FORWARD_POLL_JITTER_PCT%).
 # 900 = one authenticated request every ~15 min when idle; the self-DM thread's
 # activity watermark already makes an unchanged thread cost ZERO extra calls.

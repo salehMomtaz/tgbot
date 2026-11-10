@@ -496,14 +496,24 @@ async def _await_relays(futures) -> None:
             raise r
 
 
-def _fetch_bytes(url: str, referer: str | None = None) -> bytes:
-    """Small helper for downloading DM attachment bytes (runs in executor)."""
+def _fetch_bytes(url: str, referer: str | None = None,
+                 use_proxy: bool = True) -> bytes:
+    """Small helper for downloading DM attachment bytes (runs in executor).
+
+    ``use_proxy=False`` is the split-egress path for Instagram CDN media: the
+    signed CDN URL needs no session, so the large media download can go direct
+    from the VPS while the small authenticated API calls ride the residential
+    proxy (IG_CDN_DIRECT=true). This is what keeps an expensive proxy cheap.
+    """
     import requests
     headers = {"User-Agent": getattr(config, "YTDLP_USER_AGENT", "") or
                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
     if referer:
         headers["Referer"] = referer
-    proxies = {"http": config.REQUESTS_PROXY, "https": config.REQUESTS_PROXY} if config.REQUESTS_PROXY else None
+    proxies = None
+    if use_proxy and config.REQUESTS_PROXY:
+        proxies = {"http": config.REQUESTS_PROXY,
+                   "https": config.REQUESTS_PROXY}
     resp = requests.get(url, headers=headers, proxies=proxies, timeout=60)
     resp.raise_for_status()
     return resp.content

@@ -311,7 +311,12 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
     try:
         for i, (src, is_video) in enumerate(targets):
             try:
-                data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+                # Signed CDN URL — no session needed. With IG_CDN_DIRECT=true
+                # (default) the big media download bypasses the residential
+                # proxy; only the small API calls ride it.
+                data = await loop.run_in_executor(
+                    None, _fetch_bytes, src, "https://www.instagram.com/",
+                    not bool(getattr(config, "IG_CDN_DIRECT", True)))
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] resource {i} download failed: {e} — skipping")
                 continue

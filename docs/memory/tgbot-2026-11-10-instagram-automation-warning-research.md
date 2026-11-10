@@ -189,6 +189,86 @@ and the device match **from birth**:
    public-UA configuration, current API behavior), with the patches
    re-validated.
 
+## "Edit the cookie to match the VPS IP" — why that is the wrong lever
+
+`pin_geo()` is **not** a cookie editor. It sets request headers/settings:
+`X-IG-App-Startup-Country`, `X-IG-Timezone-Offset`, `X-IG-Device-Locale`,
+`X-IG-Mapped-Locale`, `X-IG-App-Locale`. The cookie that looks geo-related is
+`rur` (`RVA,<uid>,<ts>:<signature>`); it is **server-signed**, so hand-editing
+it invalidates it and is a stronger anomaly than leaving it alone. The same is
+true for `mid`/`ig_did`/`datr`.
+
+What actually happened here: the stale US values were in
+`direct_ig_session.json` (instagrapi settings), and `init()` restored them
+after `pin_geo`. The jar's `rur`/`mid` are already overwritten by
+`write_back_session()` with the **server-issued** values from the login, which
+is the only legitimate way to "move" them to the VPS region. The fix is
+`apply_identity()` stamping the resolved geo into `cl.settings` + attributes
+after every load — not forging signed cookies.
+
+`ig_did`/`datr` are browser-device cookies; the Android private API does not
+send them, so editing them changes nothing for the bot (they are browser
+provenance, which is exactly why a Chrome session is a poor fit).
+
+## Chrome DevTools "Android device" emulation — no
+
+Switching Chrome DevTools to an Android viewport only changes the **web** UA /
+viewport. The resulting `sessionid` is still a **web** session; the Android app
+uses a different API (`i.instagram.com` private endpoints), different device
+identifiers (`phone_id`, `uuid`, `android_device_id`, `advertising_id`), and a
+different auth flow. It would not fix the provenance mismatch — it would make
+the web session look like a phone browser, which is still not the app.
+
+## Minting an app-native session (the practical path)
+
+You do **not** need a physical Android phone. instagrapi *is* the Android app
+client: a `login()` from instagrapi creates a session bound to the persisted
+Android device identity. The new one-shot tool does exactly that:
+
+```bash
+# 1. Keep IG_AUTH_ENABLED=false and restart the bot (already done).
+# 2. After the account has rested 24-72 h:
+venv/bin/python tools/mint_ig_session.py
+# or through a residential proxy (same IP the bot will use):
+venv/bin/python tools/mint_ig_session.py --proxy 'http://user:pass@host:port'
+```
+
+It reuses `direct_ig_session.json` (the ONE Android device), applies the
+resolved CZ geo + Chrome-136 public identity + current app version, performs
+**ONE** login (prompting for the hidden password and the 2FA code if asked),
+dumps the settings, and writes the live session cookies back into the jar. Any
+challenge/429/error aborts with no retry. Credentials are never stored or
+logged. Then set `IG_AUTH_ENABLED=true` and restart the bot.
+
+This is the only way to make the session's provenance match the client. A
+Chrome-exported session can never be made equivalent to an app session by
+editing cookies or headers.
+
+## Split egress: expensive residential proxy only for the small calls
+
+If you have a residential proxy but its per-GB price is the blocker, use it
+**only for the authenticated API/MQTT traffic** and download the media direct
+from the VPS:
+
+- `DIRECT_FORWARD_PROXY` → instagrapi private API + MQTT + the public resolver.
+  These are small JSON/ack messages: a few KB per call, ~4 idle calls/hour plus
+  2–3 per message. Even a few hundred MB/month is plenty.
+- `IG_CDN_DIRECT=true` (default) → the signed CDN media download bypasses the
+  proxy and goes direct from the VPS. The URL is signed and needs no session,
+  so the large bytes never touch the metered proxy.
+- For a **private account**: the `media_info` call (through the proxy) obtains
+  the signed CDN URL; the direct download normally still works because the URL
+  is signed. If a particular CDN refuses the direct IP, set
+  `IG_CDN_DIRECT=false` for that run (the media then rides the proxy too).
+
+The catch: the **account's identity IP is the API IP**. If the bot's API uses
+the residential proxy while your browser uses the VPS VPN, the account sees two
+IPs. To keep one identity, either (a) route the browser's Instagram traffic
+through the same residential proxy, (b) don't use the account in a browser
+while the bot runs, or (c) keep the bot on the VPS IP and accept the datacenter
+risk. The cleanest free option is to run the bot on your **home** connection
+and use that same IP for the browser.
+
 ## Honest caveats
 
 - Instagram's classifier is opaque; this is an evidence-based reconstruction,
