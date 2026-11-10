@@ -39,7 +39,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 MANIFEST="tools/install-manifest.txt"
 BGUTIL_URL="https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git"
-BGUTIL_REF="${YTDLP_POT_PROVIDER_REF:-1.3.1}"
+BGUTIL_REF="${YTDLP_POT_PROVIDER_REF:-2.0.2}"
 
 # Use sudo only when not already root.
 if [[ "$(id -u)" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi

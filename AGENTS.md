@@ -132,10 +132,14 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    is already correct in `run.sh` and `deploy/tgbot.service` — keep it that way.
 
 2. **The PO provider must bind 127.0.0.1 only.** `utils/pot_provider.py::
-   _patch_localhost` rewrites the upstream `host: "::"` / `0.0.0.0` to
+   _patch_localhost` rewrites an upstream `host: "::"` / `0.0.0.0` to
    `127.0.0.1` (idempotent via the `// TGBOT_LOCALHOST_PATCH` marker). On a public
-   VPS the PO endpoint must never be internet-reachable. If you bump the provider
-   ref and the markers stop matching, the manager logs a loud warning — verify it.
+   VPS the PO endpoint must never be internet-reachable. bgutil-provider
+   **2.0.2** (the current pin, `install.sh BGUTIL_REF`) already defaults to
+   loopback (`::1` + `127.0.0.1`), so the patch is a no-op there and logs
+   "already binds loopback only"; for older/wildcard sources it still rewrites.
+   If you bump the provider ref and neither branch matches, the manager logs a
+   loud warning — verify the actual bind with `ss -ltnp | grep 4417`.
 
  3. **YouTube = cookies + PO token, no fallback.** `utils/downloader/url_normalize.py::
     _apply_pot_options` raises `RuntimeError` when the provider is down for a

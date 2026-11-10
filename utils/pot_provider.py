@@ -153,6 +153,14 @@ class PotProviderManager:
         if _LOCALHOST_MARKER in content:
             return
 
+        # bgutil-provider 2.0.x already defaults to loopback (::1 + 127.0.0.1);
+        # there is no wildcard to rewrite, so a warning would be misleading.
+        if ('host: "127.0.0.1"' in content
+                and 'host: "::"' not in content
+                and 'host: "0.0.0.0"' not in content):
+            logger.info("[POT] upstream already binds loopback only; no patch needed")
+            return
+
         patched = content
         patched = patched.replace('host: "::",', f'host: "127.0.0.1", {_LOCALHOST_MARKER}')
         patched = patched.replace('host: "0.0.0.0",', f'host: "127.0.0.1", {_LOCALHOST_MARKER}')
