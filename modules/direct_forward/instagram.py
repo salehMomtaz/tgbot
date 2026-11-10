@@ -351,32 +351,22 @@ def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                     pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
                 except Exception as e:
                     logger.warning(f"[DirectForward/IG] could not resolve media pk for {url}: {e}")
-        if pk and "/reel/" not in url:
-            # posts / carousels / stories: native-first (yt-dlp breaks on them)
+        if pk:
+            # NATIVE-FIRST for EVERY Instagram item: posts, carousels, stories
+            # AND reels. instagrapi's extractor picks the LARGEST
+            # video_versions rendition (height*width), so reels keep their best
+            # quality — and this path uses the SAME authenticated app session,
+            # with NO yt-dlp web transport. yt-dlp is only the fallback.
             try:
-                if await _ig_native_deliver_once(bot_client, chat_id, cl, pk, header_lines, body, url):
+                if await _ig_native_deliver_once(bot_client, chat_id, cl, pk,
+                                                 header_lines, body, url,
+                                                 allow_clips=True):
                     return
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] native path failed for {url}: {e} — falling back to yt-dlp")
-        if is_ig and "/reel/" in url:
-            # reels: yt-dlp-first (quality merge), native as fallback.
-            # allow_clips=True — this is the reel's LAST-RESORT delivery: a
-            # clips return-False here is what turned every audience-gated
-            # reel into a preview image (2026-09-04).
-            try:
-                await _download_and_deliver(bot_client, premium_client, chat_id, url,
-                                            header_lines, body, None)
-                return
-            except Exception as e:
-                logger.warning(f"[DirectForward/IG] yt-dlp reel failed for {url}: {e} — trying native")
-                if pk:
-                    try:
-                        if await _ig_native_deliver_once(bot_client, chat_id, cl, pk,
-                                                         header_lines, body, url,
-                                                         allow_clips=True):
-                            return
-                    except Exception as e2:
-                        logger.warning(f"[DirectForward/IG] native reel fallback failed: {e2}")
+        # Fallback: yt-dlp. For IG this is an ANONYMOUS web request — the IG
+        # jar is never handed over while IG_YTDLP_AUTH_ENABLED=false, so this
+        # path cannot carry the account's session.
         await _download_and_deliver(bot_client, premium_client, chat_id, url,
                                     header_lines, body, preview_url)
     return _enqueue_relay(queue, chat_id, job)
