@@ -1015,16 +1015,20 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         except Exception as e:
             logger.warning(f"[DirectForward/IG] priming peek failed: {e}")
 
-    poll = max(60, config.DIRECT_FORWARD_POLL_SECONDS)
+    if getattr(config, "IG_DIRECT_MQTT_ENABLED", False):
+        cadence = (f"push-driven (MQTT) + reconciliation every "
+                   f"{getattr(config, 'IG_DIRECT_MQTT_FALLBACK_SECONDS', 1800)}s")
+    else:
+        cadence = (f"every ~{_ig_poll_interval():.0f}s "
+                   f"(jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
     pair = _get_pair(state, "ig")
     if pair and self_uid and str(pair.get("user_id")) == self_uid:
         pair = None
     if pair:
-        logger.info(f"[DirectForward/IG] polling DMs from @{pair['username']} (id {pair['user_id']}) "
-                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+        logger.info(f"[DirectForward/IG] relaying DMs from @{pair['username']} "
+                    f"(id {pair['user_id']}) — {cadence}")
     elif self_thread_id:
-        logger.info(f"[DirectForward/IG] self-DM mode — polling thread {self_thread_id} "
-                    f"every ~{poll}s (jittered ±{config.DIRECT_FORWARD_POLL_JITTER_PCT}%)")
+        logger.info(f"[DirectForward/IG] self-DM mode — thread {self_thread_id} — {cadence}")
     else:
         logger.info("[DirectForward/IG] no pair yet — waiting for pairing handshake "
                     "(Admin Console → Direct-Forward → Pair Instagram) or a .env pre-pair.")
