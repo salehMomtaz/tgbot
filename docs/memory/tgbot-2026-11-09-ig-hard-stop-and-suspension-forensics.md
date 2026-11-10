@@ -213,11 +213,35 @@ New `utils/ig_session_guard.py`:
 7. Do not run the account's app and the bot's API client as competing
    identities during the first day if possible.
 
+## 2026-11-10 — live activation with a fresh session (MQTT verified)
+
+The operator uploaded a fresh `igc.txt` (Netscape jar, same account
+`2210…3164`, new sessionid `76b5…`) via the bot's file-stream link. It was
+installed with the admin's atomic writer (`_write_cookie_jar`, actor
+`opencode-2026-11-10`) after filtering out the unrelated `.google.com`
+cookies; the jar is `0o444` and the latch auto-cleared on the new sessionid.
+
+Observed (no manual restart needed — the waiting worker picked it up in <60 s):
+
+- `03:52:30` sessionid replaced → ONE login (no probe of the old session).
+- `03:52:36` `users/<uid>/info/` **200** → logged in via sessionid.
+- `03:52:40` persisted session resumed (one `account_info` 200).
+- `03:55:21` **MQTT push connected** (same device identity).
+- First ~30 min: **17 private requests** total (6 `accounts/current_user`,
+  10 `direct_v2/inbox`, 1 `users/<uid>/info`), **0 403s**, 0 thread fetches.
+- After `04:06`: **0 inbox requests while idle** (MQTT push + 1800 s
+  reconciliation), exactly the intended behavior.
+- Restart at `04:03` resumed the persisted session (no login) and MQTT
+  reconnected at `04:05:34`; 3 requests total.
+
+The push→relay end-to-end still needs a real incoming DM (the operator sends a
+self-DM link); the push socket is established and idle traffic is zero.
+
 ## Left open / not verified
 
-- No live Instagram login was attempted (operator said they are not uploading
-  cookies yet; `IG_AUTH_ENABLED` stays true but the latch keeps traffic at
-  zero).
+- The live login + MQTT activation were verified on 2026-11-10 (see above).
+  The end-to-end push→relay path still needs a real incoming self-DM; the
+  push socket is established and idle traffic is zero.
 - The exact Instagram classifier thresholds are not public; the ranking above
   is an evidence-based reconstruction, not a court-grade proof.
 - `certbot` certs for the operator's x-ui domains remain outside tgbot scope
