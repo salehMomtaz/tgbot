@@ -236,21 +236,19 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
    `ig_anti_detect.write_back_session` still overlays the `mid` issued to the
    authenticated instagrapi session (consistent with the sessionid) — leave it.
 
-5. **Keep `[default,curl-cffi]` on yt-dlp upgrades AND pin `curl_cffi<0.14`.**
+5. **Keep `[default,curl-cffi]` on yt-dlp upgrades AND pin `curl_cffi==0.16.3`.**
    `utils/updater.py` runs `pip install -U --pre "yt-dlp[default,curl-cffi]"
-   "curl_cffi<0.14"` — plain `yt-dlp` would silently strip the certifi/curllib
-   extras, and dropping `curl-cffi` removes the impersonation engine yt-dlp's
-   TikTok proof-of-work challenge solver needs (its absence resurfaces as
-   "malformed site" failures on TikTok). The `curl_cffi<0.14` pin is a HARD
-   constraint that must stay: yt-dlp's TikTok extractor hardcodes
-   `impersonate=True`, which resolves to curl_cffi's **newest** chrome target;
-   curl_cffi >= 0.14 ships chrome142+ TLS fingerprints that TikTok blocks with a
-   "Site Maintenance" page ("Unexpected response from webpage request",
-   yt-dlp#17403). 0.13.x's newest chrome is 131 (136/133 are
-   yt-dlp-deprioritized) and TikTok accepts it. `requirements.txt` pins
-   `curl_cffi<0.14` + `curl-adapter==1.1.0` (curl-adapter 1.2.x needs
-   curl_cffi>=0.14). If TikTok hardens chrome131, re-test newer targets before
-   bumping the pin. The `--pre` channel is what keeps it on nightly.
+   "curl_cffi==0.16.3" "curl-adapter==1.2.3"` — plain `yt-dlp` would silently
+   strip the certifi/curllib extras, and dropping `curl-cffi` removes the
+   impersonation engine yt-dlp's TikTok proof-of-work challenge solver needs.
+   **The old `<0.14` pin was LIFTED 2026-11-10:** a live TikTok extraction
+   succeeded with curl_cffi **0.16.3** (chrome151 target) + yt-dlp 2026.11.04,
+   so the chrome142+ block documented in yt-dlp#17403 no longer reproduces.
+   instagrapi 3.x requires `curl_cffi>=0.15`, and `curl-adapter==1.2.3` needs
+   `>=0.14`; `0.16.3` is the latest **stable** (0.16.4b1 is a beta, and
+   `--pre` would otherwise pick it). Re-test TikTok on every bump; if the
+   "Site Maintenance"/"Unexpected response" page returns, pin back to the last
+   known-good target. The `--pre` channel is what keeps yt-dlp on nightly.
 
 5a. **ALWAYS track the newest stable kurigram release.** Upstream pyrogram
    is archived; **kurigram** is the actively-maintained drop-in fork

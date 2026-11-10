@@ -6,24 +6,23 @@
 # 2026-09-12). On every fresh install / `pip install -U -r requirements.txt`
 # the newest compatible kurigram is pulled in automatically; the policy's
 # job is to KEEP that flow — never re-pin to an exact older version.
-kurigram>=2.2.26
+kurigram>=2.2.27
 tgcrypto
-fastapi
-uvicorn
+fastapi>=0.162.2
+uvicorn>=0.54.0
+starlette>=1.10.0
+pydantic>=2.14.3,<2.15
 python-multipart
 # [default] keeps certifi/brotli extras; [curl-cffi] gives yt-dlp TLS/browser
 # impersonation — REQUIRED for TikTok's proof-of-work webpage challenge solver
 # (without it TikTok interstitials surface as "malformed site" failures).
 yt-dlp[default,curl-cffi]
-# PIN curl_cffi < 0.14: yt-dlp's TikTok extractor hardcodes impersonate=True,
-# which resolves to curl_cffi's NEWEST chrome target. curl_cffi >= 0.14 ships
-# chrome142+ TLS fingerprints that TikTok now blocks ("Site Maintenance" page →
-# "Unexpected response from webpage request", yt-dlp#17403). 0.13.x's newest
-# chrome is 131 (136/133 are yt-dlp-deprioritized), which TikTok accepts. The
-# bot venv MUST stay on this pin — utils/updater.py enforces it on every nightly
-# refresh. If TikTok hardens chrome131 too, bump the pin back after confirming
-# the newer target works again.
-curl_cffi<0.14
+# curl_cffi: instagrapi 3.x requires >=0.15; yt-dlp's extra allows <0.18.
+# The old <0.14 TikTok pin was LIFTED 2026-11-10 after a live TikTok extraction
+# succeeded with curl_cffi 0.16.3 (chrome151 target) + the current yt-dlp.
+# Pinned to the latest STABLE (0.16.4b1 is a beta; --pre would pick it).
+# Re-test TikTok on every bump.
+curl_cffi==0.16.3
 ffmpeg-python
 aiohttp
 aiofiles
@@ -32,18 +31,17 @@ requests
 python-dotenv
 # yt-dlp plugin that talks to the bgutil PO-token HTTP provider (Deno server).
 # Auto-discovered by yt-dlp; the provider server itself is cloned by ./install.sh.
-bgutil-ytdlp-pot-provider
+bgutil-ytdlp-pot-provider>=2.0.2
 # Direct-forward DM relay (modules/direct_forward/). Local libraries speaking
 # the platforms' own private APIs — no third-party relay services.
-# instagrapi 2.18.14 keeps both DM workers on one persisted device identity
-# (the earlier MQTToT second-client hybrid was removed 2026-11-06); pydantic 2.13+.
-instagrapi==2.18.14
+# instagrapi 3.2.9 (2026-11-10 upgrade): current Android app profile (449),
+# public-UA configuration, and the realtime/MQTToT client. Requires
+# curl_cffi>=0.15, hence the lifted TikTok pin above.
+instagrapi==3.2.9
 # curl-backed requests adapter giving instagrapi's PRIVATE session a real
-# Chrome TLS fingerprint (utils/ig_anti_detect.py). The private API previously
-# rode plain Python requests TLS — an easy "this is a script" signal.
-# 1.2.x requires curl_cffi>=0.14 (breaking the TikTok pin above); 1.1.0 works
-# with curl_cffi 0.13.x. Keep in sync with the curl_cffi pin.
-curl-adapter==1.1.0
+# Chrome TLS fingerprint (utils/ig_anti_detect.py). 1.2.3 requires
+# curl_cffi>=0.14, which the lifted TikTok pin now allows.
+curl-adapter==1.2.3
 twikit
 # Async WebSocket client for the TikTok IM push channel
 # (_tiktok_worker in modules/direct_forward/). Also pulled in by
@@ -52,7 +50,7 @@ websockets
 # Sequential headless cookie refresher (utils/cookie_refresher.py, Phase 26).
 # Optional-ish: the refresher degrades gracefully (logs "playwright not installed
 # — skip"), but without it DM-only jars (IG/X/TT/YT) go stale ~7 days. The
-# Chromium browser itself is installed by install.sh (`python -m playwright
-# install chromium`), not pip. Keep in sync with the pinned browsers.json that
-# `playwright install` reads.
-playwright
+# Chromium browser itself is installed by install.sh
+# (`python -m playwright install chromium`), not pip. Keep in sync with the
+# pinned browsers.json that `playwright install` reads.
+playwright>=1.65.0

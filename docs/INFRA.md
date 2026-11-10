@@ -2051,9 +2051,9 @@ injecting a custom `Chrome/140` UA via `http_headers` for
 TLS fingerprint and also produced a block.
 
 **Fix:**
-- `requirements.txt`: `curl_cffi<0.14` + `curl-adapter==1.1.0` (1.2.x needs
+- `requirements.txt`: `curl_cffi==0.16.3` + `curl-adapter==1.2.3` (instagrapi 3.x needs >=0.15; TikTok re-tested 2026-11-10)
   `curl_cffi>=0.14`, breaking the pin).
-- `utils/updater.py`: `pip install ... "yt-dlp[default,curl-cffi]" "curl_cffi<0.14"`.
+- `utils/updater.py`: `pip install ... "yt-dlp[default,curl-cffi]" "curl_cffi==0.16.3" "curl-adapter==1.2.3"`.
 - `utils/downloader/url_normalize.py`: drop the custom UA override; let
   curl_cffi's impersonation supply its own matching UA.
 - `AGENTS.md#5` updated as HARD constraint with research references.

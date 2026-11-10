@@ -361,10 +361,14 @@ def apply_identity(cl) -> None:
     except Exception as e:
         logger.warning(f"[IG anti-detect] geo re-apply failed: {e}")
     try:
-        cl.public_user_agent = (
-            getattr(config, "IG_PUBLIC_USER_AGENT", "") or _DEFAULT_PUBLIC_UA)
         cl.set_retry_config(public_transport="curl",
                             public_transport_impersonate="chrome136")
+        # Set the public UA AFTER set_retry_config (which can reset the public
+        # session). 3.x has public_graphql_user_agent too; keep it coherent.
+        ua = getattr(config, "IG_PUBLIC_USER_AGENT", "") or _DEFAULT_PUBLIC_UA
+        cl.public_user_agent = ua
+        if hasattr(cl, "public_graphql_user_agent"):
+            cl.public_graphql_user_agent = ua
     except Exception as e:
         logger.warning(f"[IG anti-detect] public identity alignment failed: {e}")
     try:
@@ -372,6 +376,12 @@ def apply_identity(cl) -> None:
         # old session file (2.18.14 only knows up to 428; 3.x defaults to 449).
         from instagrapi.config import DEFAULT_APP_VERSION
         cl.set_app(DEFAULT_APP_VERSION)
+        # 3.x set_app() updates device_settings but NOT the cached user_agent;
+        # rebuild it so the wire UA matches the app build.
+        try:
+            cl.set_user_agent()
+        except Exception:
+            pass
     except Exception as e:
         logger.info(f"[IG anti-detect] app-version alignment skipped: {e}")
 
@@ -395,7 +405,10 @@ def _patch_private_retry(impersonate: str) -> None:
     _DEFAULT_IMPERSONATE = impersonate
     orig_configure = PrivateRequestMixin._configure_private_session_retry
 
-    def _patched(self):
+    def _patched(self, private_transport=None, *args, **kwargs):
+        # 2.x calls this with no args; 3.x passes private_transport=...
+        # (Literal["requests","curl"]). We always mount the curl adapter for
+        # the private session, so the argument is accepted and ignored.
         try:
             adapter = adapter_cls(impersonate_browser_type=_DEFAULT_IMPERSONATE)
             self.private.mount("https://", adapter)
@@ -403,7 +416,10 @@ def _patch_private_retry(impersonate: str) -> None:
         except Exception as e:
             logger.warning(f"[IG anti-detect] _configure_private_session_retry "
                            f"transport fallback: {e}")
-            orig_configure(self)
+            try:
+                return orig_configure(self, private_transport, *args, **kwargs)
+            except TypeError:
+                return orig_configure(self)
 
     PrivateRequestMixin._configure_private_session_retry = _patched
     _RETRY_PATCHED = True

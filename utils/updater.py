@@ -41,20 +41,20 @@ def _installed_kurigram_version() -> str | None:
 async def auto_update_ytdlp():
     """Keep yt-dlp on the latest nightly build.
 
-    `pip install -U --pre "yt-dlp[default,curl-cffi]" "curl_cffi<0.14"`:
+    `pip install -U --pre "yt-dlp[default,curl-cffi]" "curl_cffi==0.16.3"
+    "curl-adapter==1.2.3"`:
       * `--pre` allows pre-releases — yt-dlp publishes nightly timestamp builds
         to PyPI as pre-releases, so this stays on the nightly channel.
       * `[default]` preserves the default extras (certifi, etc.) across upgrades
         — plain `yt-dlp` would silently strip them.
       * `[curl-cffi]` preserves the impersonation extra yt-dlp needs for
         TikTok's proof-of-work webpage challenge solver.
-      * `"curl_cffi<0.14"` is a HARD PIN — do NOT drop it. yt-dlp's TikTok
-        extractor hardcodes `impersonate=True`, which resolves to curl_cffi's
-        newest chrome target; curl_cffi >= 0.14 ships chrome142+ fingerprints
-        that TikTok now blocks with a "Site Maintenance" page ("Unexpected
-        response from webpage request", yt-dlp#17403). 0.13.x's newest chrome is
-        131, which TikTok accepts. Without the pin, a fresh `[curl-cffi]`
-        resolution on the next nightly check would silently break TikTok again.
+      * `"curl_cffi==0.16.3"` — the old `<0.14` TikTok pin was LIFTED on
+        2026-11-10 after a live TikTok extraction succeeded with curl_cffi
+        0.16.3 (chrome151). instagrapi 3.x requires >=0.15, and yt-dlp's own
+        extra allows <0.18. Re-test TikTok on every bump.
+      * `"curl-adapter==1.2.3"` is required by instagrapi 3.x's curl extra and
+        must stay in lockstep with the curl_cffi pin.
     Runs every 6 hours.
     """
     # One initial delay (30 s) so we don't fight with boot-time provider startup.
@@ -65,7 +65,8 @@ async def auto_update_ytdlp():
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "pip", "install", "-U", "--pre",
-                "yt-dlp[default,curl-cffi]", "curl_cffi<0.14",
+                "yt-dlp[default,curl-cffi]", "curl_cffi==0.16.3",
+                "curl-adapter==1.2.3",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

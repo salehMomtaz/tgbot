@@ -136,23 +136,45 @@ connection.
 4. Tests: `tests/test_ig_geo.py` (identity overwrite), 
    `tests/test_ig_login_no_retry.py` (local shortcode decode).
 
-## Upgrade evaluation: instagrapi 3.2.8
+## Upgrade evaluation and the 2026-11-10 stack upgrade
 
-Checked **offline** in a throwaway venv (no live login):
+Checked **offline** in a throwaway venv (no live login), then applied to the
+live venv with the bot frozen and a full rollback freeze:
 
-- `load_settings(direct_ig_session.json)` works.
+- `load_settings(direct_ig_session.json)` works on 3.x.
 - `login_by_sessionid`, `set_device`, `set_uuids`, `set_public_user_agent`,
   `public_graphql_user_agent`, `realtime_client` all exist.
 - `private_request`, `_configure_private_session_retry`, `base_headers`,
-  `LoginMixin.get_settings` still exist (the bot's patches target them).
-- Challenge mixin is renamed `ChallengeResolveMixin`; the new guard handles it.
+  `LoginMixin.get_settings` still exist.
+- Challenge mixin is renamed `ChallengeResolveMixin`; the guard handles both.
 - Default app version is **449.0.0.52.84**; `set_app` works.
 - `realtime_client().direct_subscribe()` and the socket transport still exist.
 
-Conclusion: **3.2.8 is a viable upgrade**, but it must be done as a deliberate
-change with the account disabled: bump `requirements.txt`, re-run the full
-suite, and re-validate the `ig_anti_detect` patches against the new internals.
-Do not upgrade mid-incident.
+Two real 3.x incompatibilities were found by the smoke test and fixed in
+`utils/ig_anti_detect.py`:
+
+1. 3.x `set_retry_config()` calls `_configure_private_session_retry(
+   private_transport=...)`; the patched function now accepts that kwarg
+   (and `*args/**kwargs`).
+2. 3.x `set_app()` updates `device_settings` but **not** the cached
+   `user_agent`; `apply_identity()` now calls `set_user_agent()` after
+   `set_app()`, and sets `public_graphql_user_agent` to the coherent UA.
+
+**Live stack after the upgrade:** instagrapi 3.2.9, curl_cffi 0.16.3,
+curl-adapter 1.2.3, bgutil-ytdlp-pot-provider 2.0.2, yt-dlp 2026.11.04
+nightly, fastapi 0.162.2, starlette 1.10.0, uvicorn 0.54.0, playwright 1.65.0
+(Chromium headless-shell 158 installed), Pillow 13.0.0, pydantic 2.14.3,
+kurigram 2.2.27. The old `curl_cffi<0.14` TikTok pin was lifted after a live
+TikTok extraction succeeded with 0.16.3; `curl_cffi==0.16.3` +
+`curl-adapter==1.2.3` are now pinned in `requirements.txt` and
+`utils/updater.py`.
+
+Verification: all 13 test files pass on the live venv, `import main` is clean,
+TikTok metadata extraction works, YouTube metadata + PO token works, the
+instagrapi 3.x identity smoke shows geo CZ / app 449 / Chrome-136 public UA /
+curl transport / challenge guard, and the bot restarted healthy (stream server
+on 8080, PO provider on 127.0.0.1:4417). The historical 2.18.14 statements
+above describe the incident; the live stack is 3.2.9.
 
 ## The real fix for provenance (recommended, not executed)
 
