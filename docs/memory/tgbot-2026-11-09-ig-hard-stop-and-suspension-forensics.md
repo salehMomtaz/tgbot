@@ -234,14 +234,43 @@ Observed (no manual restart needed — the waiting worker picked it up in <60 s)
 - Restart at `04:03` resumed the persisted session (no login) and MQTT
   reconnected at `04:05:34`; 3 requests total.
 
-The push→relay end-to-end still needs a real incoming DM (the operator sends a
-self-DM link); the push socket is established and idle traffic is zero.
+The push→relay end-to-end is verified: the operator sent self-DMs and all were
+delivered. 04:18–04:21 (before the native-first change) relayed 2 posts/
+carousels natively and 3 reels via yt-dlp; after 04:34, 3 reels were all
+delivered natively (`media_type=2`). For those 3 messages the private-API cost
+was 8 requests total (3 inbox, 1 shared thread fetch, 2 `media/info`, 2
+`usernameinfo`), 0 403s.
+
+### yt-dlp vs instagrapi for Instagram (evaluation, 2026-11-10)
+
+- **DM relay: yt-dlp is NOT necessary.** `_enqueue_ig_relay` is now
+  native-first for every IG item (posts, carousels, stories, reels). instagrapi's
+  `extract_media_v1` picks the **largest** `video_versions` rendition
+  (`height*width`), so reel quality is preserved, and the media comes from the
+  same authenticated app session.
+- **Where yt-dlp still touches IG:** the Telegram direct-link flow
+  (`show_format_selection` / `extract_formats` for the quality menu, and
+  `fetch_instagram_post` for photo posts) and the DM relay's fallback. Those are
+  **anonymous** requests: `utils/downloader/cookies.py::_resolve_jar_path`
+  returns `None` for IG while `IG_YTDLP_AUTH_ENABLED=false` (default), so yt-dlp
+  never carries the account session. There are **zero authed yt-dlp IG
+  requests** today.
+- **Was yt-dlp the suspension cause?** No evidence. The forensics point to
+  private-API volume (1,237 requests/17 h), device churn and the IP/geo
+  mismatch. yt-dlp's IG calls were anonymous web requests, not session-tied.
+  Removing them from the relay is still good hygiene (fewer requests, one
+  transport).
+- **Same-VPS VPN:** the operator browses Instagram through a VPN on this VPS,
+  so the browser session and the bot share the same egress IP. There is no
+  impossible-travel mismatch; the residual risk is the datacenter ASN itself.
+- If the operator ever wants a Telegram IG quality menu **without** yt-dlp, the
+  format list would have to be built from instagrapi's `video_versions`
+  renditions; that is a separate change and unnecessary for the self-DM flow.
 
 ## Left open / not verified
 
-- The live login + MQTT activation were verified on 2026-11-10 (see above).
-  The end-to-end push→relay path still needs a real incoming self-DM; the
-  push socket is established and idle traffic is zero.
+- The live login, MQTT activation and end-to-end push→relay were verified on
+  2026-11-10 (see above); idle traffic is zero and no 403/challenge appeared.
 - The exact Instagram classifier thresholds are not public; the ranking above
   is an evidence-based reconstruction, not a court-grade proof.
 - `certbot` certs for the operator's x-ui domains remain outside tgbot scope

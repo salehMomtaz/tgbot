@@ -196,13 +196,15 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
     when the media is actually a reel (clips product type) and *allow_clips*
     is False.
 
-    ``allow_clips=True`` delivers reels too: it is the LAST-RESORT path for a
-    reel yt-dlp already failed on (audience-restricted media — "It can't be
-    seen by certain audiences" — which Instagram's WEB endpoint refuses even
-    for accounts that can watch it in the app, but the app API serves fine).
-    Historically this function returned False for clips, so the "trying
-    native" fallback was a no-op for reels and every such reel degraded to a
-    preview image even while the session was perfectly healthy (2026-09-04)."""
+    ``allow_clips=True`` delivers reels too. Since 2026-11-10 this is the
+    PRIMARY reel path in the DM relay (the extractor picks the largest
+    ``video_versions`` rendition, so quality is preserved and no yt-dlp web
+    transport is used). It also handles audience-restricted media that
+    Instagram's WEB endpoint refuses even for accounts that can watch it in the
+    app, while the app API serves it fine. Historically this function returned
+    False for clips, so the "trying native" fallback was a no-op for reels and
+    every such reel degraded to a preview image even while the session was
+    healthy (2026-09-04)."""
     loop = asyncio.get_event_loop()
     try:
         async with _ig_api_lock:
@@ -322,7 +324,7 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                     raise
         await _send_followups(bot_client, chat_id, followups,
                               reply_to_message_id=getattr(sent_msg, "id", None))
-        note = " (clips fallback)" if (mt == 2 and product_type == "clips") else ""
+        note = " (reel)" if (mt == 2 and product_type == "clips") else ""
         logger.info(f"[DirectForward/IG] ✅ native relayed {url}{note} (media_type={mt}, {len(files)} file(s))")
         return True
     finally:
