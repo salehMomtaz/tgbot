@@ -82,13 +82,16 @@ def test_burst_pace_cap_sentinel():
             config.IG_DIRECT_BACKFILL_MAX_ITEMS = old
 
 
-def test_ig_auth_pause_disables_ytdlp_jar():
-    """While IG auth is paused, yt-dlp must never be handed the IG sessionid."""
+def test_ig_jar_is_never_handed_to_ytdlp():
+    """Instagram is instagrapi-only: yt-dlp NEVER receives the IG jar.
+
+    This holds with IG_AUTH_ENABLED true or false, and the yt-dlp
+    extract/download entry points refuse an Instagram URL outright.
+    """
     from utils.downloader import cookies as dl_cookies
     from utils import ig_session_guard
 
     old = config.IG_AUTH_ENABLED
-    old_yt = getattr(config, "IG_YTDLP_AUTH_ENABLED", False)
     old_jar = config.IG_COOKIES
     old_latch = ig_session_guard.LATCH_PATH
     with tempfile.TemporaryDirectory() as d:
@@ -98,28 +101,26 @@ def test_ig_auth_pause_disables_ytdlp_jar():
             ig_session_guard.LATCH_PATH = os.path.join(d, "ig_session_dead.json")
             _write_jar(config.IG_COOKIES, "AAA")
 
-            config.IG_AUTH_ENABLED = False
-            config.IG_YTDLP_AUTH_ENABLED = True
-            assert dl_cookies._resolve_jar_path(
-                "https://www.instagram.com/reel/abc/") is None
+            for auth in (True, False):
+                config.IG_AUTH_ENABLED = auth
+                assert dl_cookies._resolve_jar_path(
+                    "https://www.instagram.com/reel/abc/") is None
 
-            # ONE IDENTITY: even with IG auth on, yt-dlp gets no jar unless the
-            # operator explicitly opts into login-walled content.
-            config.IG_AUTH_ENABLED = True
-            config.IG_YTDLP_AUTH_ENABLED = False
-            assert dl_cookies._resolve_jar_path(
-                "https://www.instagram.com/reel/abc/") is None
-            config.IG_YTDLP_AUTH_ENABLED = True
-            assert dl_cookies._resolve_jar_path(
-                "https://www.instagram.com/reel/abc/") == config.IG_COOKIES
-
-            # A known-dead session is a hard stop even with both switches on.
-            ig_session_guard.mark_dead("login_required", "test")
-            assert dl_cookies._resolve_jar_path(
-                "https://www.instagram.com/reel/abc/") is None
+            # Defense in depth: the yt-dlp entry points themselves refuse IG.
+            from utils.downloader.formats import extract_formats
+            from utils.downloader.download import download_media
+            for fn in (
+                lambda: extract_formats("https://www.instagram.com/reel/abc/"),
+                lambda: download_media("https://www.instagram.com/reel/abc/"),
+            ):
+                try:
+                    fn()
+                except RuntimeError as e:
+                    assert "instagrapi-only" in str(e), e
+                else:
+                    raise AssertionError("yt-dlp entry point must refuse Instagram")
         finally:
             config.IG_AUTH_ENABLED = old
-            config.IG_YTDLP_AUTH_ENABLED = old_yt
             config.IG_COOKIES = old_jar
             ig_session_guard.LATCH_PATH = old_latch
 

@@ -137,9 +137,12 @@ New `utils/ig_session_guard.py`:
   persisted session's account id, the persisted device identity is NOT reused.
   A different account gets its own fresh device — never link two accounts in
   Instagram's graph.
-- **yt-dlp never gets the IG jar** unless `IG_YTDLP_AUTH_ENABLED=true` (default
-  **false**). A web transport on the same sessionid is a second identity;
-  public posts/reels still download anonymously.
+- **yt-dlp NEVER gets the IG jar** (2026-11-10, operator requirement):
+  `_resolve_jar_path` returns `None` for every `instagram.com` URL, and
+  `extract_formats` / `download_media` hard-refuse IG. The Telegram direct-link
+  path routes IG to the native instagrapi delivery (highest rendition, no
+  format keyboard). Only instagrapi, the admin writer and instagrapi's
+  write-back touch the jar.
 - **Geo auto-detection** (`utils/ig_geo.py`): the egress IP is resolved via
   ipinfo.io (ip-api.com fallback) and cached for 7 days in `cache/ig_geo.json`.
   On this box it resolves to **CZ / 420 / cs_CZ / Europe/Prague (+3600s)**.
@@ -248,13 +251,12 @@ was 8 requests total (3 inbox, 1 shared thread fetch, 2 `media/info`, 2
   `extract_media_v1` picks the **largest** `video_versions` rendition
   (`height*width`), so reel quality is preserved, and the media comes from the
   same authenticated app session.
-- **Where yt-dlp still touches IG:** the Telegram direct-link flow
-  (`show_format_selection` / `extract_formats` for the quality menu, and
-  `fetch_instagram_post` for photo posts) and the DM relay's fallback. Those are
-  **anonymous** requests: `utils/downloader/cookies.py::_resolve_jar_path`
-  returns `None` for IG while `IG_YTDLP_AUTH_ENABLED=false` (default), so yt-dlp
-  never carries the account session. There are **zero authed yt-dlp IG
-  requests** today.
+- **Where yt-dlp still touches IG:** nowhere in the bot's live paths. The
+  Telegram direct-link flow now routes every IG URL to instagrapi; the DM relay
+  is native-first; `_resolve_jar_path` returns `None` for IG and
+  `extract_formats` / `download_media` hard-refuse IG. `fetch_instagram_post`
+  remains only as a tested utility, not a bot call path. There are **zero**
+  yt-dlp IG requests of any kind.
 - **Was yt-dlp the suspension cause?** No evidence. The forensics point to
   private-API volume (1,237 requests/17 h), device churn and the IP/geo
   mismatch. yt-dlp's IG calls were anonymous web requests, not session-tied.

@@ -81,6 +81,13 @@ def download_media(url: str, format_id: str | None = None, format_type: str = 'v
     download starts, so a disk-constrained server fails with a clear message
     rather than a mid-merge ffprobe error.
     """
+    # HARD GUARD (2026-11-10): Instagram is instagrapi-only. yt-dlp must never
+    # be used for an Instagram URL — not even anonymously. Native delivery lives
+    # in modules/direct_forward/instagram.py.
+    if "instagram.com" in (url or "").lower():
+        raise RuntimeError(
+            "Instagram is instagrapi-only: yt-dlp must not download Instagram "
+            "URLs (native delivery handles them).")
     url = normalize_url(url)
     task_dir = f"cache/{cache_id}"
     os.makedirs(task_dir, exist_ok=True)

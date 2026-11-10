@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 def extract_formats(url: str) -> dict:
+    # HARD GUARD (2026-11-10): Instagram is instagrapi-only. yt-dlp must never
+    # be used for an Instagram URL — not even anonymously. The Telegram link
+    # path routes IG to the native instagrapi delivery instead.
+    if "instagram.com" in (url or "").lower():
+        raise RuntimeError(
+            "Instagram is instagrapi-only: yt-dlp must not extract Instagram "
+            "URLs (native delivery handles them).")
     url = normalize_url(url)
     _ensure_disk_space(os.getcwd())
     # Real (on-disk) jar path for this site. Each cookie-authenticated attempt

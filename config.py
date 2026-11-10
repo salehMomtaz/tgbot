@@ -220,10 +220,11 @@ IG_DIRECT_MQTT_ENABLED = os.getenv("IG_DIRECT_MQTT_ENABLED", "false").lower() in
 IG_DIRECT_MQTT_FALLBACK_SECONDS = get_env_int("IG_DIRECT_MQTT_FALLBACK_SECONDS", 1800)
 IG_DIRECT_MQTT_MAX_RECONNECTS = get_env_int("IG_DIRECT_MQTT_MAX_RECONNECTS", 3)
 IG_DIRECT_MQTT_PING_SECONDS = get_env_int("IG_DIRECT_MQTT_PING_SECONDS", 15)
-# Login-walled Instagram content through yt-dlp uses the SAME sessionid from a
-# DIFFERENT (web) transport — a second device identity. Keep this false to
-# preserve ONE identity; public posts/reels still download anonymously.
-IG_YTDLP_AUTH_ENABLED = os.getenv("IG_YTDLP_AUTH_ENABLED", "false").lower() in ("true", "1", "yes")
+# (IG_YTDLP_AUTH_ENABLED was REMOVED 2026-11-10: the Instagram jar is
+# instagrapi-only. yt-dlp can never receive it — see
+# utils/downloader/cookies.py::_resolve_jar_path, which returns None for every
+# instagram.com URL. Instagram links are delivered by the native instagrapi
+# path, highest quality, no format selection.)
 # The 2026-11-06 MQTToT hybrid was REMOVED because it created a SECOND
 # instagrapi client that logged in on its own with a freshly randomized device
 # identity. The 2026-11-09 push path (IG_DIRECT_MQTT_ENABLED above) is

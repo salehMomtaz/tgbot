@@ -174,6 +174,24 @@ def test_a_different_account_gets_a_fresh_device_identity():
         assert not ig_session_guard.is_dead()
 
 
+def test_direct_link_helper_refuses_without_a_live_client():
+    """No live instagrapi client => a clear error, never a yt-dlp fallback."""
+    import asyncio
+
+    old = igmod._LIVE_CLIENT
+    try:
+        igmod._LIVE_CLIENT = None
+        try:
+            asyncio.run(igmod.deliver_instagram_link_native(
+                None, 1, "https://www.instagram.com/reel/abc/"))
+        except RuntimeError as e:
+            assert "not connected" in str(e), e
+        else:
+            raise AssertionError("expected a RuntimeError, not a yt-dlp fallback")
+    finally:
+        igmod._LIVE_CLIENT = old
+
+
 def test_ig_poll_interval_uses_the_ig_specific_knob():
     old = getattr(config, "IG_DIRECT_POLL_SECONDS", None)
     old_j = getattr(config, "DIRECT_FORWARD_POLL_JITTER_PCT", 40)

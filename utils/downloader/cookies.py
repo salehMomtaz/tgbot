@@ -9,7 +9,6 @@ import urllib.parse
 import config
 import utils.shared as shared
 from utils import cookie_manager
-from utils import ig_session_guard
 from .url_normalize import _apply_pot_options
 
 
@@ -26,24 +25,13 @@ def _resolve_jar_path(url: str) -> str | None:
     if "youtube.com" in url_lower or "youtu.be" in url_lower:
         cookie_path = config.YT_COOKIES
     elif "instagram.com" in url_lower:
-        # IG paused (account suspended/appealing) or session known-dead:
-        # NEVER send the jar's sessionid to Instagram. yt-dlp's Instagram
-        # ladder tries no-auth FIRST, so public content still downloads; only
-        # login-walled media is skipped until the operator uploads a fresh jar
-        # and re-enables IG auth (Admin → 🔐 IG Auth).
-        if not getattr(config, "IG_AUTH_ENABLED", True):
-            return None
-        # ONE IDENTITY RULE (2026-11-09): yt-dlp is a DIFFERENT (web) transport
-        # using the same sessionid — a second device identity Instagram can
-        # correlate. Keep login-walled IG content off unless explicitly opted
-        # in; public posts/reels still download anonymously.
-        if not getattr(config, "IG_YTDLP_AUTH_ENABLED", False):
-            return None
-        # Hard stop: a known-dead/suspended sessionid must never be handed to
-        # yt-dlp either (it would replay the rejected session from the VPS IP).
-        if ig_session_guard.is_dead():
-            return None
-        cookie_path = config.IG_COOKIES
+        # INSTAGRAM IS INSTAGRAPI-ONLY (2026-11-10, operator requirement).
+        # yt-dlp must NEVER receive the Instagram jar — not authenticated, not
+        # anonymous. The jar's sessionid/csrftoken/mid/rur belong exclusively to
+        # the instagrapi client (plus the admin writer and instagrapi's own
+        # write-back). Instagram media is delivered by the native instagrapi
+        # path; yt-dlp is not a supported transport for this platform.
+        return None
     elif "tiktok.com" in url_lower:
         cookie_path = config.TT_COOKIES
     elif "twitter.com" in url_lower or "x.com" in url_lower:

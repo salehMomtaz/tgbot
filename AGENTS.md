@@ -527,10 +527,14 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     link two accounts in Instagram's graph). The headless cookie refresher no
     longer visits instagram.com (`COOKIE_REFRESH_IG=false` by default): a fresh
     Chromium profile per run is a new-device signal, and instagrapi's
-    write-back already rotates the jar's session cookies. yt-dlp never receives
-    the IG jar unless `IG_YTDLP_AUTH_ENABLED=true` (default **false**) — a web
-    transport on the same sessionid is a second identity; public posts/reels
-    still download anonymously. **Geo/locale/timezone are auto-detected from
+    write-back already rotates the jar's session cookies. **The Instagram jar
+    is instagrapi-only** (2026-11-10): `utils/downloader/cookies.py::_resolve_jar_path`
+    returns `None` for EVERY `instagram.com` URL, and `extract_formats` /
+    `download_media` hard-refuse IG, so yt-dlp can never send an IG request
+    (authenticated or anonymous). The Telegram direct-link path routes IG to the
+    native instagrapi delivery (`deliver_instagram_link_native`, highest
+    rendition, no format keyboard). Only instagrapi, the admin writer and
+    instagrapi's own write-back touch the IG jar. **Geo/locale/timezone are auto-detected from
     the egress IP** by `utils/ig_geo.py` (ipinfo.io → ip-api.com, 7-day cache
     in `cache/ig_geo.json`); a Prague VPS resolves to CZ / 420 / cs_CZ /
     Europe/Prague (+3600s), and any non-empty `IG_DIRECT_*` value overrides one

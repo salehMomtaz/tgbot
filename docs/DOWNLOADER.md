@@ -2,6 +2,13 @@
 
 All downloader/size/thumbnail/format notes merged. Companion to `utils/downloader/` and invariant #11.
 
+> **Instagram is instagrapi-only (2026-11-10).** The IG jar is never handed to
+> yt-dlp (`_resolve_jar_path` returns `None` for every `instagram.com` URL) and
+> `extract_formats` / `download_media` hard-refuse IG. Instagram links are
+> delivered by the native instagrapi path at the highest rendition, with no
+> format menu. The Instagram sections below are retained as history for the
+> yt-dlp era; they are not the live IG path.
+
 ## Sources consolidated
 
 - `docs/ytdlp_full_support_report.md`

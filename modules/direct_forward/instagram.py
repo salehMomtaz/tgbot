@@ -33,6 +33,27 @@ logger = logging.getLogger(__name__)
 _uid_cache: dict[str, str] = {}
 _ig_api_lock = asyncio.Lock()   # serialize instagrapi calls across executor runs
 
+# The ONE authenticated instagrapi client, shared with the Telegram direct-link
+# handler so an Instagram link can be delivered natively (highest quality, no
+# format selection, no yt-dlp). Set only after a successful login; cleared on
+# pause/worker exit. `get_live_client()` refuses while the session-dead latch is
+# armed, so a dead session can never be used by the link path.
+_LIVE_CLIENT = None
+
+
+def get_live_client():
+    """Return the shared authenticated IG client, or None when unavailable."""
+    if not getattr(config, "IG_AUTH_ENABLED", True):
+        return None
+    if ig_session_guard.is_dead():
+        return None
+    return _LIVE_CLIENT
+
+
+def _set_live_client(cl) -> None:
+    global _LIVE_CLIENT
+    _LIVE_CLIENT = cl
+
 
 # -------------------------------------------------------------------------
 # IG DM item resolution — over the RAW direct_v2/threads payload.
@@ -188,7 +209,9 @@ def _ig_pk_from_url(cl, url: str) -> int:
 async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                                   header_lines: list[str], body: str,
                                   url: str | None = None,
-                                  allow_clips: bool = False) -> bool:
+                                  allow_clips: bool = False,
+                                  reply_to_message_id: int | None = None,
+                                  sender_label: str | None = None) -> bool:
     """Deliver one Instagram post/story natively through the logged-in
     instagrapi session — photo posts and carousels reliably break yt-dlp's
     extractor ('No video formats found'), so photos/albums download straight
@@ -227,7 +250,10 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
 
     user = getattr(media, "user", None)
     if user is not None and getattr(user, "username", None):
-        sender_label = header_lines[0].split(" from ", 1)[-1] if header_lines and " from " in header_lines[0] else "paired contact"
+        if not sender_label:
+            sender_label = (header_lines[0].split(" from ", 1)[-1]
+                            if header_lines and " from " in header_lines[0]
+                            else "paired contact")
         if not url:
             code = getattr(media, "code", None)
             if code:
@@ -284,10 +310,12 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
             if is_video:
                 sent_msg = await bot_client.send_video(
                     chat_id=chat_id, video=path, caption=caption,
+                    reply_to_message_id=reply_to_message_id,
                     **_video_upload_kwargs(path))
             else:
                 sent_msg = await bot_client.send_photo(
-                    chat_id=chat_id, photo=path, caption=caption)
+                    chat_id=chat_id, photo=path, caption=caption,
+                    reply_to_message_id=reply_to_message_id)
         else:
             from pyrogram.types import InputMediaPhoto, InputMediaVideo
             group = [
@@ -297,7 +325,9 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                 for j, (p, is_video) in enumerate(files)
             ]
             try:
-                sent = await bot_client.send_media_group(chat_id=chat_id, media=group)
+                sent = await bot_client.send_media_group(
+                    chat_id=chat_id, media=group,
+                    reply_to_message_id=reply_to_message_id)
                 sent_msg = sent[0] if sent else None
             except Exception:
                 # One corrupt item still inside the group can fail the whole
@@ -310,11 +340,13 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                             m = await bot_client.send_video(
                                 chat_id=chat_id, video=p,
                                 caption=caption if not sent_any else "",
+                                reply_to_message_id=reply_to_message_id,
                                 **_video_upload_kwargs(p))
                         else:
                             m = await bot_client.send_photo(
                                 chat_id=chat_id, photo=p,
-                                caption=caption if not sent_any else "")
+                                caption=caption if not sent_any else "",
+                                reply_to_message_id=reply_to_message_id)
                         if sent_msg is None:
                             sent_msg = m
                         sent_any = True
@@ -336,39 +368,77 @@ async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
                     pass
 
 
+async def deliver_instagram_link_native(bot_client, chat_id: int, url: str,
+                                        reply_to_message_id: int | None = None) -> bool:
+    """Deliver an Instagram URL through the live instagrapi client.
+
+    Used by the Telegram direct-link handler. Instagram is instagrapi-only
+    (2026-11-10): this is the ONLY path for an IG link, it picks the highest
+    quality rendition automatically, and there is no format keyboard. Raises a
+    clear error when the IG session is paused/dead — the caller must NOT fall
+    back to yt-dlp.
+    """
+    cl = get_live_client()
+    if cl is None:
+        raise RuntimeError(
+            "Instagram is not connected (paused or session dead). Upload a fresh "
+            "igcookies.txt via Admin → 🍪 Cookie Jars → Instagram → ✏️ Replace.")
+    loop = asyncio.get_event_loop()
+    async with _ig_api_lock:
+        try:
+            pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
+        except Exception as e:
+            raise RuntimeError(f"could not resolve the Instagram media id: {e}") from e
+    if not pk:
+        raise RuntimeError("could not resolve the Instagram media id")
+    header = ["📥 **Instagram** from your link", f"🔗 {url}"]
+    return await _ig_native_deliver_once(
+        bot_client, chat_id, cl, pk, header, "", url,
+        allow_clips=True, reply_to_message_id=reply_to_message_id,
+        sender_label="your link")
+
+
 def _enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                       url: str, header_lines: list[str], body: str,
                       preview_url: str | None):
-    """Route one resolved Instagram link: probe the media pk, deliver photos/
-    albums/stories natively, reels via yt-dlp (quality merge), preview image
-    or yt-dlp as fallbacks. Returns the relay Future (await it before advancing
-    the IG cursor — see common._enqueue_relay)."""
+    """Deliver one resolved Instagram link through instagrapi ONLY.
+
+    Instagram is instagrapi-only (2026-11-10): posts, carousels, stories and
+    reels all go through the authenticated app API (highest rendition, no
+    format selection). yt-dlp is never called for an IG URL — if the native
+    path fails the operator gets an error, not a second transport.
+    """
     async def job():
         is_ig = "instagram.com" in url
-        pk = None
         if is_ig:
+            pk = None
             loop = asyncio.get_event_loop()
             async with _ig_api_lock:
                 try:
                     pk = await loop.run_in_executor(None, _ig_pk_from_url, cl, url)
                 except Exception as e:
                     logger.warning(f"[DirectForward/IG] could not resolve media pk for {url}: {e}")
-        if pk:
-            # NATIVE-FIRST for EVERY Instagram item: posts, carousels, stories
-            # AND reels. instagrapi's extractor picks the LARGEST
-            # video_versions rendition (height*width), so reels keep their best
-            # quality — and this path uses the SAME authenticated app session,
-            # with NO yt-dlp web transport. yt-dlp is only the fallback.
+            if not pk:
+                await bot_client.send_message(
+                    chat_id, f"❌ Instagram delivery failed: could not resolve the "
+                             f"media id for {url}")
+                return
             try:
                 if await _ig_native_deliver_once(bot_client, chat_id, cl, pk,
                                                  header_lines, body, url,
                                                  allow_clips=True):
                     return
             except Exception as e:
-                logger.warning(f"[DirectForward/IG] native path failed for {url}: {e} — falling back to yt-dlp")
-        # Fallback: yt-dlp. For IG this is an ANONYMOUS web request — the IG
-        # jar is never handed over while IG_YTDLP_AUTH_ENABLED=false, so this
-        # path cannot carry the account's session.
+                logger.warning(f"[DirectForward/IG] native delivery failed for {url}: {e}")
+                try:
+                    await bot_client.send_message(
+                        chat_id, f"❌ Instagram delivery failed: {e}")
+                except Exception:
+                    pass
+                return
+            return
+        # Only non-Instagram URLs can reach this (defensive; the caller routes
+        # IG exclusively above).
         await _download_and_deliver(bot_client, premium_client, chat_id, url,
                                     header_lines, body, preview_url)
     return _enqueue_relay(queue, chat_id, job)
@@ -551,8 +621,9 @@ async def _ig_react_to(cl, loop, thread_id, item_id) -> None:
     if not (str(thread_id).isdigit() and str(item_id).isdigit()):
         return
     try:
-        ok = await loop.run_in_executor(
-            None, lambda: cl.direct_send_reaction(int(thread_id), int(item_id), emoji))
+        async with _ig_api_lock:
+            ok = await loop.run_in_executor(
+                None, lambda: cl.direct_send_reaction(int(thread_id), int(item_id), emoji))
         if ok:
             logger.info(f"[DirectForward/IG] reacted {emoji} to item {item_id}")
     except Exception as e:
@@ -582,10 +653,14 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
         kind = (resolved or {}).get("kind")
 
         if kind == "url":
+            author = resolved.get("author")
+            author_id = None
+            if author:
+                async with _ig_api_lock:
+                    author_id = await loop.run_in_executor(
+                        None, _ig_resolve_user_id, cl, author)
             header = _header_lines("Instagram", sender_label,
-                                   resolved.get("author"),
-                                   _ig_resolve_user_id(cl, resolved.get("author")) if resolved.get("author") else None,
-                                   resolved["url"])
+                                   author, author_id, resolved["url"])
             logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> {resolved['url']} (author @{resolved.get('author')})")
             futs.append(_enqueue_ig_relay(queue, chat_id, bot_client, premium_client, cl,
                               resolved["url"], header, resolved.get("body") or "",
@@ -595,8 +670,13 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
         if kind == "ig_pk":
             pk = resolved["pk"]
             author = resolved.get("author")
+            author_id = None
+            if author:
+                async with _ig_api_lock:
+                    author_id = await loop.run_in_executor(
+                        None, _ig_resolve_user_id, cl, author)
             header = _header_lines("Instagram", sender_label, author,
-                                   _ig_resolve_user_id(cl, author) if author else None, None)
+                                   author_id, None)
             logger.info(f"[DirectForward/IG] item {item_id}: {item_type} -> native pk {pk} (author @{author})")
 
             async def job(pk=pk, header=header, preview=resolved.get("preview")):
@@ -891,6 +971,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 await ig_anti_detect.cold_start_jitter(cl)
             except Exception as e:
                 logger.warning(f"[DirectForward/IG] cold-start jitter skipped: {e}")
+            # Publish the ONE authenticated client for the Telegram direct-link
+            # path (instagrapi-only delivery, highest quality, no yt-dlp).
+            _set_live_client(cl)
             break
         except ig_session_guard.IGSessionDead as e:
             # The latch is armed (this boot or a previous one). ZERO further
@@ -990,11 +1073,14 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         await _state_save_owned(state, {"ig"})
         logger.info("[DirectForward/IG] first run — priming cursor, backlog is skipped.")
         try:
-            threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
+            async with _ig_api_lock:
+                threads = await loop.run_in_executor(
+                    None, lambda: cl.direct_threads(amount=20))
             last = 0
             for th in threads:
-                raw = await loop.run_in_executor(
-                    None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 1}))
+                async with _ig_api_lock:
+                    raw = await loop.run_in_executor(
+                        None, lambda tid=th.id: cl.private_request(f"direct_v2/threads/{tid}/", params={"limit": 1}))
                 items = (raw or {}).get("thread", {}).get("items", [])
                 if items:
                     try:
@@ -1067,7 +1153,10 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             candidate = IGRealtime(cl, loop, on_push=wake.set, on_down=wake.set,
                                    ping_seconds=mqtt_ping)
             try:
-                await loop.run_in_executor(None, candidate.start)
+                # direct_subscribe() performs one inbox HTTP request; serialize
+                # it with every other instagrapi call on the shared client.
+                async with _ig_api_lock:
+                    await loop.run_in_executor(None, candidate.start)
                 rt = candidate
                 mqtt_reconnects = 0
                 return True
@@ -1119,11 +1208,13 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         while True:
             if not getattr(config, "IG_AUTH_ENABLED", True):
                 await _stop_mqtt()
+                _set_live_client(None)
                 logger.info("[DirectForward/IG] IG_AUTH_ENABLED is false — stopping the "
                             "worker (IG paused). No Instagram API calls will be made.")
                 return
             if ig_session_guard.is_dead():
                 await _stop_mqtt()
+                _set_live_client(None)
                 logger.error("[DirectForward/IG] session latched dead — no polling and "
                              "no push connects until a fresh igcookies.txt is uploaded.")
                 await _ig_wait_for_fresh_jar(cl, loop)
@@ -1132,6 +1223,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 if mqtt_enabled and getattr(config, "IG_AUTH_ENABLED", True):
                     await _ensure_mqtt()
                 continue
+            # The client is authenticated and the latch is clear: publish it for
+            # the Telegram direct-link handler.
+            _set_live_client(cl)
             state = _load_state()  # fresh each poll: admin pairing/cursor changes land within one interval
             state_dirty = False
             # Reset the burst counter EVERY poll. It was initialised once before
@@ -1140,7 +1234,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
             # the IG backlog never drained until a restart.
             delivered_in_run = 0
             try:
-                threads = await loop.run_in_executor(None, lambda: cl.direct_threads(amount=20))
+                async with _ig_api_lock:
+                    threads = await loop.run_in_executor(
+                        None, lambda: cl.direct_threads(amount=20))
                 if not getattr(_instagram_worker, "_logged_inbox", False):
                     _instagram_worker._logged_inbox = True
                     for th in threads[:20]:
@@ -1209,8 +1305,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                         params = {"limit": 25, "direction": "older"}
                         if cursor:
                             params["cursor"] = cursor
-                        raw_page = await loop.run_in_executor(
-                            None, lambda tid=th.id, p=params: cl.private_request(f"direct_v2/threads/{tid}/", params=p))
+                        async with _ig_api_lock:
+                            raw_page = await loop.run_in_executor(
+                                None, lambda tid=th.id, p=params: cl.private_request(f"direct_v2/threads/{tid}/", params=p))
                         thread_page = (raw_page or {}).get("thread", {}) or {}
                         page_items = thread_page.get("items") or []
                         if not page_items:
@@ -1377,6 +1474,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                     except Exception as alert_err:
                         logger.warning(f"[DirectForward/IG] checkpoint alert to chat failed: {alert_err}")
                 await _stop_mqtt()
+                _set_live_client(None)
                 await _ig_wait_for_fresh_jar(cl, loop)
                 relogin_failures = 0
             except LoginRequired as e:
@@ -1400,6 +1498,7 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                          f"Recent jar changes: Admin Console → 🍪 Cookie Jars → "
                          f"Instagram → 📜 History."))
                 await _stop_mqtt()
+                _set_live_client(None)
                 await _ig_wait_for_fresh_jar(cl, loop)
                 relogin_failures = 0  # fresh session — re-arm the one-shot alert
             except Exception as e:
@@ -1439,7 +1538,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
                 await asyncio.sleep(_ig_poll_interval())
     finally:
         # Stop the push reader on every exit path (IG paused, auth failure,
-        # cancellation). No background task is left behind.
+        # cancellation). No background task is left behind, and the shared
+        # client must not outlive the worker.
+        _set_live_client(None)
         try:
             await _stop_mqtt()
         except BaseException:
