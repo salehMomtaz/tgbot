@@ -176,6 +176,23 @@ curl transport / challenge guard, and the bot restarted healthy (stream server
 on 8080, PO provider on 127.0.0.1:4417). The historical 2.18.14 statements
 above describe the incident; the live stack is 3.2.9.
 
+## App-native mint + live activation (2026-11-10 17:09)
+
+The operator ran `tools/mint_ig_session.py` successfully on instagrapi 3.2.9:
+`account saleh.momtaz (2210793164)`, sessionid `2210…_8DA(77)`, device mid
+`au_K…EZgy(28)`, geo CZ/cs_CZ/Europe/Prague. Instagram **reused the same
+sessionid**, so the old session-dead latch still matched — the mint tool now
+clears the latch on success (fixed). The mint also exposed a duplicate-cookie
+bug: `RequestsCookieJar.get("rur")` raises `CookieConflict` because Instagram
+sets `rur` on multiple domains/paths; `write_back_session` now falls back to the
+`instagram.com` cookie explicitly and the jar synced (17:14).
+
+Activation (IG_AUTH_ENABLED=true, restart): the worker **resumed the persisted
+session** (no password login) with app **449.0.0.52.84**, MQTT connected,
+self-DM mode, a gap fetch relayed a post natively, and the first ~3 minutes
+cost 11 private requests with **0 403s / 0 challenges**. The app-native
+session + 3.2.9 + CZ geo + Chrome-136 public UA is the current live state.
+
 ## The real fix for provenance (recommended, not executed)
 
 The only way to remove the browser→Android contradiction is to make the session
