@@ -178,32 +178,57 @@ def _ig_resolve_raw(item: dict) -> dict | None:
     return None
 
 
-def _ig_pk_from_url(cl, url: str) -> int:
-    """Extract the media pk from any Instagram URL form.
+# Instagram media shortcodes are a base64 (64-symbol) encoding of the numeric
+# media pk. Decoding locally avoids instagrapi's PUBLIC web client entirely —
+# in 2.x that client advertises a 2017 desktop Safari UA (and a hardcoded iOS
+# UA for doc_id GraphQL), i.e. a second identity on the same session.
+_SHORTCODE_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
-    Uses the public web client (``cl.media_pk_from_url``) which goes through
-    ``cl.public`` and hits the public web endpoint. When Instagram soft-blocks
-    that endpoint (returns HTML instead of JSON, surfaced as a
-    ``JSONDecodeError``), we count the failure and skip subsequent public
-    calls for a cooldown window — hammering a throttled endpoint only
-    deepens the block.
+
+def _shortcode_to_pk(code: str) -> int:
+    pk = 0
+    for ch in code:
+        idx = _SHORTCODE_ALPHABET.find(ch)
+        if idx < 0:
+            raise ValueError(f"invalid Instagram shortcode character: {ch!r}")
+        pk = pk * 64 + idx
+    return pk
+
+
+def _ig_pk_from_url(cl, url: str) -> int:
+    """Extract the media pk from an Instagram URL WITHOUT a public web request.
+
+    /p/, /reel/, /reels/ and /tv/ shortcodes decode locally; story URLs already
+    carry the numeric pk; instagram://media?id= too. Only opaque /share/...
+    redirect links need instagrapi's public resolver (one request, with the
+    coherent public UA/transport installed by ``apply_identity``).
     """
+    url = str(url or "")
+    m = re.search(r"[?&]id=(\d+)", url)
+    if m:
+        return int(m.group(1))
     story = re.search(r"instagram\.com/stories/[^/]+/(\d+)", url)
     if story:
         return int(story.group(1))
-    if ig_anti_detect.public_soft_block_active():
-        raise RuntimeError(
-            "IG public-web soft-block cooldown active; skipping "
-            "media_pk_from_url for this cycle"
-        )
-    try:
-        pk = int(cl.media_pk_from_url(url))
-    except Exception as e:
-        if "JSONDecode" in type(e).__name__ or "Expecting value" in str(e):
-            ig_anti_detect.record_public_soft_block()
-        raise
-    ig_anti_detect.record_public_success()
-    return pk
+    m = re.search(
+        r"instagram\.com/(?:[^/]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
+    if m:
+        return _shortcode_to_pk(m.group(1))
+    if "/share/" in url:
+        if ig_anti_detect.public_soft_block_active():
+            raise RuntimeError(
+                "IG public-web soft-block cooldown active; skipping the /share/ "
+                "resolver for this cycle")
+        try:
+            pk = int(cl.media_pk_from_url(url))
+        except Exception as e:
+            if "JSONDecode" in type(e).__name__ or "Expecting value" in str(e):
+                ig_anti_detect.record_public_soft_block()
+            raise
+        ig_anti_detect.record_public_success()
+        return pk
+    raise ValueError(f"could not extract an Instagram media pk from {url!r}")
 
 
 async def _ig_native_deliver_once(bot_client, chat_id, cl, pk: int,
@@ -546,6 +571,9 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
                 # extra touches the operator forbade.
                 try:
                     cl.load_settings(persisted)
+                    # load_settings/init() restores the file's stale geo; force
+                    # the resolved (CZ) values back BEFORE any request.
+                    ig_anti_detect.apply_identity(cl)
                     logger.info(f"{log_prefix} persisted session is from an older "
                                 f"jar — keeping its device identity and "
                                 f"bootstrapping the fresh sessionid (no probe).")
@@ -555,6 +583,9 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
             else:
                 try:
                     cl.load_settings(persisted)
+                    # load_settings/init() restores the file's stale geo; force
+                    # the resolved (CZ) values back BEFORE any request.
+                    ig_anti_detect.apply_identity(cl)
                     # Validate the persisted session WITHOUT calling login():
                     # instagrapi's login() demands both username+password, but a
                     # good persisted session needs neither — account_info()
@@ -597,6 +628,9 @@ def _ig_login(cl, log_prefix: str = "[DirectForward/IG]") -> None:
             raise ig_session_guard.IGSessionDead(
                 "login_by_sessionid returned False (session rejected)")
         logger.info(f"{log_prefix} Logged in via sessionid from igcookies.txt.")
+        # login_by_sessionid() calls init(), which can restore stale settings;
+        # force the resolved geo + coherent public identity before any request.
+        ig_anti_detect.apply_identity(cl)
         ig_session_guard.clear("bootstrap login succeeded")
         cookie_history.record(None, "ig_login_ok", platform="instagram",
                               actor=actor,
@@ -902,18 +936,9 @@ async def _instagram_worker(bot_client, premium_client, chat_id: int, queue) -> 
         except Exception as e:
             logger.warning(f"[DirectForward/IG] transport install degraded: {e}")
         try:
-            from utils import ig_geo
-            geo = ig_geo.resolve()
-            ig_anti_detect.pin_geo(
-                c,
-                country=geo["country"],
-                country_code=geo["country_code"],
-                locale=geo["locale"],
-                timezone_offset=geo["timezone_offset"],
-                timezone_name=geo["timezone_name"],
-            )
+            ig_anti_detect.apply_identity(c)
         except Exception as e:
-            logger.warning(f"[DirectForward/IG] geo pin degraded: {e}")
+            logger.warning(f"[DirectForward/IG] identity alignment degraded: {e}")
         try:
             ig_anti_detect.install_token_echo(c)
         except Exception as e:

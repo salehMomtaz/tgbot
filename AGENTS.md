@@ -545,6 +545,23 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     `tests/test_ig_session_guard.py`, `tests/test_ig_login_no_retry.py`,
     `tests/test_ig_geo.py`. Suspension forensics + the new-account checklist:
     `docs/memory/tgbot-2026-11-09-ig-hard-stop-and-suspension-forensics.md`.
+
+    **Identity coherence after every load (2026-11-10).** instagrapi's
+    `init()` restores `country`/`country_code`/`locale`/`timezone_*` and
+    `public_transport` from the session file, so a pre-login `pin_geo()` is
+    silently undone. `utils/ig_anti_detect.apply_identity(cl)` MUST be called
+    after **every** `load_settings()` / `login_by_sessionid()` (DM worker,
+    fresh-jar wait, Friend Media): it stamps the resolved geo into both the
+    client attributes and `cl.settings`, sets a current Chrome-136 public UA +
+    `public_transport="curl"`, and aligns the app version. IG media shortcodes
+    are decoded **locally** (`_shortcode_to_pk`) — never call instagrapi's
+    public `media_pk_from_url` for `/p|reel|reels|tv` (it sends a 2017 Safari
+    UA, a second identity). Challenge auto-resolution is **disabled**
+    (`_install_challenge_guard`, supports 2.x `ChallengeMixin` and 3.x
+    `ChallengeResolveMixin`) so a challenge never fires `/challenge/` requests.
+    The root-cause research (stale US geo, public/private identity split, app
+    version 428 vs 449, browser→Android session provenance, datacenter IP):
+    `docs/memory/tgbot-2026-11-10-instagram-automation-warning-research.md`.
     You DM media/links from YOUR account (IG: `IG_DIRECT_FROM_USERNAME`
     static pre-pair or the pairing handshake) to the IG bot account; the relay
     sends photos, videos, reels, story shares, tweet shares and plain links

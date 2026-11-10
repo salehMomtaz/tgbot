@@ -206,6 +206,11 @@ IG_DIRECT_COUNTRY_CODE = os.getenv("IG_DIRECT_COUNTRY_CODE", "").strip()
 IG_DIRECT_LOCALE = os.getenv("IG_DIRECT_LOCALE", "").strip()
 IG_DIRECT_TZ_OFFSET = os.getenv("IG_DIRECT_TZ_OFFSET", "").strip()
 IG_DIRECT_TZ_NAME = os.getenv("IG_DIRECT_TZ_NAME", "").strip()
+# Public-web User-Agent used by instagrapi's public helpers (e.g. the rare
+# /share/ redirect resolver). Empty = a current Chrome 136 UA matching the
+# curl_cffi impersonation. This prevents the 2017-Safari public identity that
+# instagrapi 2.x otherwise sends alongside the Android private session.
+IG_PUBLIC_USER_AGENT = os.getenv("IG_PUBLIC_USER_AGENT", "").strip()
 # IG inbox poll cadence (seconds, jittered ±DIRECT_FORWARD_POLL_JITTER_PCT%).
 # 900 = one authenticated request every ~15 min when idle; the self-DM thread's
 # activity watermark already makes an unchanged thread cost ZERO extra calls.

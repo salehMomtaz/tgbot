@@ -253,6 +253,9 @@ def install_transport(cl, impersonate: str = "chrome136") -> bool:
     # Every client build passes through here — the natural once-per-process
     # hook for the dead-session log-noise filter.
     _install_login_noise_filter()
+    # A challenge must NEVER trigger instagrapi's automatic /challenge/ calls
+    # (operator rule: stop, notify once, wait for a fresh jar).
+    _install_challenge_guard()
 
     adapter_cls = _load_curl_adapter()
     if not adapter_cls:
@@ -271,6 +274,106 @@ def install_transport(cl, impersonate: str = "chrome136") -> bool:
         logger.warning(f"[IG anti-detect] transport install failed ({e}); "
                        f"staying on plain requests.")
         return False
+
+
+_CHALLENGE_GUARDED = False
+_DEFAULT_PUBLIC_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+)
+
+
+def _install_challenge_guard() -> None:
+    """Make ``challenge_resolve`` raise instead of firing /challenge/ requests.
+
+    instagrapi's ``private_request`` catches ``ChallengeRequired`` and calls
+    ``challenge_resolve`` automatically. On a flagged account that is exactly
+    the retry storm the operator forbade: every extra /challenge/ call deepens
+    enforcement. We replace it once per process so the exception surfaces and
+    the worker can arm the session-dead latch.
+    """
+    global _CHALLENGE_GUARDED
+    if _CHALLENGE_GUARDED:
+        return
+    try:
+        import importlib
+        from instagrapi.exceptions import ChallengeRequired
+
+        # 2.x: ChallengeMixin; 3.x: ChallengeResolveMixin. Support both so an
+        # upgrade cannot silently re-enable automatic /challenge/ requests.
+        mod = importlib.import_module("instagrapi.mixins.challenge")
+        mixin = (getattr(mod, "ChallengeMixin", None)
+                 or getattr(mod, "ChallengeResolveMixin", None))
+        if mixin is None:
+            raise RuntimeError("no challenge mixin found")
+
+        def _no_auto_resolve(self, last_json):
+            ctx = dict(last_json or {})
+            ctx["message"] = (
+                "Instagram challenge — automatic resolution is disabled by "
+                "operator policy. Complete it manually in the official app; "
+                "no /challenge/ requests are made.")
+            raise ChallengeRequired(**ctx)
+
+        mixin.challenge_resolve = _no_auto_resolve
+        _CHALLENGE_GUARDED = True
+        logger.info(f"[IG anti-detect] challenge auto-resolution disabled "
+                    f"({mixin.__name__})")
+    except Exception as e:
+        logger.warning(f"[IG anti-detect] challenge guard install failed: {e}")
+
+
+def apply_identity(cl) -> None:
+    """Re-apply the resolved geo + a coherent public web identity.
+
+    MUST run AFTER every ``load_settings()`` / login: instagrapi's ``init()``
+    restores ``country``/``locale``/``timezone`` from the session file,
+    silently overwriting a pre-login ``pin_geo``. The persisted file on this
+    box still carries US/en_US/GMT-4 from before auto-geo, so sending that from
+    a CZ IP is exactly the mismatch this fixes. It also aligns the public web
+    UA/transport with the private session (instagrapi 2.x otherwise sends a
+    2017 desktop Safari UA on public calls — a second identity).
+    """
+    try:
+        from utils import ig_geo
+        geo = ig_geo.resolve()
+        # Stamp the SETTINGS dict too: login_by_sessionid()/load_settings()
+        # call init(), which restores country/locale/timezone/public_transport
+        # from settings. Updating only the attributes is silently undone.
+        if isinstance(getattr(cl, "settings", None), dict):
+            cl.settings.update({
+                "country": geo["country"],
+                "country_code": geo["country_code"],
+                "locale": geo["locale"],
+                "timezone_offset": geo["timezone_offset"],
+                "timezone_name": geo["timezone_name"],
+                "public_transport": "curl",
+                "public_transport_impersonate": "chrome136",
+            })
+        pin_geo(
+            cl,
+            country=geo["country"],
+            country_code=geo["country_code"],
+            locale=geo["locale"],
+            timezone_offset=geo["timezone_offset"],
+            timezone_name=geo["timezone_name"],
+        )
+    except Exception as e:
+        logger.warning(f"[IG anti-detect] geo re-apply failed: {e}")
+    try:
+        cl.public_user_agent = (
+            getattr(config, "IG_PUBLIC_USER_AGENT", "") or _DEFAULT_PUBLIC_UA)
+        cl.set_retry_config(public_transport="curl",
+                            public_transport_impersonate="chrome136")
+    except Exception as e:
+        logger.warning(f"[IG anti-detect] public identity alignment failed: {e}")
+    try:
+        # Present the library's current app build, not the one frozen into an
+        # old session file (2.18.14 only knows up to 428; 3.x defaults to 449).
+        from instagrapi.config import DEFAULT_APP_VERSION
+        cl.set_app(DEFAULT_APP_VERSION)
+    except Exception as e:
+        logger.info(f"[IG anti-detect] app-version alignment skipped: {e}")
 
 
 def _patch_private_retry(impersonate: str) -> None:

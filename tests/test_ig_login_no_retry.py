@@ -174,6 +174,17 @@ def test_a_different_account_gets_a_fresh_device_identity():
         assert not ig_session_guard.is_dead()
 
 
+def test_instagram_shortcodes_decode_locally_without_a_public_request():
+    from modules.direct_forward.instagram import _shortcode_to_pk, _ig_pk_from_url
+
+    # Known live pair (reel Dfg7WJvmy6q was media 4026479073904242346).
+    assert _shortcode_to_pk("Dfg7WJvmy6q") == 4026479073904242346
+    assert _ig_pk_from_url(None, "https://www.instagram.com/p/Dfg7WJvmy6q/") == 4026479073904242346
+    assert _ig_pk_from_url(None, "https://www.instagram.com/reel/DfZ831SsK20/") == 4024515461616020916
+    assert _ig_pk_from_url(None, "https://www.instagram.com/stories/someuser/12345/") == 12345
+    assert _ig_pk_from_url(None, "instagram://media?id=999") == 999
+
+
 def test_direct_link_helper_refuses_without_a_live_client():
     """No live instagrapi client => a clear error, never a yt-dlp fallback."""
     import asyncio

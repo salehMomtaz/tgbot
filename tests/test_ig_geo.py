@@ -104,6 +104,48 @@ def test_detection_failure_falls_back_without_crashing():
     assert g["source"] == "fallback"
 
 
+def test_apply_identity_overwrites_stale_session_settings():
+    """The bug that mattered: load_settings() restores US geo after pin_geo."""
+    from utils import ig_anti_detect
+
+    class Fake:
+        def __init__(self):
+            self.settings = {
+                "country": "US", "country_code": 1, "locale": "en_US",
+                "timezone_offset": -14400, "timezone_name": "GMT-04:00",
+                "public_transport": "requests",
+            }
+            self.public_user_agent = None
+
+        def set_country(self, v):
+            self.country = v
+
+        def set_country_code(self, v):
+            self.country_code = v
+
+        def set_locale(self, v):
+            self.locale = v
+
+        def set_timezone_offset(self, o, n):
+            self.timezone_offset, self.timezone_name = o, n
+
+        def set_retry_config(self, **kw):
+            self.retry = kw
+
+    with _GeoPatch(detected=CZ):
+        cl = Fake()
+        ig_anti_detect.apply_identity(cl)
+
+    assert cl.settings["country"] == "CZ", cl.settings
+    assert cl.settings["country_code"] == 420
+    assert cl.settings["locale"] == "cs_CZ"
+    assert cl.settings["public_transport"] == "curl"
+    assert cl.settings["public_transport_impersonate"] == "chrome136"
+    assert cl.country == "CZ"
+    assert cl.locale == "cs_CZ"
+    assert "Chrome/136" in (cl.public_user_agent or "")
+
+
 def _run() -> int:
     tests = sorted(
         (n, fn) for n, fn in globals().items() if n.startswith("test_") and callable(fn)

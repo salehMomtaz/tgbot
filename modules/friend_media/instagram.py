@@ -260,18 +260,9 @@ async def _ig_client():
             except Exception as e:
                 logger.warning(f"[FriendMedia:ig] transport install degraded: {e}")
             try:
-                from utils import ig_geo
-                geo = ig_geo.resolve()
-                ig_anti_detect.pin_geo(
-                    c,
-                    country=geo["country"],
-                    country_code=geo["country_code"],
-                    locale=geo["locale"],
-                    timezone_offset=geo["timezone_offset"],
-                    timezone_name=geo["timezone_name"],
-                )
+                ig_anti_detect.apply_identity(c)
             except Exception as e:
-                logger.warning(f"[FriendMedia:ig] geo pin degraded: {e}")
+                logger.warning(f"[FriendMedia:ig] identity alignment degraded: {e}")
             try:
                 ig_anti_detect.install_token_echo(c)
             except Exception as e:
@@ -328,6 +319,7 @@ async def _ig_client():
                             # cookies with the fresh sessionid.
                             try:
                                 c.load_settings(_path)
+                                ig_anti_detect.apply_identity(c)
                                 logger.info(f"[FriendMedia:ig] {_path} belongs to an "
                                             f"older jar — keeping its device identity "
                                             f"and bootstrapping the fresh sessionid")
@@ -337,6 +329,9 @@ async def _ig_client():
                             continue
                         try:
                             c.load_settings(_path)
+                            # init() restored the file's stale geo; force the
+                            # resolved values back before the liveness probe.
+                            ig_anti_detect.apply_identity(c)
                             c.account_info()  # read-only liveness proof
                             logger.info(f"[FriendMedia:ig] resumed session from {_path}")
                             return c
@@ -368,6 +363,9 @@ async def _ig_client():
                     raise RuntimeError("login_by_sessionid failed (session expired?) — "
                                        "re-upload igcookies.txt via Admin → 🍪 Cookie Jars")
                 _IG_BOOT_SIG = ""
+                # login_by_sessionid() calls init(), which can restore stale
+                # settings; force the resolved geo + public identity back.
+                ig_anti_detect.apply_identity(c)
                 # Share ONE device identity with the DM worker: persist to the
                 # shared file, never mint a second Android identity for the same
                 # sessionid.
