@@ -269,6 +269,28 @@ was 8 requests total (3 inbox, 1 shared thread fetch, 2 `media/info`, 2
   format list would have to be built from instagrapi's `video_versions`
   renditions; that is a separate change and unnecessary for the self-DM flow.
 
+## 2026-11-10 — "we suspect automated behavior" → Instagram hard-disabled
+
+During the fresh-session activation Instagram showed the operator its **"we
+suspect automated behavior"** prompt. Immediate response (no retry, no appeal
+automation):
+
+- `IG_AUTH_ENABLED=false` in `.env` — the supervisor does **not** start the IG
+  worker (log: *"the IG worker will NOT start and no login will be attempted"*),
+  so there is no polling, no MQTT and no login.
+- The session-dead latch was armed with the warning reason (defense in depth:
+  even a later `IG_AUTH_ENABLED=true` cannot touch the current session until a
+  fresh sessionid is uploaded).
+- Bot restarted: **0** `i.instagram.com` requests, **0** MQTT sockets; Friend
+  Media IG stays off; yt-dlp IG is hard-blocked.
+- The jar and `direct_ig_session.json` are preserved for forensics; no login was
+  attempted.
+
+Operator guidance: do not retry or upload a new session immediately; open the
+official app and complete any challenge it shows; let the account rest 24–72 h
+and keep the same IP. Reconnecting should use a brand-new session and a much
+quieter first day.
+
 ## Left open / not verified
 
 - The live login, MQTT activation and end-to-end push→relay were verified on
