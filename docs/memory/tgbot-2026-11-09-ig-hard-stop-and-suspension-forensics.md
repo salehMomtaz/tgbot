@@ -295,6 +295,10 @@ quieter first day.
 
 - The live login, MQTT activation and end-to-end push→relay were verified on
   2026-11-10 (see above); idle traffic is zero and no 403/challenge appeared.
+- **The account is currently under Instagram's "we suspect automated behavior"
+  warning and IG is hard-disabled** (`IG_AUTH_ENABLED=false` + latch armed).
+  It is not being used by the bot; do not reconnect until the operator decides
+  the account has rested and a fresh session is deliberately uploaded.
 - The exact Instagram classifier thresholds are not public; the ranking above
   is an evidence-based reconstruction, not a court-grade proof.
 - `certbot` certs for the operator's x-ui domains remain outside tgbot scope
