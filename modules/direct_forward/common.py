@@ -216,6 +216,7 @@ async def deliver_tiktok_photo(bot_client, chat_id: int, item_id: str,
     downloadable), so the caller can fall back to the normal video/audio path.
     """
     from utils.downloader.tiktok_photo import fetch_embed_info, download_photo_assets
+    from utils.filenames import sanitize_filename
 
     loop = asyncio.get_event_loop()
     try:
@@ -229,7 +230,8 @@ async def deliver_tiktok_photo(bot_client, chat_id: int, item_id: str,
             caption_body = (f"{caption_body}\n\n{post_caption}"
                             if caption_body else post_caption)
 
-        dest = f"cache/tt_photo_{item_id}"
+        safe_item = sanitize_filename(str(item_id), fallback="tt")
+        dest = f"cache/tt_photo_{safe_item}"
         files, audio_path, cover_path = await loop.run_in_executor(
             None, download_photo_assets, info, dest)
         if not files:
@@ -496,6 +498,28 @@ async def _await_relays(futures) -> None:
             raise r
 
 
+def _proxy_for_url(url: str) -> str | None:
+    """Pick the outbound proxy for a DM attachment fetch.
+
+    Instagram/Facebook CDN hosts ride the account's sticky residential proxy
+    (DIRECT_FORWARD_PROXY) when one is set — this is the fix for the silent
+    fallback bug where ``IG_CDN_DIRECT=false`` still fetched direct because
+    ``_fetch_bytes`` only looked at the generic REQUESTS_PROXY. Other hosts
+    keep the generic proxy. Returns None for direct connection.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        host = ""
+    ig_hosts = ("instagram.com", "cdninstagram.com", "fbcdn.net")
+    if any(h in host for h in ig_hosts):
+        return getattr(config, "DIRECT_FORWARD_PROXY", None) or getattr(
+            config, "REQUESTS_PROXY", None
+        )
+    return getattr(config, "REQUESTS_PROXY", None)
+
+
 def _fetch_bytes(url: str, referer: str | None = None,
                  use_proxy: bool = True) -> bytes:
     """Small helper for downloading DM attachment bytes (runs in executor).
@@ -511,9 +535,9 @@ def _fetch_bytes(url: str, referer: str | None = None,
     if referer:
         headers["Referer"] = referer
     proxies = None
-    if use_proxy and config.REQUESTS_PROXY:
-        proxies = {"http": config.REQUESTS_PROXY,
-                   "https": config.REQUESTS_PROXY}
+    proxy_url = _proxy_for_url(url) if use_proxy else None
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
     resp = requests.get(url, headers=headers, proxies=proxies, timeout=60)
     resp.raise_for_status()
     return resp.content
