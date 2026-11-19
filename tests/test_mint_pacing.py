@@ -99,6 +99,36 @@ def test_known_dead_only_for_current_jar_sessionid():
         assert mint._known_dead_session() is False, "cleared latch -> probe stays"
 
 
+def test_doomed_probe_stub_raises_without_network():
+    """The latch-skip must work with instagrapi 3.x read-only user_id.
+
+    Direct assignment (the 2026-11-20 crash) fails on the property; the
+    stub replaces account_info instead and raises without any request.
+    """
+
+    class ReadOnlyClient:
+        @property
+        def user_id(self):
+            return "123"
+
+        def account_info(self):
+            raise AssertionError("must never reach the network")
+
+    cl = ReadOnlyClient()
+    try:
+        cl.user_id = ""  # type: ignore[misc]
+        raise AssertionError("user_id should be read-only on 3.x")
+    except AttributeError:
+        pass
+    cl.account_info = mint._doomed_probe_stub()  # type: ignore[method-assign]
+    try:
+        cl.account_info()
+    except Exception as e:
+        assert type(e).__name__ == "LoginRequired", type(e)
+    else:
+        raise AssertionError("stub must raise LoginRequired")
+
+
 def _run() -> int:
     tests = sorted(
         (n, fn) for n, fn in globals().items() if n.startswith("test_") and callable(fn)

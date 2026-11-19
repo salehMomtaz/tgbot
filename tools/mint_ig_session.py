@@ -92,6 +92,29 @@ def _known_dead_session() -> bool:
         return False
 
 
+def _doomed_probe_stub():
+    """A no-network account_info replacement for a known-dead session.
+
+    login() calls account_info() to validate the loaded session; raising
+    LoginRequired here takes its normal relogin path (which clears only auth
+    data/cookies — device identity is preserved) without spending the
+    guaranteed-failure request.
+    """
+    # Imported lazily: instagrapi is a VPS dependency, not needed for --help.
+    # The real exception class matters on the box (login() catches exactly
+    # it); off-box tests use the same-named fallback.
+    try:
+        from instagrapi.exceptions import LoginRequired
+    except Exception:  # pragma: no cover - dev boxes without instagrapi
+        class LoginRequired(Exception):
+            pass
+
+    def _skip(*args, **kwargs):
+        raise LoginRequired("known-dead session (latch armed); probe skipped without network")
+
+    return _skip
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Mint an app-native Instagram session")
     ap.add_argument("--proxy", default="",
@@ -168,10 +191,12 @@ def main() -> int:
     print("pacing: 2-5s between login-phase requests (burst spreads over ~20s)")
 
     # The persisted session is known-dead (latch armed for this exact jar
-    # sessionid): skip login()'s account_info validation probe, which is a
-    # guaranteed failure, and go straight to the password flow.
+    # sessionid): stub account_info to fail without touching the network.
+    # login() then takes its normal relogin path, which clears only auth
+    # data/cookies (device identity is preserved) and goes straight to the
+    # password flow. Saves one doomed request on a throttled path.
     if _known_dead_session():
-        cl.user_id = ""
+        cl.account_info = _doomed_probe_stub()
         print("latch armed for this jar sessionid — skipping doomed validation probe")
     ig_anti_detect.apply_identity(cl)   # resolved geo + Chrome-136 public UA + app version
 
