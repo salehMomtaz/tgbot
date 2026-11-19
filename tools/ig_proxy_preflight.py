@@ -101,6 +101,8 @@ def main() -> int:
                     help="proxy scheme (default: http; socks5h needs --port 32325)")
     ap.add_argument("--port", default="12321",
                     help="entry port: 12321 for http, 32325 for socks5 (default: 12321)")
+    ap.add_argument("--host", default="proxy.iproyal.com",
+                    help="entry node: proxy.iproyal.com (EU, default) or geo.iproyal.com (auto)")
     ap.add_argument("--api-token", default="",
                     help="Royal API token for balance display (or IPROYAL_API_TOKEN)")
     ap.add_argument("--no-check", action="store_true",
@@ -128,9 +130,9 @@ def main() -> int:
     # NOTE: the killswitch flag makes a dead sticky IP fail fast (HTTP 410)
     # instead of silently rotating — a silent rotation would change the
     # account's identity IP mid-session.
-    proxy_url = f"{args.scheme}://{user}:{password}{suffix}@geo.iproyal.com:{args.port}"
+    proxy_url = f"{args.scheme}://{user}:{password}{suffix}@{args.host}:{args.port}"
 
-    print(f"proxy user: {_mask(user)} @ geo.iproyal.com:12321")
+    print(f"proxy user: {_mask(user)} @ {args.host}:{args.port} ({args.scheme})")
     print(f"targeting: country={args.country} city={args.city} "
           f"session={sid} lifetime={args.lifetime} killswitch=on")
     _check_balance(api_token)
@@ -140,7 +142,7 @@ def main() -> int:
 
     print()
     print("Put this in the VPS .env (exact line):")
-    print(f"DIRECT_FORWARD_PROXY={args.scheme}://{user}:{password}{suffix}@geo.iproyal.com:{args.port}")
+    print(f"DIRECT_FORWARD_PROXY={args.scheme}://{user}:{password}{suffix}@{args.host}:{args.port}")
     print()
     print("Then mint the app-native session THROUGH the proxy (ONE attempt):")
     print("  venv/bin/python tools/mint_ig_session.py --yes")
