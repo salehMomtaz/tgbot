@@ -88,13 +88,26 @@ def _egress_check(proxy_url: str) -> bool:
     return True
 
 
+def _session_from_dotenv() -> str | None:
+    """Read the _session- id already configured in .env, if any."""
+    import re
+    try:
+        with open(".env", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"DIRECT_FORWARD_PROXY=\S*_session-([A-Za-z0-9]{8})", text)
+    return m.group(1) if m else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Tiny iProyal sticky-proxy pre-flight for IG.")
     ap.add_argument("--country", default="cz", help="exit country (default: cz)")
     ap.add_argument("--city", default="prague", help="exit city (default: prague)")
-    ap.add_argument("--session", default="tgig0001",
-                    help="sticky session id, exactly 8 alphanumerics (default: tgig0001). "
-                         "Keep ONE value for the account's lifetime.")
+    ap.add_argument("--session", default="",
+                    help="sticky session id, exactly 8 alphanumerics. Default: the "
+                         "_session- value already in .env DIRECT_FORWARD_PROXY, "
+                         "else tgig0001. Keep ONE value per account lifetime.")
     ap.add_argument("--lifetime", default="7d",
                     help="sticky lifetime, max 7d (default: 7d)")
     ap.add_argument("--scheme", default="http", choices=["http", "socks5h"],
@@ -110,8 +123,12 @@ def main() -> int:
     args = ap.parse_args()
 
     sid = args.session
+    sid_src = "flag"
+    if not sid:
+        sid = _session_from_dotenv() or "tgig0001"
+        sid_src = ".env" if _session_from_dotenv() else "default"
     if len(sid) != 8 or not sid.isalnum():
-        print(f"bad --session {sid!r}: must be exactly 8 alphanumeric chars")
+        print(f"bad session {sid!r} (from {sid_src}): must be exactly 8 alphanumeric chars")
         return 2
 
     user = os.getenv("IPROYAL_USER", "").strip()
@@ -134,7 +151,7 @@ def main() -> int:
 
     print(f"proxy user: {_mask(user)} @ {args.host}:{args.port} ({args.scheme})")
     print(f"targeting: country={args.country} city={args.city} "
-          f"session={sid} lifetime={args.lifetime} killswitch=on")
+          f"session={sid} (from {sid_src}) lifetime={args.lifetime} killswitch=on")
     _check_balance(api_token)
     if not args.no_check:
         if not _egress_check(proxy_url):
