@@ -726,8 +726,12 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
                 except Exception as e:
                     logger.warning(f"[DirectForward/IG] native pk {pk} failed: {e}")
                 if preview:
+                    # Preview fallback is also a CDN fetch: keep it off the
+                    # metered proxy when IG_CDN_DIRECT=true (same rule as the
+                    # native path above — failures must not burn proxy bytes).
                     data = await asyncio.get_event_loop().run_in_executor(
-                        None, _fetch_bytes, preview, "https://www.instagram.com/")
+                        None, _fetch_bytes, preview, "https://www.instagram.com/",
+                        not bool(getattr(config, "IG_CDN_DIRECT", True)))
                     path = f"cache/df_pk_{pk}.jpg"
                     with open(path, "wb") as f:
                         f.write(data)
@@ -742,7 +746,10 @@ async def _ig_process_message(item: dict, cl, loop, queue, chat_id,
 
         if kind == "attachment":
             src, is_photo = resolved["url"], resolved["is_photo"]
-            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/")
+            # DM attachments can be videos (tens of MB): same split-egress
+            # rule — direct from the VPS unless the CDN rejects direct.
+            data = await loop.run_in_executor(None, _fetch_bytes, src, "https://www.instagram.com/",
+                                              not bool(getattr(config, "IG_CDN_DIRECT", True)))
             ext = ".jpg" if is_photo else ".mp4"
             path = f"cache/df_ig_dm_{item_id}{ext}"
             os.makedirs("cache", exist_ok=True)
