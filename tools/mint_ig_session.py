@@ -33,7 +33,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import random
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -44,6 +46,50 @@ def _fp(value: str) -> str:
     if not value:
         return "(none)"
     return f"{value[:4]}…{value[-4:]}({len(value)})"
+
+
+def _install_login_pacer(cl, min_s: float = 2.0, max_s: float = 5.0) -> None:
+    """Space out the CAA login burst like a human.
+
+    One login() fires ~5 pre-auth requests back-to-back (validation probe,
+    usdid register, CAA process_client_data, attestation, oauth token fetch,
+    send_login_request), all with login=True i.e. with NO delay_range pacing.
+    Wrap both request paths (plain + graphql-www) so each costs a 2-5s human
+    pause first — a ~20s sequence instead of a ~2s burst.
+    """
+    orig_request = cl.private_request
+    orig_graphql = cl.private_graphql_www_request
+
+    def _paced_request(endpoint, *args, **kwargs):
+        time.sleep(random.uniform(min_s, max_s))
+        return orig_request(endpoint, *args, **kwargs)
+
+    def _paced_graphql(*args, **kwargs):
+        time.sleep(random.uniform(min_s, max_s))
+        return orig_graphql(*args, **kwargs)
+
+    cl.private_request = _paced_request
+    cl.private_graphql_www_request = _paced_graphql
+
+
+def _known_dead_session() -> bool:
+    """True when the hard-stop latch is armed for the CURRENT jar sessionid.
+
+    The account_info validation probe is then a guaranteed failure — the
+    caller should skip it and go straight to the password flow (one less
+    request on a throttled account/IP).
+    """
+    try:
+        from utils import ig_session_guard
+
+        if not ig_session_guard.is_dead():
+            return False
+        if not ig_session_guard.jar_sessionid():
+            return False
+        latch = ig_session_guard.read_latch() or {}
+        return bool(latch.get("sig")) and latch.get("sig") == ig_session_guard.sessionid_sig()
+    except Exception:
+        return False
 
 
 def main() -> int:
@@ -112,7 +158,21 @@ def main() -> int:
         cl.set_proxy(proxy)
         print("proxy set for login + API")
 
-    ig_anti_detect.install_transport(cl, "chrome136")
+    if not ig_anti_detect.install_transport(cl, "chrome136"):
+        print("✗ TLS impersonation unavailable — aborting. Without it the session "
+              "falls back to plain requests, whose urllib3 retry would triple "
+              "every 429 and multiply this one attempt.")
+        return 1
+    print("transport: curl_cffi impersonation active (single-shot, no urllib3 retry)")
+    _install_login_pacer(cl)
+    print("pacing: 2-5s between login-phase requests (burst spreads over ~20s)")
+
+    # The persisted session is known-dead (latch armed for this exact jar
+    # sessionid): skip login()'s account_info validation probe, which is a
+    # guaranteed failure, and go straight to the password flow.
+    if _known_dead_session():
+        cl.user_id = ""
+        print("latch armed for this jar sessionid — skipping doomed validation probe")
     ig_anti_detect.apply_identity(cl)   # resolved geo + Chrome-136 public UA + app version
 
     username = (args.username or input("Instagram username: ")).strip().lstrip("@")
