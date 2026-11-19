@@ -3,23 +3,29 @@
 
 Verifies, with the smallest possible traffic, that the iProyal proxy the bot
 will use for Instagram API calls actually exits in the right place BEFORE you
-mint a session or enable the worker. Run on the VPS:
+mint a session or enable the worker. Run on the VPS with NO flags: by default
+it tests the exact DIRECT_FORWARD_PROXY already in .env — the same string the
+mint script and the bot will use:
 
-    IPROYAL_USER='<proxy-username>' IPROYAL_PASS='<proxy-password>' \\
-        venv/bin/python tools/ig_proxy_preflight.py
+    venv/bin/python tools/ig_proxy_preflight.py
 
     # with Royal API balance display (token from dashboard Settings > API):
-    IPROYAL_USER='...' IPROYAL_PASS='...' IPROYAL_API_TOKEN='<royal-token>' \\
-        venv/bin/python tools/ig_proxy_preflight.py --city prague
+    IPROYAL_API_TOKEN='<royal-token>' venv/bin/python tools/ig_proxy_preflight.py
+
+To test a DIFFERENT configuration, pass flags (then it prints the exact
+.env line to install):
+
+    IPROYAL_USER='<u>' IPROYAL_PASS='<p>' \\
+        venv/bin/python tools/ig_proxy_preflight.py --session tgig0003
 
 Network cost: one ~2 KB account-API call (skipped without a token) + ONE
 ~200-byte egress probe. Nothing else. Credentials come from env vars or
-interactive prompts only — never from files, never logged, never stored.
+interactive prompts only — never logged, never stored.
 
 What it prints:
   - remaining iProyal traffic (if a Royal API token was given),
-  - the proxy exit IP + country/city (must be CZ / Prague),
-  - the exact DIRECT_FORWARD_PROXY line for .env,
+  - the proxy exit IP + country/city,
+  - the exact DIRECT_FORWARD_PROXY line for .env (when rebuilding),
   - the exact mint command to run next.
 """
 
@@ -28,8 +34,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
-import random
-import string
+import re
 import sys
 
 
@@ -81,85 +86,120 @@ def _egress_check(proxy_url: str) -> bool:
     cc = info.get("countryCode", "?")
     print(f"egress probe: exit {info.get('query')} — {cc} / {info.get('city')}")
     if cc != "CZ":
-        print("egress probe: NOT Czech Republic — do NOT mint through this. "
-              "Check _country-cz / city targeting.")
+        print("egress probe: NOT Czech Republic — do NOT mint through this.")
         return False
     print("egress probe: OK (Czech exit)")
     return True
 
 
-def _session_from_dotenv() -> str | None:
-    """Read the _session- id already configured in .env, if any."""
-    import re
+def _dotenv_proxy_url() -> str | None:
+    """The full DIRECT_FORWARD_PROXY value already in .env, if any."""
     try:
         with open(".env", encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None
-    m = re.search(r"DIRECT_FORWARD_PROXY=\S*_session-([A-Za-z0-9]{8})", text)
+    m = re.search(r"DIRECT_FORWARD_PROXY=(\S+)", text)
     return m.group(1) if m else None
+
+
+def _split_proxy_url(url: str) -> dict:
+    """Split a proxy URL into components; password may carry _key-value suffix."""
+    m = re.match(r"^(\w+)://([^:]+):(.+)@([^:]+):(\d+)$", url)
+    if not m:
+        return {}
+    scheme, user, creds, host, port = m.groups()
+    keys: dict = {}
+    cut = creds.find("_country-")
+    password = creds if cut < 0 else creds[:cut]
+    tail = "" if cut < 0 else creds[cut:]
+    for k in ("country", "city", "session", "lifetime"):
+        km = re.search(rf"_{k}-([^_]+)", tail)
+        if km:
+            keys[k] = km.group(1)
+    return {"scheme": scheme, "user": user, "password": password,
+            "host": host, "port": port, **keys}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Tiny iProyal sticky-proxy pre-flight for IG.")
-    ap.add_argument("--country", default="cz", help="exit country (default: cz)")
-    ap.add_argument("--city", default="prague", help="exit city (default: prague)")
+    ap.add_argument("--country", default=None, help="exit country (default: from .env, else cz)")
+    ap.add_argument("--city", default=None,
+                    help="pin an exit city, e.g. prague (default: from .env, else none = country-wide)")
+    ap.add_argument("--no-city", action="store_true",
+                    help="drop any city pin (country-wide exit pool)")
     ap.add_argument("--session", default="",
                     help="sticky session id, exactly 8 alphanumerics. Default: the "
-                         "_session- value already in .env DIRECT_FORWARD_PROXY, "
-                         "else tgig0001. Keep ONE value per account lifetime.")
-    ap.add_argument("--lifetime", default="7d",
-                    help="sticky lifetime, max 7d (default: 7d)")
-    ap.add_argument("--scheme", default="http", choices=["http", "socks5h"],
-                    help="proxy scheme (default: http; socks5h needs --port 32325)")
-    ap.add_argument("--port", default="12321",
-                    help="entry port: 12321 for http, 32325 for socks5 (default: 12321)")
-    ap.add_argument("--host", default="proxy.iproyal.com",
-                    help="entry node: proxy.iproyal.com (EU, default) or geo.iproyal.com (auto)")
+                         "_session- value already in .env, else tgig0001. "
+                         "Keep ONE value per account lifetime after first success.")
+    ap.add_argument("--lifetime", default=None, help="sticky lifetime, max 7d")
+    ap.add_argument("--scheme", default=None, choices=["http", "socks5h"],
+                    help="proxy scheme (http needs port 12321, socks5h needs 32325)")
+    ap.add_argument("--port", default=None, help="entry port")
+    ap.add_argument("--host", default=None, help="entry node")
     ap.add_argument("--api-token", default="",
                     help="Royal API token for balance display (or IPROYAL_API_TOKEN)")
     ap.add_argument("--no-check", action="store_true",
-                    help="print the .env line without spending the egress probe")
+                    help="skip the egress probe (spends nothing)")
     args = ap.parse_args()
 
-    sid = args.session
-    sid_src = "flag"
-    if not sid:
-        sid = _session_from_dotenv() or "tgig0001"
-        sid_src = ".env" if _session_from_dotenv() else "default"
-    if len(sid) != 8 or not sid.isalnum():
-        print(f"bad session {sid!r} (from {sid_src}): must be exactly 8 alphanumeric chars")
-        return 2
+    env_url = _dotenv_proxy_url()
+    env = _split_proxy_url(env_url) if env_url else {}
+    rebuild = any([args.session, args.country, args.city is not None,
+                   args.no_city, args.lifetime, args.scheme, args.port, args.host])
 
-    user = os.getenv("IPROYAL_USER", "").strip()
-    password = os.getenv("IPROYAL_PASS", "").strip()
-    if not user:
-        user = input("iProyal proxy username: ").strip()
-    if not password:
-        password = getpass.getpass("iProyal proxy password (hidden): ").strip()
-    if not user or not password:
-        print("username/password required (env IPROYAL_USER / IPROYAL_PASS)")
-        return 2
-    api_token = (args.api_token or os.getenv("IPROYAL_API_TOKEN", "")).strip() or None
+    if env_url and not rebuild:
+        # Default path: test EXACTLY what mint and the bot will use.
+        proxy_url = env_url
+        desc = (f"session={env.get('session', '?')} country={env.get('country', '?')} "
+                f"city={env.get('city', 'any')} (exact .env string)")
+        print(f"mode: testing exact .env DIRECT_FORWARD_PROXY "
+              f"(user {_mask(env.get('user', ''))} @ {env.get('host')}:{env.get('port')})")
+    else:
+        country = args.country or env.get("country") or "cz"
+        city = None if args.no_city else (args.city or env.get("city"))
+        sid = args.session or env.get("session") or "tgig0001"
+        if len(sid) != 8 or not sid.isalnum():
+            print(f"bad session {sid!r}: must be exactly 8 alphanumeric chars")
+            return 2
+        lifetime = args.lifetime or env.get("lifetime") or "7d"
+        scheme = args.scheme or env.get("scheme") or "http"
+        host = args.host or env.get("host") or "proxy.iproyal.com"
+        port = args.port or env.get("port") or ("32325" if scheme == "socks5h" else "12321")
 
-    suffix = (f"_country-{args.country}_city-{args.city}"
-              f"_session-{sid}_lifetime-{args.lifetime}_killswitch-1")
-    # NOTE: the killswitch flag makes a dead sticky IP fail fast (HTTP 410)
-    # instead of silently rotating — a silent rotation would change the
-    # account's identity IP mid-session.
-    proxy_url = f"{args.scheme}://{user}:{password}{suffix}@{args.host}:{args.port}"
+        user = os.getenv("IPROYAL_USER", "").strip() or env.get("user", "")
+        password = os.getenv("IPROYAL_PASS", "").strip() or env.get("password", "")
+        if not user:
+            user = input("iProyal proxy username: ").strip()
+        if not password:
+            # NOTE: the killswitch flag makes a dead sticky IP fail fast
+            # (HTTP 410) instead of silently rotating — a silent rotation
+            # would change the account's identity IP mid-session.
+            password = getpass.getpass("iProyal proxy password (hidden): ").strip()
+        if not user or not password:
+            print("username/password required (env IPROYAL_USER / IPROYAL_PASS, or .env)")
+            return 2
 
-    print(f"proxy user: {_mask(user)} @ {args.host}:{args.port} ({args.scheme})")
-    print(f"targeting: country={args.country} city={args.city} "
-          f"session={sid} (from {sid_src}) lifetime={args.lifetime} killswitch=on")
-    _check_balance(api_token)
+        city_part = f"_city-{city}" if city else ""
+        suffix = (f"_country-{country}{city_part}"
+                  f"_session-{sid}_lifetime-{lifetime}_killswitch-1")
+        proxy_url = f"{scheme}://{user}:{password}{suffix}@{host}:{port}"
+        desc = (f"session={sid} country={country} city={city or 'any'} "
+                f"lifetime={lifetime} killswitch=on")
+        print(f"mode: rebuilt string (user {_mask(user)} @ {host}:{port} {scheme})")
+
+    print(f"targeting: {desc}")
+    _check_balance((args.api_token or os.getenv("IPROYAL_API_TOKEN", "")).strip() or None)
     if not args.no_check:
         if not _egress_check(proxy_url):
             return 1
 
-    print()
-    print("Put this in the VPS .env (exact line):")
-    print(f"DIRECT_FORWARD_PROXY={args.scheme}://{user}:{password}{suffix}@{args.host}:{args.port}")
+    if rebuild or not env_url:
+        print()
+        print("Put this in the VPS .env (exact line):")
+        # password embedded: this line is meant for the operator's own
+        # terminal/.env only — never paste it into chat or docs.
+        print(f"DIRECT_FORWARD_PROXY={proxy_url}")
     print()
     print("Then mint the app-native session THROUGH the proxy (ONE attempt):")
     print("  venv/bin/python tools/mint_ig_session.py --yes")
