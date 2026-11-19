@@ -576,7 +576,10 @@ async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
     try:
         response, _ = await client.v11.dm_conversation(conversation_id, None)
     except Exception as e:
-        logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} fetch failed: {e}")
+        # Log the TYPE, not just str(e): some transport errors carry an
+        # empty message and "fetch failed: " alone is undiagnosable.
+        logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                       f"fetch failed: {type(e).__name__}: {e!r}")
         return []
     timeline = (response.get("conversation_timeline") or {}).get("entries") or []
     msgs = []

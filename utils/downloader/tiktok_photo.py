@@ -94,8 +94,11 @@ def fetch_embed_info(item_id: str, timeout: int = 25) -> dict | None:
                 continue
             break
         if r is None or r.status_code != 200:
+            # NOTE: a falsy check (``if r``) would be wrong here — requests
+            # Response objects are falsy for 4xx/5xx, which hid every real
+            # failure code behind "HTTP ?". Compare against None explicitly.
             logger.warning("[TikTokPhoto] embed %s -> HTTP %s", item_id,
-                           r.status_code if r else "?")
+                           r.status_code if r is not None else "?")
             return None
         m = _EMBED_JSON_RE.search(r.text)
         if not m:
