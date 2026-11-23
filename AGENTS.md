@@ -696,6 +696,29 @@ hands out depend on it. Do not re-add a webapp Mini App without an explicit ask.
     harmless sleeping no-op until configured). Because the wrapper self-reloads,
     X self-DM is fully activatable in-chat (Admin → 📨 Direct-Forward →
     🔑 Set X Chat PIN) with no ssh/systemctl.
+    **twikit's transaction bootstrap is pinned to `x.com/i/jf/` (2026-11-23).**
+    X rolled the Rolldown frontend out to `/` and `/home`, which no longer
+    serve the `ondemand.s` webpack chunk map that twikit's
+    `ClientTransaction` parses for the `x-client-transaction-id` header; every
+    twikit call then dies with `Exception("Couldn't get KEY_BYTE indices")`
+    (or `'ClientTransaction' object has no attribute 'key'`). The legacy shell
+    still lives at `/i/jf/` (verified live: 200, chunk map + site
+    verification), so `twitter.py::_patch_twikit_transaction_host` swaps
+    `handle_x_migration` in BOTH `twikit.x_client_transaction.utils` and
+    `.transaction` (the latter imported the name directly) and falls back to
+    the stock page if the shell ever disappears. It is idempotent and called
+    from `_build_x_client` + the direct-retry path. If twikit is upgraded,
+    check whether upstream fixed it and delete the patch; the peer projects
+    (tweety#298/#301) hit the same rollout.
+    **`DIRECT_FORWARD_PROXY` has a circuit breaker (2026-11-23).** A dead
+    residential proxy answers `410 Gone` on every CONNECT (provider-side
+    subscription/quota end) — it is NOT X removing content. `_note_proxy_failure`
+    logs ONE warning per outage, the worker rebuilds the X client direct (`/`
+    the bridge's path), and `_probe_proxy` re-probes every 30 min so a renewed
+    proxy self-heals with no restart; repeated probe failures stay at DEBUG.
+    The breaker only arms when `DIRECT_FORWARD_PROXY` is set. `curl` the proxy
+    (redacted) before blaming X: a plain `GET http://httpbin.org/ip` through
+    it returning 410 is decisive.
     **TikTok = the same self-DM trick over the IM WebSocket (2026-08-10).**
      The worker (`modules/direct_forward/tiktok.py::_tiktok_worker`) holds a persistent
     async WS (`wss://im-ws-sg.tiktok.com/ws/v2`, library `websockets`) to the
