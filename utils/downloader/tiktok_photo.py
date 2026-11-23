@@ -102,7 +102,14 @@ def fetch_embed_info(item_id: str, timeout: int = 25) -> dict | None:
             return None
         m = _EMBED_JSON_RE.search(r.text)
         if not m:
-            logger.warning("[TikTokPhoto] embed %s: hydration JSON not found", item_id)
+            # TikTok removed server-rendered embed data (Nov 2026): the
+            # /embed/<id> page is now a JS shell (__MODERN_SSR_DATA__ carries
+            # an empty "data":{}). Videos don't need this JSON (yt-dlp
+            # downloads them directly; author/caption fall back gracefully),
+            # so this is INFO noise, not a failure. True photo posts degrade
+            # to audio-only via the normal video path when this is missing.
+            logger.info("[TikTokPhoto] embed %s: hydration JSON not found "
+                        "(TikTok serves a JS shell now)", item_id)
             return None
         state = json.loads(m.group(1))
     except Exception as e:  # noqa: BLE001

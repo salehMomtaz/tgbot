@@ -107,6 +107,41 @@ def _x_is_tweet_url(url: str) -> bool:
     return bool(re.search(r"(?:x\.com|twitter\.com)/(?:[^/?#]+/)?status(?:es)?/\d+", url, re.I))
 
 
+# yt-dlp error text fragments that mean the tweet/post is gone on the
+# platform's side (deleted, protected, suspended, age-gated) rather than a
+# transient fetch failure or a photo-only tweet. When matched, the relay
+# sends a "removed" notice instead of the generic "no downloadable media"
+# text and skips the photo-fallback GraphQL walk (saves private-API calls).
+_REMOVED_HINTS = (
+    "not found",
+    "does not exist",
+    "no longer available",
+    "no longer exists",
+    "deleted",
+    "removed",
+    "suspended",
+    "protected tweets",
+    "protected account",
+    "account suspended",
+    "tweet not found",
+    "status not found",
+    "could not find",
+    "404",
+    "410",
+    "gone",
+    "forbidden",
+    "unauthorized",
+)
+
+
+def _is_tweet_removed(error_text: str | None) -> bool:
+    """True when *error_text* looks like platform-removed content."""
+    if not error_text:
+        return False
+    t = str(error_text).lower()
+    return any(h in t for h in _REMOVED_HINTS)
+
+
 def _x_deep_find_media_url(node: Any) -> tuple[str | None, bool]:
     """Duck-type an X DM attachment tree into (media_url, is_photo)."""
     if isinstance(node, dict):
@@ -572,15 +607,84 @@ def _bump_conv_cursor(state: dict, conv: str, lid) -> None:
 async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
     """Fresh messages from the self-DM conversation, newest-first. Each item is
     the raw ``message_data`` dict plus an ``id`` key (the DM message id, which
-    is the cursor)."""
+    is the cursor).
+
+    Self-healing (2026-11-23):
+    - ``CookieConflict`` (duplicate ``__cf_bm`` in the shared httpx jar piles
+      up from Cloudflare ``Set-Cookie`` on x.com responses) used to wedge the
+      worker permanently silent — every poll returned ``[]`` until a restart.
+      Now the jar is rebuilt from the on-disk xcookies (which never holds the
+      duplicates) and the fetch is retried once.
+    - ``ProxyError`` / timeouts (the residential proxy returning ``410 Gone``
+      or flapping) fall back to ONE direct (no-proxy) fetch so a proxy outage
+      does not stop the self-DM relay. Media fetches already go direct via the
+      throwaway client; this makes the poll match."""
     try:
         response, _ = await client.v11.dm_conversation(conversation_id, None)
     except Exception as e:
-        # Log the TYPE, not just str(e): some transport errors carry an
-        # empty message and "fetch failed: " alone is undiagnosable.
-        logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
-                       f"fetch failed: {type(e).__name__}: {e!r}")
-        return []
+        ename = type(e).__name__
+        # CookieConflict: rebuild the in-memory jar from disk and retry once.
+        if "CookieConflict" in ename or "CookieConflict" in repr(e):
+            try:
+                fresh = _x_jar_cookies()
+                if fresh:
+                    try:
+                        client.http.cookies.clear()
+                    except Exception:
+                        pass
+                    try:
+                        client.set_cookies(fresh)
+                    except Exception:
+                        pass
+                    logger.warning("[DirectForward/X] self-DM CookieConflict — "
+                                   "rebuilt session jar from disk, retrying once")
+                    try:
+                        response, _ = await client.v11.dm_conversation(conversation_id, None)
+                    except Exception as e2:
+                        logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                                       f"fetch failed after jar rebuild: {type(e2).__name__}: {e2!r}")
+                        return []
+                else:
+                    logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                                   f"fetch failed: {ename}: {e!r} (no fresh jar to rebuild from)")
+                    return []
+            except Exception as e2:
+                logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                               f"fetch failed: {ename}: {e!r} (rebuild failed: {e2!r})")
+                return []
+        elif ("ProxyError" in ename or "ProxyError" in repr(e)
+              or "ConnectTimeout" in ename or "ReadTimeout" in ename
+              or "ConnectError" in ename):
+            # Proxy outage: retry once direct (no proxy) so the relay survives.
+            # The bridge already runs direct; this matches it.
+            logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                           f"fetch failed via proxy ({ename}: {e!r}) — retrying direct once. "
+                           f"If this persists, check DIRECT_FORWARD_PROXY (expired/blocked?).")
+            try:
+                from twikit import Client as _XClient
+                direct = _XClient(language="en-US")
+                fresh = _x_jar_cookies()
+                if fresh:
+                    direct.set_cookies(fresh)
+                else:
+                    # Fall back to copying the live session cookies.
+                    try:
+                        direct.http.cookies = client.http.cookies
+                    except Exception:
+                        pass
+                response, _ = await direct.v11.dm_conversation(conversation_id, None)
+            except Exception as e2:
+                # Log the TYPE, not just str(e): some transport errors carry an
+                # empty message and "fetch failed: " alone is undiagnosable.
+                logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                               f"fetch failed: {type(e2).__name__}: {e2!r} (direct retry also failed)")
+                return []
+        else:
+            # Log the TYPE, not just str(e): some transport errors carry an
+            # empty message and "fetch failed: " alone is undiagnosable.
+            logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
+                           f"fetch failed: {ename}: {e!r}")
+            return []
     timeline = (response.get("conversation_timeline") or {}).get("entries") or []
     msgs = []
     for entry in timeline:
@@ -699,9 +803,11 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
     task_dirs = set()
 
     try:
+        extract_err = None
         try:
             data = await loop.run_in_executor(None, extract_formats, url)
         except Exception as e:
+            extract_err = str(e)
             logger.warning(f"[DirectForward/X] tweet {url} extract failed: {e}")
             data = None
 
@@ -712,6 +818,23 @@ async def _x_deliver_tweet(client, bot_client, premium_client, chat_id, url, hea
                             f"— falling back to the share's own mp4")
                 return await _x_deliver_dm_attachment(client, bot_client, chat_id,
                                                       share_video_url, False, header_lines)
+            # Platform-removed content (deleted / protected / suspended) gets
+            # its own notice so the operator can tell it apart from a
+            # photo-only tweet or a transient extractor failure. Skip the
+            # photo-fallback GraphQL walk for these — it costs private-API
+            # calls and cannot succeed on a gone tweet.
+            if extract_err and _is_tweet_removed(extract_err):
+                logger.warning(f"[DirectForward/X] tweet {url}: appears removed on X "
+                               f"({extract_err[:160]}) — relaying removed-notice")
+                full = _full_text(header_lines, body)
+                note = (f"{full}\n\n"
+                        f"🗑️ *Removed on X* — this tweet appears deleted, protected, "
+                        f"suspended, or otherwise unavailable to the extractor "
+                        f"(`{extract_err[:180]}`). No media to relay.")
+                if not await send_rich_text(chat_id, [], note):
+                    for i in range(0, len(note), 4096):
+                        await bot_client.send_message(chat_id=chat_id, text=note[i:i + 4096])
+                return
             photo_urls = await _x_fallback_photos(client, url)
             if photo_urls:
                 logger.info(f"[DirectForward/X] tweet {url}: no yt-dlp video formats "
