@@ -192,9 +192,82 @@ def test_proxy_error_falls_back_direct():
     print("proxy-direct-fallback OK")
 
 
+def test_proxy_breaker_dedupes_and_recovers():
+    tw = _load_twitter()
+    tw._PROXY_DOWN_UNTIL = 0.0
+    tw._PROXY_WARNED = False
+
+    import logging
+    records = []
+
+    class Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = tw.logger
+    cap = Cap()
+    logger.addHandler(cap)
+    old_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        assert tw._proxy_usable() is True
+        tw._note_proxy_failure("ProxyError: 410 Gone")
+        assert tw._proxy_usable() is False, "breaker must open"
+        tw._note_proxy_failure("ProxyError: 410 Gone")  # repeat: DEBUG only
+        levels = [r.levelname for r in records if "proxy" in r.getMessage().lower()]
+        assert levels.count("WARNING") == 1, f"expected ONE warning, got {levels}"
+        assert levels.count("DEBUG") == 1, f"expected one debug repeat, got {levels}"
+        records.clear()
+        # Recovery resets the breaker and logs once.
+        tw._note_proxy_success()
+        assert tw._proxy_usable() is True
+        assert any(r.levelname == "INFO" for r in records), "recovery must log INFO"
+        records.clear()
+        tw._note_proxy_success()  # no outage: silent
+        assert not records, "no-op recovery must not log"
+    finally:
+        logger.removeHandler(cap)
+        logger.setLevel(old_level)
+    print("proxy-breaker OK")
+
+
+def test_probe_proxy_health():
+    tw = _load_twitter()
+    import requests as _requests
+
+    class _Resp:
+        status_code = 200
+
+    calls = {"n": 0}
+    real_get = _requests.get
+
+    def fake_get(*a, **k):
+        calls["n"] += 1
+        return _Resp()
+
+    _requests.get = fake_get
+    try:
+        assert tw._probe_proxy("http://p:1") is True
+    finally:
+        _requests.get = real_get
+
+    def boom(*a, **k):
+        raise _ProxyErr("410 Gone")
+
+    _requests.get = boom
+    try:
+        assert tw._probe_proxy("http://p:1") is False
+    finally:
+        _requests.get = real_get
+    assert calls["n"] == 1
+    print("proxy-probe OK")
+
+
 if __name__ == "__main__":
     test_removed_patterns()
     test_cookie_conflict_rebuilds_and_retries()
+    test_proxy_breaker_dedupes_and_recovers()
+    test_probe_proxy_health()
     # Proxy fallback needs twikit installed; skip gracefully offline.
     try:
         import twikit  # noqa: F401

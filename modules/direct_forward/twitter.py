@@ -142,6 +142,59 @@ def _is_tweet_removed(error_text: str | None) -> bool:
     return any(h in t for h in _REMOVED_HINTS)
 
 
+# Proxy circuit breaker (2026-11-23). A dead residential proxy answers
+# ``410 Gone`` on every CONNECT (provider-side subscription/quota end), and
+# retrying it on every 5-minute poll is pure noise + latency for an endpoint
+# that cannot recover without the operator. When the proxy fails we:
+#   * log ONE warning with the actionable hint,
+#   * relay direct (no proxy) meanwhile — the same path the XChat bridge uses,
+#   * re-probe every 30 min so a renewed/replaced proxy self-heals with no
+#     restart; repeated probe failures stay at DEBUG (no channel spam).
+_PROXY_DOWN_UNTIL = 0.0
+_PROXY_WARNED = False
+_PROXY_DOWN_SECONDS = 1800
+
+
+def _proxy_usable() -> bool:
+    """False while the breaker is open (proxy treats us like a gone client)."""
+    return time.time() >= _PROXY_DOWN_UNTIL
+
+
+def _note_proxy_failure(reason: str) -> None:
+    global _PROXY_DOWN_UNTIL, _PROXY_WARNED
+    _PROXY_DOWN_UNTIL = time.time() + _PROXY_DOWN_SECONDS
+    if not _PROXY_WARNED:
+        _PROXY_WARNED = True
+        logger.warning(
+            "[DirectForward/X] proxy marked DOWN for %d min (%s) — relaying direct "
+            "meanwhile. Renew/replace DIRECT_FORWARD_PROXY; it is re-probed "
+            "automatically.", _PROXY_DOWN_SECONDS // 60, reason)
+    else:
+        logger.debug("[DirectForward/X] proxy still down (%s)", reason)
+
+
+def _note_proxy_success() -> None:
+    global _PROXY_DOWN_UNTIL, _PROXY_WARNED
+    was_down = _PROXY_WARNED
+    _PROXY_DOWN_UNTIL = 0.0
+    _PROXY_WARNED = False
+    if was_down:
+        logger.info("[DirectForward/X] proxy healthy again — resuming proxied polls")
+
+
+def _probe_proxy(proxy_url: str, timeout: int = 8) -> bool:
+    """Cheap liveness probe for the breaker's re-probe. Any HTTP response
+    through the tunnel means the proxy works; a ProxyError/timeout means it
+    does not. Runs in an executor (blocking requests)."""
+    import requests
+    try:
+        requests.get("https://x.com", proxies={"http": proxy_url, "https": proxy_url},
+                     timeout=timeout, headers={"user-agent": "Mozilla/5.0"})
+        return True
+    except Exception:
+        return False
+
+
 def _x_deep_find_media_url(node: Any) -> tuple[str | None, bool]:
     """Duck-type an X DM attachment tree into (media_url, is_photo)."""
     if isinstance(node, dict):
@@ -655,11 +708,13 @@ async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
         elif ("ProxyError" in ename or "ProxyError" in repr(e)
               or "ConnectTimeout" in ename or "ReadTimeout" in ename
               or "ConnectError" in ename):
-            # Proxy outage: retry once direct (no proxy) so the relay survives.
-            # The bridge already runs direct; this matches it.
-            logger.warning(f"[DirectForward/X] self-DM conversation {conversation_id} "
-                           f"fetch failed via proxy ({ename}: {e!r}) — retrying direct once. "
-                           f"If this persists, check DIRECT_FORWARD_PROXY (expired/blocked?).")
+            # Proxy outage: arm the breaker (logs ONE actionable warning per
+            # outage, re-probed every 30 min) and retry this fetch direct so
+            # the current poll still delivers. Only blame the proxy when one
+            # is configured — with DIRECT_FORWARD_PROXY unset this is a plain
+            # network blip and the retry below is just a second attempt.
+            if getattr(config, "DIRECT_FORWARD_PROXY", None):
+                _note_proxy_failure(f"{ename}: {e!r}"[:160])
             try:
                 from twikit import Client as _XClient
                 direct = _XClient(language="en-US")
@@ -1002,11 +1057,21 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
     conv_id = f"{uid}-{uid}"
 
     x_proxy = getattr(config, "DIRECT_FORWARD_PROXY", None)
-    try:
-        client = XClient(language="en-US", proxy=x_proxy) if x_proxy else XClient(language="en-US")
-    except TypeError:  # older twikit without a proxy kwarg
-        logger.warning("[DirectForward/X] twikit has no proxy support — DIRECT_FORWARD_PROXY ignored for X")
-        client = XClient(language="en-US")
+
+    def _build_x_client(with_proxy: bool):
+        """Build an X client, honouring the proxy circuit breaker.
+
+        twikit < 2.x had no proxy kwarg; fall back to a direct client then."""
+        if with_proxy and x_proxy:
+            try:
+                return XClient(language="en-US", proxy=x_proxy)
+            except TypeError:  # older twikit without a proxy kwarg
+                logger.warning("[DirectForward/X] twikit has no proxy support — "
+                               "DIRECT_FORWARD_PROXY ignored for X")
+        return XClient(language="en-US")
+
+    client_uses_proxy = bool(x_proxy)
+    client = _build_x_client(client_uses_proxy)
     try:
         client.set_cookies(cookies)
     except Exception as e:
@@ -1039,6 +1104,32 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
 
     while True:
         try:
+            # Proxy circuit breaker: while it is open the poll runs direct (no
+            # proxy) instead of paying a failed CONNECT every 5 minutes. When
+            # the 30-minute window expires, probe the proxy once; a renewed
+            # subscription flips the worker back to proxied polls with no
+            # restart, a still-dead endpoint re-arms the window silently.
+            if x_proxy and client_uses_proxy != _proxy_usable():
+                want_proxy = _proxy_usable()
+                if want_proxy:
+                    ok = await asyncio.get_event_loop().run_in_executor(
+                        None, _probe_proxy, x_proxy)
+                    if ok:
+                        _note_proxy_success()
+                    else:
+                        _note_proxy_failure("health probe failed")
+                        want_proxy = False
+                if want_proxy != client_uses_proxy:
+                    client_uses_proxy = want_proxy
+                    client = _build_x_client(client_uses_proxy)
+                    try:
+                        if cookies:
+                            client.set_cookies(cookies)
+                    except Exception as e:
+                        logger.warning(f"[DirectForward/X] could not apply xcookies on rebuild: {e}")
+                    cipher = "with" if client_uses_proxy else "without"
+                    logger.info(f"[DirectForward/X] rebuilt X client {cipher} the proxy")
+
             # Live jar reload: pick up a mid-run cookie re-upload (admin
             # replace or yt-dlp write-back rotation) on the next poll. If the
             # twid changes, the account itself changed → rebuild the client and
@@ -1050,7 +1141,9 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                     logger.info(f"[DirectForward/X] xcookies switched account "
                                 f"({uid} -> {new_uid}) — rebuilding client")
                     uid, conv_id = new_uid, f"{new_uid}-{new_uid}"
-                    client = XClient(language="en-US", proxy=x_proxy) if x_proxy else XClient(language="en-US")
+                    if x_proxy and client_uses_proxy != _proxy_usable():
+                        client_uses_proxy = _proxy_usable()
+                    client = _build_x_client(client_uses_proxy)
                     client.set_cookies(fresh)
                     state = _load_state()
                     state.setdefault("x", {"last_id": "0"})
