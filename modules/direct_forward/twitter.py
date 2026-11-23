@@ -29,6 +29,49 @@ from .common import (
 
 logger = logging.getLogger(__name__)
 
+# twikit's x-client-transaction-id generator parses X's legacy responsive-web
+# shell for the `ondemand.s` chunk map. X rolled out the Rolldown frontend to
+# `/` and `/home` (Nov 2026), so both now return a shell WITHOUT that map and
+# every twikit request dies with "Couldn't get KEY_BYTE indices".
+# `https://x.com/i/jf/` still serves the legacy shell (ondemand chunk map +
+# twitter-site-verification), which is all the transaction init needs — the
+# same workaround the tweety/tweety#301 project uses. If the legacy shell ever
+# disappears too, fall back to the stock page so twikit's own error surfaces.
+_TWIKIT_TX_PATCHED = False
+
+
+def _patch_twikit_transaction_host() -> None:
+    """Point twikit's transaction bootstrap at x.com/i/jf/ (idempotent)."""
+    global _TWIKIT_TX_PATCHED
+    if _TWIKIT_TX_PATCHED:
+        return
+    try:
+        import bs4 as _bs4
+        import twikit.x_client_transaction.transaction as _txn
+        import twikit.x_client_transaction.utils as _txu
+
+        async def _handle_x_migration(session, headers):
+            r = await session.request(method="GET", url="https://x.com/i/jf/",
+                                      headers=headers)
+            page = _bs4.BeautifulSoup(r.content, "lxml")
+            if "ondemand.s" not in str(page):
+                # Legacy shell gone: let the stock flow do its best.
+                r = await session.request(method="GET", url="https://x.com",
+                                          headers=headers)
+                page = _bs4.BeautifulSoup(r.content, "lxml")
+            return page
+
+        # transaction.py did `from .utils import handle_x_migration`, so the
+        # name lives in BOTH modules — patch each.
+        _txu.handle_x_migration = _handle_x_migration
+        _txn.handle_x_migration = _handle_x_migration
+        _TWIKIT_TX_PATCHED = True
+        logger.info("[DirectForward/X] twikit transaction bootstrap pinned to "
+                    "x.com/i/jf (x.com/home dropped the legacy ondemand shell)")
+    except Exception as e:
+        logger.warning("[DirectForward/X] could not pin the twikit transaction "
+                       "bootstrap: %s", e)
+
 
 def _x_jar_cookies() -> dict:
     """Read the shared X cookie jar into a twikit-style {name: value} dict.
@@ -716,6 +759,7 @@ async def _x_fetch_self_messages(client, conversation_id: str) -> list[dict]:
             if getattr(config, "DIRECT_FORWARD_PROXY", None):
                 _note_proxy_failure(f"{ename}: {e!r}"[:160])
             try:
+                _patch_twikit_transaction_host()
                 from twikit import Client as _XClient
                 direct = _XClient(language="en-US")
                 fresh = _x_jar_cookies()
@@ -1062,6 +1106,7 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
         """Build an X client, honouring the proxy circuit breaker.
 
         twikit < 2.x had no proxy kwarg; fall back to a direct client then."""
+        _patch_twikit_transaction_host()
         if with_proxy and x_proxy:
             try:
                 return XClient(language="en-US", proxy=x_proxy)
@@ -1069,7 +1114,6 @@ async def _twitter_worker(bot_client, premium_client, chat_id: int, queue) -> No
                 logger.warning("[DirectForward/X] twikit has no proxy support — "
                                "DIRECT_FORWARD_PROXY ignored for X")
         return XClient(language="en-US")
-
     client_uses_proxy = bool(x_proxy)
     client = _build_x_client(client_uses_proxy)
     try:

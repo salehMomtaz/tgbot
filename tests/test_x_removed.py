@@ -168,6 +168,7 @@ def test_proxy_error_falls_back_direct():
     ok_payload = {"conversation_timeline": {"entries": [{"message": {"id": "5", "message_data": {"text": "hi"}}}]}}
     client = _FakeClient([_ProxyErr("410 Gone")])
     tw._x_jar_cookies = lambda: {"auth_token": "a", "twid": "u%3D1"}
+    tw._TWIKIT_TX_PATCHED = True  # stub twikit has no x_client_transaction
 
     import twikit as _twikit_real  # noqa: F401
     used_direct = {}
