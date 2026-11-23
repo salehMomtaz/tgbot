@@ -264,11 +264,30 @@ def test_probe_proxy_health():
     print("proxy-probe OK")
 
 
+def test_tx_host_patch_idempotent():
+    try:
+        import twikit  # noqa: F401
+    except Exception:
+        print("tx-host-patch SKIPPED (no twikit)")
+        return
+    tw = _load_twitter()
+    tw._TWIKIT_TX_PATCHED = False
+    tw._patch_twikit_transaction_host()
+    assert tw._TWIKIT_TX_PATCHED is True
+    tw._patch_twikit_transaction_host()  # second call is a no-op
+    import inspect
+    import twikit.x_client_transaction.transaction as txn
+    src = inspect.getsource(txn.handle_x_migration)
+    assert "i/jf" in src, "transaction bootstrap must read x.com/i/jf"
+    print("tx-host-patch OK")
+
+
 if __name__ == "__main__":
     test_removed_patterns()
     test_cookie_conflict_rebuilds_and_retries()
     test_proxy_breaker_dedupes_and_recovers()
     test_probe_proxy_health()
+    test_tx_host_patch_idempotent()
     # Proxy fallback needs twikit installed; skip gracefully offline.
     try:
         import twikit  # noqa: F401
